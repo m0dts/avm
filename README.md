@@ -36,12 +36,30 @@ This downloads AVM into `~/avm` and installs everything it needs. It also
 adds an **AVM** icon to the menu and desktop. Run it again with `--update` to
 get the latest version.
 
-**Windows 10/11 (64-bit):** download
-[install_avm.bat](https://raw.githubusercontent.com/m0dts/avm/main/install_avm.bat)
-(right-click → Save link as) and run it. It downloads AVM into
-`%USERPROFILE%\avm` and installs everything it needs, using radioconda if you
-have it. Then start AVM from the **AVM** shortcut. Run it again with `-Update`
-to get the latest version. No admin rights are needed.
+**Windows 10/11 (64-bit):**
+
+1. Download
+   [install_avm.bat](https://raw.githubusercontent.com/m0dts/avm/main/install_avm.bat)
+   (right-click → Save link as).
+2. Double-click it. If Windows SmartScreen warns about it, click
+   **More info → Run anyway**.
+3. Start AVM from the **AVM** shortcut on the desktop or in the Start menu.
+
+The installer needs no admin rights. It does the following:
+
+- downloads AVM into `%USERPROFILE%\avm`;
+- uses radioconda if you have it (or another conda), and otherwise installs
+  Miniforge just for you;
+- sets up a private Python environment with the SDR drivers for Pluto, Lime
+  and RTL-SDR, in `%LOCALAPPDATA%\AVM`;
+- uses your ffmpeg if it finds one (on PATH or in `C:\ffmpeg\bin`), and
+  otherwise downloads one.
+
+The first install downloads about 0.5 GB. Run `install_avm.bat -Update` to
+get the latest version of AVM.
+
+An RTL-SDR on Windows also needs its USB driver switched to WinUSB once, with
+[Zadig](https://zadig.akeo.ie).
 
 The first transmit or receive after installing takes a minute or two while
 the modem and codec are compiled for your machine. After that, starts are

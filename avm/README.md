@@ -31,11 +31,21 @@ around them. Name and version live in `avm_version.py`.
 
 ## Installing on a new machine
 
-Copy this folder over (e.g. to `~/avm`), then `bash install_avm.sh`: Ubuntu
-22.04+, Debian 12+ or Raspberry Pi OS, x86_64 or ARM64. It installs the apt
-packages, builds SoapyPlutoSDR if apt lacks it, makes `~/venv`, sets up USB
-access (RTL-SDR TV-driver blacklist, groups) and an AVM launcher. Safe to
-re-run; `bash install_avm.sh --check` only reports what's missing.
+Published at github.com/m0dts/avm: `python tools/make_release.py` builds
+`release/` (a git repo pushed to GitHub: `avm/` + both installers). Each
+installer on its own downloads AVM from GitHub; run from a copied release
+folder, it uses that copy instead. Both are safe to re-run: `--update` /
+`-Update` fetches the latest AVM, and `--check` / `-Check` only reports.
+
+- **Linux** (`install_avm.sh`): Ubuntu 22.04+, Debian 12+ or Raspberry Pi OS,
+  x86_64 or ARM64. AVM goes in `~/avm`. Installs the apt packages, builds
+  SoapyPlutoSDR if apt lacks it, makes `~/venv`, sets up USB access (RTL-SDR
+  TV-driver blacklist, groups) and an AVM launcher.
+- **Windows** (`install_avm.bat`, which runs `install_avm_windows.ps1`): AVM
+  goes in `%USERPROFILE%\avm`. Uses radioconda / any conda, else installs
+  Miniforge. Builds a conda-forge env in `%LOCALAPPDATA%\AVM\env`. Uses an
+  existing ffmpeg, else downloads one. Writes `AVM.bat` plus Desktop and
+  Start-menu shortcuts. No admin rights needed.
 
 ## Raspberry Pi (rob@192.168.1.36)
 
