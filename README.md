@@ -36,9 +36,12 @@ This downloads AVM into `~/avm` and installs everything it needs. It also
 adds an **AVM** icon to the menu and desktop. Run it again with `--update` to
 get the latest version.
 
-**Windows 10/11 (64-bit):** download this repository (Code → Download ZIP),
-unzip it, and run `install_avm.bat`. Then start AVM from the **AVM** shortcut.
-No admin rights are needed.
+**Windows 10/11 (64-bit):** download
+[install_avm.bat](https://raw.githubusercontent.com/m0dts/avm/main/install_avm.bat)
+(right-click → Save link as) and run it. It downloads AVM into
+`%USERPROFILE%\avm` and installs everything it needs, using radioconda if you
+have it. Then start AVM from the **AVM** shortcut. Run it again with `-Update`
+to get the latest version. No admin rights are needed.
 
 The first transmit or receive after installing takes a minute or two while
 the modem and codec are compiled for your machine. After that, starts are

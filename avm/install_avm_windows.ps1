@@ -1,14 +1,19 @@
 # AVM installer for Windows 10/11 (64-bit). Run via install_avm.bat.
 #
-# No admin rights needed; everything goes under %LOCALAPPDATA%\AVM:
-#   1. conda: uses radioconda / Miniforge / Anaconda if present, else
-#      installs Miniforge (just for this user)
+# On a new PC, install_avm.bat on its own is enough: it fetches this script,
+# which downloads AVM from GitHub into %USERPROFILE%\avm.
+#
+# No admin rights needed; everything else goes under %LOCALAPPDATA%\AVM:
+#   0. AVM itself: from GitHub, unless this script sits in / beside an AVM
+#      folder already (a copied release folder). -Update fetches the latest.
+#   1. conda: uses radioconda (preferred) / Miniforge / Anaconda if present,
+#      else installs Miniforge (just for this user)
 #   2. a private Python environment (conda-forge): numpy, scipy, numba, PyQt5,
 #      pyqtgraph, opencv, av, sounddevice, SoapySDR + Pluto / Lime / RTL modules
 #   3. ffmpeg: uses one already on PATH or in C:\ffmpeg\bin, else downloads it
 #   4. AVM.bat launcher in the AVM folder + Desktop and Start-menu shortcuts
 # Safe to re-run: done steps are skipped. "install_avm.bat -Check" only reports.
-param([switch]$Check)
+param([switch]$Check, [switch]$Update)
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with the progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -18,10 +23,15 @@ function Warn($m) { Write-Host "!! $m" -ForegroundColor Yellow }
 function Die($m)  { Write-Host "XX $m" -ForegroundColor Red; exit 1 }
 
 # ---------------------------------------------------------------- where things are
+$repo = if ($env:AVM_REPO) { $env:AVM_REPO } else { "m0dts/avm" }
+$branch = if ($env:AVM_BRANCH) { $env:AVM_BRANCH } else { "main" }
+# AVM beside this script (a copied release folder: .\ or .\avm), else
+# %USERPROFILE%\avm (or AVM_INSTALL_DIR), fetched from GitHub if not there yet
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$avm = $here
-if (-not (Test-Path "$avm\touch_gui.py") -and (Test-Path "$avm\avm\touch_gui.py")) { $avm = "$avm\avm" }
-if (-not (Test-Path "$avm\touch_gui.py")) { Die "touch_gui.py not found next to this installer (or in .\avm)." }
+if (Test-Path "$here\touch_gui.py") { $avm = $here }
+elseif (Test-Path "$here\avm\touch_gui.py") { $avm = "$here\avm" }
+elseif ($env:AVM_INSTALL_DIR) { $avm = $env:AVM_INSTALL_DIR }
+else { $avm = Join-Path $env:USERPROFILE "avm" }
 if (-not [Environment]::Is64BitOperatingSystem) { Die "AVM needs 64-bit Windows (numba has no 32-bit builds)." }
 $home_ = Join-Path $env:LOCALAPPDATA "AVM"
 $envDir = Join-Path $home_ "env"
@@ -30,14 +40,44 @@ Write-Host "AVM folder : $avm"
 Write-Host "Installs to: $home_"
 New-Item -ItemType Directory -Force $home_ | Out-Null
 
+# ---------------------------------------------------------------- 0. AVM from GitHub
+Say "0. AVM program files"
+if ((Test-Path "$avm\touch_gui.py") -and -not $Update) {
+    Write-Host "present ($avm); -Update fetches the latest from GitHub"
+} elseif ($Check) {
+    Write-Host "would download github.com/$repo ($branch) into $avm"
+} else {
+    $url = if ($env:AVM_URL) { $env:AVM_URL } else { "https://github.com/$repo/archive/refs/heads/$branch.zip" }
+    $zip = Join-Path $env:TEMP "avm-download.zip"
+    $tmp = Join-Path $env:TEMP "avm-download"
+    Write-Host "downloading $url"
+    try { Invoke-WebRequest $url -OutFile $zip } catch { Die "download failed: $url ($($_.Exception.Message))" }
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    Expand-Archive $zip -DestinationPath $tmp
+    $src = Get-ChildItem $tmp -Recurse -Filter touch_gui.py | Select-Object -First 1
+    if (-not $src) { Die "the download has no touch_gui.py ($url)" }
+    # copy over the top: settings live in the user profile, gui_logs\ is kept
+    New-Item -ItemType Directory -Force $avm | Out-Null
+    Copy-Item -Path (Join-Path $src.DirectoryName "*") -Destination $avm -Recurse -Force
+    Remove-Item -Recurse -Force $tmp; Remove-Item $zip
+    Write-Host "installed AVM into $avm"
+}
+if (-not (Test-Path "$avm\touch_gui.py") -and -not $Check) { Die "touch_gui.py not found in $avm." }
+
 # ---------------------------------------------------------------- 1. conda
 Say "1. conda"
+# radioconda first (an SDR-focused conda: often already there on a radio PC),
+# wherever its installer put it; then any other conda, then conda on PATH
 $condaCandidates = @(
-    "$env:ProgramData\radioconda", "$env:USERPROFILE\radioconda",
+    "$env:ProgramData\radioconda", "$env:USERPROFILE\radioconda", "$env:LOCALAPPDATA\radioconda",
+    "$env:LOCALAPPDATA\Programs\radioconda", "C:\radioconda",
     "$env:USERPROFILE\miniforge3", "$env:LOCALAPPDATA\miniforge3", "$env:ProgramData\miniforge3",
     "$home_\miniforge3", "$env:USERPROFILE\anaconda3", "$env:USERPROFILE\miniconda3",
     "$env:ProgramData\anaconda3", "$env:ProgramData\miniconda3")
+$onPath = Get-Command conda.exe -ErrorAction SilentlyContinue
+if ($onPath) { $condaCandidates += (Split-Path -Parent (Split-Path -Parent $onPath.Source)) }
 $condaRoot = $condaCandidates | Where-Object { Test-Path "$_\Scripts\conda.exe" } | Select-Object -First 1
+if ($condaRoot -and $condaRoot -like "*radioconda*") { Write-Host "radioconda found" }
 if ($condaRoot) {
     Write-Host "using $condaRoot"
 } elseif ($Check) {
