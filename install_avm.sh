@@ -2,10 +2,17 @@
 # AVM installer for Ubuntu (22.04+), Debian (12+) and Raspberry Pi OS
 # (bookworm/trixie), on x86_64 or ARM64.
 #
-#   cd ~/avm && bash install_avm.sh          # install / update everything
-#   bash install_avm.sh --check              # only report what's missing
+# On a new machine, just this (downloads AVM from GitHub into ~/avm):
+#   wget https://raw.githubusercontent.com/m0dts/avm/main/install_avm.sh
+#   bash install_avm.sh
+#
+#   bash install_avm.sh --update     # also fetch the latest AVM from GitHub
+#   bash install_avm.sh --check      # only report what's missing
+#   (AVM_INSTALL_DIR=/some/dir to put AVM elsewhere than ~/avm)
 #
 # What it does (each step is skipped if already done; safe to re-run):
+#   0. AVM itself: from GitHub, unless this script sits in / beside an AVM
+#      folder already (a copied release folder)
 #   1. apt packages: Python libs, Qt5, SoapySDR + Lime and RTL-SDR modules,
 #      libiio, ffmpeg (with Opus and Codec2), arecord, pw-cat, v4l2-ctl
 #   2. SoapyPlutoSDR: from apt if offered, else built from source
@@ -14,12 +21,29 @@
 #   5. desktop launcher (menu + desktop icon) for the touch GUI
 # Then it checks every module imports and lists the radios Soapy can see.
 set -u
-AVM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# run from a release folder: the AVM files are in ./avm beside this script
-[ ! -f "$AVM_DIR/touch_gui.py" ] && [ -f "$AVM_DIR/avm/touch_gui.py" ] && AVM_DIR="$AVM_DIR/avm"
-VENV="${AVM_VENV:-$HOME/venv}"
+AVM_REPO="${AVM_REPO:-m0dts/avm}"
+AVM_BRANCH="${AVM_BRANCH:-main}"
 CHECK_ONLY=0
-[ "${1:-}" = "--check" ] && CHECK_ONLY=1
+UPDATE=0
+for a in "$@"; do
+    case "$a" in
+        --check) CHECK_ONLY=1 ;;
+        --update) UPDATE=1 ;;
+        *) echo "unknown option $a (use --check or --update)"; exit 1 ;;
+    esac
+done
+# Where AVM is: beside this script (a copied release folder: ./ or ./avm),
+# else ~/avm (or AVM_INSTALL_DIR), fetched from GitHub if not there yet.
+SCRIPT_DIR=""
+[ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ] && SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/touch_gui.py" ]; then
+    AVM_DIR="$SCRIPT_DIR"
+elif [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/avm/touch_gui.py" ]; then
+    AVM_DIR="$SCRIPT_DIR/avm"
+else
+    AVM_DIR="${AVM_INSTALL_DIR:-$HOME/avm}"
+fi
+VENV="${AVM_VENV:-$HOME/venv}"
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*"; }
@@ -41,9 +65,36 @@ grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null && IS_PI=1
 echo "System: $PRETTY_NAME, $(uname -m)$([ $IS_PI = 1 ] && echo ', Raspberry Pi')"
 echo "AVM:    $AVM_DIR"
 echo "venv:   $VENV"
-[ -f "$AVM_DIR/touch_gui.py" ] || die "Run this from the AVM folder (touch_gui.py not found in $AVM_DIR)."
 [ "$(id -u)" = 0 ] && die "Run as your normal user, not root (it uses sudo where needed)."
 SUDO=sudo
+
+# ---------------------------------------------------------------- 0. AVM from GitHub
+say "0. AVM program files"
+if [ -f "$AVM_DIR/touch_gui.py" ] && [ $UPDATE = 0 ]; then
+    echo "present ($AVM_DIR); --update fetches the latest from GitHub"
+elif [ $CHECK_ONLY = 1 ]; then
+    echo "would download github.com/$AVM_REPO ($AVM_BRANCH) into $AVM_DIR"
+else
+    URL="${AVM_URL:-https://github.com/$AVM_REPO/archive/refs/heads/$AVM_BRANCH.tar.gz}"
+    TMP="$(mktemp -d)"
+    echo "downloading $URL"
+    if command -v wget >/dev/null; then
+        wget -q -O "$TMP/avm.tar.gz" "$URL"
+    elif command -v curl >/dev/null; then
+        curl -fsSL -o "$TMP/avm.tar.gz" "$URL"
+    else
+        $SUDO apt-get install -y wget </dev/null >/dev/null && wget -q -O "$TMP/avm.tar.gz" "$URL"
+    fi || die "download failed: $URL"
+    tar -xzf "$TMP/avm.tar.gz" -C "$TMP" || die "couldn't unpack the download"
+    SRC="$(find "$TMP" -maxdepth 3 -name touch_gui.py -printf '%h\n' | head -n 1)"
+    [ -n "$SRC" ] || die "the download has no touch_gui.py ($URL)"
+    # copy over the top: settings live in ~/.config, logs in gui_logs/ are kept
+    mkdir -p "$AVM_DIR"
+    cp -a "$SRC"/. "$AVM_DIR"/ || die "couldn't copy into $AVM_DIR"
+    rm -rf "$TMP"
+    echo "installed AVM into $AVM_DIR"
+fi
+[ -f "$AVM_DIR/touch_gui.py" ] || [ $CHECK_ONLY = 1 ] || die "touch_gui.py not found in $AVM_DIR."
 
 # numba (the modem's and codec's compiler) only exists for 64-bit systems
 if [ "$(getconf LONG_BIT)" != 64 ]; then
