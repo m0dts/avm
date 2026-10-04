@@ -38,12 +38,18 @@ get the latest version.
 
 **Windows 10/11 (64-bit):**
 
-1. Download
-   [install_avm.bat](https://raw.githubusercontent.com/m0dts/avm/main/install_avm.bat)
-   (right-click → Save link as).
-2. Double-click it. If Windows SmartScreen warns about it, click
-   **More info → Run anyway**.
+1. Open **PowerShell**: Start menu → type `powershell` → Enter.
+2. Paste this line and press Enter:
+
+   ```powershell
+   irm https://raw.githubusercontent.com/m0dts/avm/main/avm/install_avm_windows.ps1 -OutFile $env:TEMP\install_avm.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\install_avm.ps1
+   ```
+
 3. Start AVM from the **AVM** shortcut on the desktop or in the Start menu.
+
+Or download this repository instead (green **Code** button → **Download
+ZIP**), unzip it and double-click `install_avm.bat`. If Windows SmartScreen
+warns, click **More info → Run anyway**.
 
 The installer needs no admin rights. It does the following:
 
@@ -55,8 +61,9 @@ The installer needs no admin rights. It does the following:
 - uses your ffmpeg if it finds one (on PATH or in `C:\ffmpeg\bin`), and
   otherwise downloads one.
 
-The first install downloads about 0.5 GB. Run `install_avm.bat -Update` to
-get the latest version of AVM.
+The first install downloads about 0.5 GB. To get the latest version of AVM
+later, run the same line with ` -Update` added to the end, or run
+`install_avm.bat -Update`.
 
 An RTL-SDR on Windows also needs its USB driver switched to WinUSB once, with
 [Zadig](https://zadig.akeo.ie).
