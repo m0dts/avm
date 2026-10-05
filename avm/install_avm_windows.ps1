@@ -13,7 +13,7 @@
 #   3. ffmpeg: uses one already on PATH or in C:\ffmpeg\bin, else downloads it
 #   4. AVM.bat launcher in the AVM folder + Desktop and Start-menu shortcuts
 # Safe to re-run: done steps are skipped. "install_avm.bat -Check" only reports.
-param([switch]$Check, [switch]$Update)
+param([switch]$Check, [switch]$Update, [switch]$Restart)
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with the progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -61,6 +61,17 @@ if ((Test-Path "$avm\touch_gui.py") -and -not $Update) {
     Copy-Item -Path (Join-Path $src.DirectoryName "*") -Destination $avm -Recurse -Force
     Remove-Item -Recurse -Force $tmp; Remove-Item $zip
     Write-Host "installed AVM into $avm"
+    # Carry on with the installer just downloaded, not this (older) copy:
+    # otherwise its newer steps (e.g. fetching an ffmpeg with Codec2) would
+    # only run next time. No -Update for it, so this happens once.
+    # (Even when that's this same file: PowerShell has the old text in memory.)
+    $newer = Join-Path $avm "install_avm_windows.ps1"
+    if (Test-Path $newer) {
+        Write-Host "continuing with the updated installer..."
+        if ($Restart) { & powershell -NoProfile -ExecutionPolicy Bypass -File $newer -Restart }
+        else { & powershell -NoProfile -ExecutionPolicy Bypass -File $newer }
+        exit $LASTEXITCODE
+    }
 }
 if (-not (Test-Path "$avm\touch_gui.py") -and -not $Check) { Die "touch_gui.py not found in $avm." }
 
@@ -225,5 +236,12 @@ if (Test-Path $py) {
 }
 Say "Done"
 Write-Host "Start AVM from the 'AVM' shortcut (or AVM.bat in $avm)."
+if ($Restart -and (Test-Path $bat)) {
+    # run from AVM's Update button: start AVM again, now fully up to date
+    Write-Host "restarting AVM..."
+    Start-Process -FilePath $bat -WorkingDirectory $avm -WindowStyle Minimized
+    Start-Sleep -Seconds 3
+    exit 0
+}
 Write-Host "The first TX/RX start compiles the modem and codec (a minute or two); later starts are quick."
 Write-Host "RTL-SDR on Windows needs the WinUSB driver (Zadig, zadig.akeo.ie) before it shows up."

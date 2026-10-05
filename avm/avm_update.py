@@ -17,6 +17,47 @@ REPO = os.environ.get("AVM_REPO", "m0dts/avm")
 BRANCH = os.environ.get("AVM_BRANCH", "main")
 SUBDIR = "avm/"  # the program files' folder in the repository
 UPDATE_CMD = "bash ~/avm/install_avm.sh --update"
+# files whose update means the installer itself should run again (it may
+# have new steps: packages, ffmpeg, drivers...)
+INSTALLER_FILES = ("install_avm.sh", "install_avm_windows.ps1", "install_avm.bat")
+
+
+def run_installer_then_restart(avm_dir=None):
+    """After a GUI update that changed an installer: start that installer in
+    a window of its own, which restarts AVM when done. Returns False if it
+    can't be shown (Linux with no terminal program): the caller then just
+    restarts AVM and asks for the installer to be run by hand."""
+    import shutil
+    import subprocess
+    avm_dir = avm_dir or os.path.dirname(os.path.abspath(__file__))
+    if sys.platform == "win32":
+        bat = os.path.join(avm_dir, "install_avm.bat")
+        if not os.path.exists(bat):
+            return False
+        # its own console window: "start" opens one whatever this process has
+        subprocess.Popen(["cmd", "/c", "start", "AVM update", bat, "-Restart"], cwd=avm_dir)
+        return True
+    # Linux: in a terminal, so sudo can ask for the password
+    script = os.path.join(avm_dir, "gui_logs", "update_then_restart.sh")
+    os.makedirs(os.path.dirname(script), exist_ok=True)
+    restart = (f'cd "{avm_dir}" && HF_RX_GUI_LOG="{avm_dir}/gui_logs/rx_session.log" '
+               f'nohup "{sys.executable}" touch_gui.py >/dev/null 2>&1 &')
+    with open(script, "w") as f:
+        f.write("\n".join([
+            "#!/bin/bash",
+            f'bash "{avm_dir}/install_avm.sh" --yes',
+            'echo; read -r -p "Press Enter to restart AVM " _',
+            restart,
+            ""]))
+    os.chmod(script, 0o755)
+    for term, args in (("x-terminal-emulator", ["-e", script]), ("lxterminal", ["-e", script]),
+                       ("xfce4-terminal", ["-e", script]), ("mate-terminal", ["-e", script]),
+                       ("qterminal", ["-e", script]), ("gnome-terminal", ["--", script]),
+                       ("konsole", ["-e", script]), ("xterm", ["-e", script])):
+        if shutil.which(term):
+            subprocess.Popen([term] + args, start_new_session=True)
+            return True
+    return False
 
 
 def _blob_sha(data):

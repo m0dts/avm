@@ -125,6 +125,14 @@ else
     cp -a "$SRC"/. "$AVM_DIR"/ || die "couldn't copy into $AVM_DIR"
     rm -rf "$TMP"
     echo "installed AVM into $AVM_DIR"
+    # Carry on with the installer just downloaded, not this (older) copy --
+    # bash has this one's text in memory (see the { } block), so its newer
+    # steps would only run next time. Without --update, so this happens once;
+    # --yes: the survey was already shown and answered.
+    if [ -f "$AVM_DIR/install_avm.sh" ]; then
+        echo "continuing with the updated installer..."
+        exec bash "$AVM_DIR/install_avm.sh" --yes
+    fi
 fi
 [ -f "$AVM_DIR/touch_gui.py" ] || [ $CHECK_ONLY = 1 ] || die "touch_gui.py not found in $AVM_DIR."
 

@@ -354,7 +354,7 @@ class TouchWindow(QtWidgets.QWidget):
         self.update_btn.setEnabled(False)
         self.app.processEvents()
         try:
-            avm_update.apply()
+            updated = avm_update.apply()
         except Exception as e:
             self.update_btn.setText("⬆ Update")
             self.update_btn.setEnabled(True)
@@ -362,6 +362,14 @@ class TouchWindow(QtWidgets.QWidget):
                                           f"Nothing was changed.\n\n{e}\n\nYou can also update with:\n"
                                           f"   {avm_update.UPDATE_CMD}")
             return
+        # The installer itself changed: run it (it may have new steps, e.g.
+        # an ffmpeg with Codec2) -- in its own window, which restarts AVM.
+        if any(f in avm_update.INSTALLER_FILES for f in updated):
+            if avm_update.run_installer_then_restart():
+                self.app.quit()
+                return
+            tw.notices().add("Update", "The installer was updated too: run it in a terminal to finish "
+                                       f"(bash {os.path.dirname(os.path.abspath(__file__))}/install_avm.sh)")
         # restart: the same program, arguments and environment, now updated
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
