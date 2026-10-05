@@ -7,9 +7,9 @@ digital OFDM modem 20 to 250 kHz wide.
 
 It's a complete station in one program, with a full-screen touch interface.
 It's built to run on a **Raspberry Pi 4 with a 7" touch screen**, which can
-transmit and receive at the same time. It also runs on an ordinary
-Ubuntu/Debian PC, and should run on Windows; see
-[Which platform?](#which-platform) before choosing.
+transmit and receive at the same time. It also runs on an ordinary 64-bit
+Linux PC (Ubuntu or Debian); see [Which platform?](#which-platform) before
+choosing.
 
 ## What it's for
 
@@ -112,8 +112,8 @@ mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync
 
 ## What you need
 
-- **A computer:** a Raspberry Pi 4, or any 64-bit PC with Ubuntu/Debian or
-  Windows 10/11. A faster CPU allows bigger video.
+- **A computer:** a Raspberry Pi 4, or any 64-bit PC running Ubuntu or
+  Debian Linux. A faster CPU allows bigger video.
 - **A radio (SDR):**
   - **ADALM-Pluto:** TX and RX, both at once from one Pluto.
   - **LimeSDR (USB or Mini):** TX or RX, but not both at once from one
@@ -139,9 +139,9 @@ DATV station, it has the right hardware (a Pi 4 with the 7" touch screen and
 a Pluto or LimeSDR). Just make a new SD card for AVM, and swap cards to
 switch between Portsdown and AVM.
 
-**Windows, or a Linux PC or distribution you've set up yourself, will likely
-need some work from you.** The installers handle the common cases, but every
-machine differs: other SDR software already installed, a different ffmpeg
+**A Linux PC or distribution you've set up yourself will likely need some
+work from you.** The installer handles the common cases, but every machine
+differs: other SDR software already installed, a different ffmpeg
 build, missing drivers, sound and camera setups. It isn't possible to
 support every combination, so on these, expect to sort out the odd problem
 yourself.
@@ -161,38 +161,6 @@ and anything it would install or change. Nothing is touched until you answer
 keeps SDR drivers your system already has, e.g. on DragonOS. It also adds an
 **AVM** icon to the menu and desktop, and an `avm` command. Run it again with
 `--update` to get the latest version, or `--check` to just see the report.
-
-**Windows 10/11 (64-bit):**
-
-1. Open **PowerShell**: Start menu → type `powershell` → Enter.
-2. Paste this line and press Enter:
-
-   ```powershell
-   irm https://raw.githubusercontent.com/m0dts/avm/main/avm/install_avm_windows.ps1 -OutFile $env:TEMP\install_avm.ps1; powershell -ExecutionPolicy Bypass -File $env:TEMP\install_avm.ps1
-   ```
-
-3. Start AVM from the **AVM** shortcut on the desktop or in the Start menu.
-
-Or download this repository instead (green **Code** button → **Download
-ZIP**), unzip it and double-click `install_avm.bat`. If Windows SmartScreen
-warns, click **More info → Run anyway**.
-
-The installer needs no admin rights. It does the following:
-
-- downloads AVM into `%USERPROFILE%\avm`;
-- uses radioconda if you have it (or another conda), and otherwise installs
-  Miniforge just for you;
-- sets up a private Python environment with the SDR drivers for Pluto, Lime
-  and RTL-SDR, in `%LOCALAPPDATA%\AVM`;
-- uses your ffmpeg if it finds one (on PATH or in `C:\ffmpeg\bin`), and
-  otherwise downloads one.
-
-The first install downloads about 0.5 GB. To get the latest version of AVM
-later, run the same line with ` -Update` added to the end, or run
-`install_avm.bat -Update`.
-
-An RTL-SDR on Windows also needs its USB driver switched to WinUSB once, with
-[Zadig](https://zadig.akeo.ie).
 
 The first transmit or receive after installing takes a minute or two while
 the modem and codec are compiled for your machine; on a slow CPU it can take
