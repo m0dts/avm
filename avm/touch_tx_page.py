@@ -260,6 +260,7 @@ class TxPage(QtWidgets.QWidget):
         self.gain.changed.connect(self._gain_changed)
 
         self.engine.sdr = self.radio.sdr
+        self.freq.set_radio(self.engine.sdr)
         self.engine.lime_port = self.lime_port.value()
         self.lime_port.setVisible(self.engine.sdr == "lime")
         self._apply_to_engine()
@@ -375,6 +376,12 @@ class TxPage(QtWidgets.QWidget):
     def set_radio(self, sdr):
         """'pluto' or 'lime' -- from the Radio picker."""
         self.radio.set_sdr(sdr)
+        self.freq.set_radio(sdr)
+        if not self.freq.in_range():
+            msg = (f"{self.freq.hz() / 1e6:g} MHz is outside the {tw.RADIO_NAMES.get(sdr, sdr)}'s "
+                   f"range -- set a new TX frequency")
+            self.status.setText(msg)
+            tw.notices().add("TX", msg)
         self.lime_port.setVisible(sdr == "lime")
         if sdr != self.engine.sdr:
             self.engine.sdr = sdr

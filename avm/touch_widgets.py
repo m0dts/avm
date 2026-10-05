@@ -410,6 +410,13 @@ class TextButton(QtWidgets.QPushButton):
             self.changed.emit(self._value)
 
 
+# Tuning range per radio, MHz. Pluto: AD9363 70-6000 with the common
+# firmware tweak (325-3800 stock). LimeSDR: LMS7002M via LimeSuite down to
+# 0.1 MHz (below ~30 MHz by NCO offset; the Mini is specified from 10 MHz).
+# RTL-SDR: R820T tuner range (no HF direct sampling here).
+FREQ_RANGE_MHZ = {"pluto": (70.0, 6000.0), "lime": (0.1, 3800.0), "rtlsdr": (24.0, 1766.0)}
+
+
 class FreqButton(QtWidgets.QPushButton):
     """Shows a frequency in MHz; tapping opens the keypad. Value in Hz."""
     changed = QtCore.pyqtSignal(int)
@@ -417,9 +424,20 @@ class FreqButton(QtWidgets.QPushButton):
     def __init__(self, title, hz, parent=None):
         super().__init__(parent)
         self._title = title
+        self._range = FREQ_RANGE_MHZ["pluto"]
+        self._radio = "PlutoSDR"
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.set_hz(hz)
         self.clicked.connect(self._edit)
+
+    def set_radio(self, sdr):
+        """Tuning range of this radio (FREQ_RANGE_MHZ) for keypad entries."""
+        self._range = FREQ_RANGE_MHZ.get(sdr, FREQ_RANGE_MHZ["pluto"])
+        self._radio = RADIO_NAMES.get(sdr, sdr)
+
+    def in_range(self, hz=None):
+        lo, hi = self._range
+        return lo <= (self._hz if hz is None else hz) / 1e6 <= hi
 
     def hz(self):
         return self._hz
@@ -432,12 +450,18 @@ class FreqButton(QtWidgets.QPushButton):
         d = KeypadDialog(self._title, f"{self._hz / 1e6:.4f}".rstrip("0").rstrip("."), self)
         if d.exec_():
             mhz = d.mhz()
-            # the Pluto (AD9363) tunes 325-3800 MHz (70-6000 with the common firmware tweak)
-            if mhz is not None and 70.0 <= mhz <= 6000.0:
-                hz = int(round(mhz * 1e6))
-                if hz != self._hz:
-                    self.set_hz(hz)
-                    self.changed.emit(hz)
+            if mhz is None:
+                return
+            hz = int(round(mhz * 1e6))
+            if not self.in_range(hz):
+                lo, hi = self._range
+                QtWidgets.QMessageBox.information(
+                    self, "Frequency", f"{mhz:g} MHz is outside the {self._radio}'s range "
+                                       f"({lo:g}-{hi:g} MHz).")
+                return
+            if hz != self._hz:
+                self.set_hz(hz)
+                self.changed.emit(hz)
 
 
 class Stepper(QtWidgets.QWidget):

@@ -348,6 +348,12 @@ class RxPage(QtWidgets.QWidget):
         """'pluto', 'lime' or 'rtlsdr' -- from the Radio picker. RX gain tops
         out at 61 dB on a LimeSDR, ~49 on an RTL-SDR, 73 on the Pluto."""
         self.radio.set_sdr(sdr)
+        self.freq.set_radio(sdr)
+        if not self.freq.in_range():
+            msg = (f"{self.freq.hz() / 1e6:g} MHz is outside the {tw.RADIO_NAMES.get(sdr, sdr)}'s "
+                   f"range -- set a new RX frequency")
+            self.status.setText(msg)
+            tw.notices().add("RX", msg)
         self.lime_port.setVisible(sdr == "lime")
         self.ppm.setVisible(sdr == "rtlsdr")
         self.gain.hi = {"lime": 61, "rtlsdr": 49}.get(sdr, 73)
