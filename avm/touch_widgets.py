@@ -154,7 +154,10 @@ def notices():
 # its output pipe closes as TX stops.
 _ERROR_RE = re.compile(r"\b[A-Za-z_]*(Error|Exception)\b|\bERROR\b|^XX ")
 _ERROR_IGNORE = ("Broken pipe", "Error muxing", "Error writing trailer", "Error closing file",
-                 "error code: -32", "[video-stats]", "Traceback (most recent call last)")
+                 "error code: -32", "[video-stats]", "Traceback (most recent call last)",
+                 # SoapySDR's Pluto driver looking for network Plutos while
+                 # opening: harmless with a USB Pluto, or no avahi-daemon
+                 'Unable to scan "ip"', "Avahi DNS-SD client")
 
 
 def error_line(line):
