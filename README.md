@@ -275,6 +275,13 @@ Notes:
 
 Both ends must use the same mode, width and modulation.
 
+If a radio or camera drops off USB while running (a loose cable, a device
+browning out), AVM stops that side, says which device went, and restarts
+it by itself once the device is back. If every USB device disappears at
+once, the computer's USB has failed: the title bar says so, and only a
+reboot brings it back. On a Raspberry Pi, use good short cables and a
+powered hub for power-hungry radios like the LimeSDR.
+
 Transmitting requires an appropriate licence (e.g. an amateur radio
 licence), and you must stay within your band and power limits.
 

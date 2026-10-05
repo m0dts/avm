@@ -30,6 +30,11 @@ import touch_widgets as tw
 PREVIEW_PATH = preview_shm.default_path() + "_tx"
 SOURCES = {"test": "Test pattern", "device": "Camera + mic"}  # engine source -> label
 TX_QUEUE_DEPTH = 1  # fragments built ahead of the radio (see _apply_to_engine)
+# Waveform RMS as a fraction of DAC full scale. OFDM I/Q peaks run up to
+# ~15 dB above RMS (measured, mode VU 80 kHz): 0.2 touches full scale on
+# ~0.001% of samples, clipping noise 60 dB below the signal -- +6 dB over the
+# old 0.1 with no visible distortion. (0.25: +8 dB, noise 43 dB down.)
+TX_AMPLITUDE = 0.2
 
 
 class _TxEngine(media_tx_gui.MediaTxWindow):
@@ -278,7 +283,12 @@ class TxPage(QtWidgets.QWidget):
         e.rf_freq.setText(str(self.freq.hz()))
         e.mode.setCurrentText(self.mode.value())
         e.occupancy.setCurrentText(self.bw.value())
-        e.lo_offset_hz.setValue(tw.lo_offset_hz(self.bw.value()))
+        # TX tunes its LO on the signal itself, for every radio: the LO
+        # leakage then lands on the centre carrier, which every mode leaves
+        # empty (VU's notch; A-D skip DC), and TX saves the per-sample
+        # baseband shift. RX keeps its own offset (tw.lo_offset_hz).
+        e.lo_offset_hz.setValue(0)
+        e.amplitude.setValue(TX_AMPLITUDE)
         e.pluto_sample_rate.setCurrentText(str(tw.sdr_rate(self.bw.value())))
         e.fragment_size.setValue(tw.fragment_size(self.bw.value()))
         # One fragment built ahead, not two: each queued fragment is a whole

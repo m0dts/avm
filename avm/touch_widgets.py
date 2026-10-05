@@ -5,6 +5,7 @@ buttons, list pickers, a frequency keypad and a gain stepper. Everything
 scales with the window height (scale 1.0 = 480 px), so the same layout
 works on a 1080p monitor.
 """
+import os
 import shutil
 import subprocess
 import threading
@@ -492,6 +493,34 @@ def saved_bandwidth(value):
 
 
 RADIO_NAMES = {"pluto": "PlutoSDR", "lime": "LimeSDR", "rtlsdr": "RTL-SDR"}
+# USB vendor:product IDs per radio, for the USB watchdog (touch_gui). A radio
+# that isn't on USB at all (e.g. a Pluto on the network) simply isn't watched.
+USB_IDS = {
+    "pluto": {("0456", "b673")},                      # ADALM-Pluto
+    "lime": {("1d50", "6108"), ("0403", "601f")},     # LimeSDR-USB; LimeSDR Mini (FTDI FT601)
+    "rtlsdr": {("0bda", "2838"), ("0bda", "2832")},   # RTL2832U dongles
+}
+
+
+def usb_devices():
+    """(vendor, product) IDs of every USB device attached now, root hubs
+    excluded; None where that can't be read (not Linux). Reads sysfs only --
+    microseconds, fine to poll."""
+    base = "/sys/bus/usb/devices"
+    if not os.path.isdir(base):
+        return None
+    out = set()
+    for d in os.listdir(base):
+        try:
+            with open(os.path.join(base, d, "idVendor")) as f:
+                vid = f.read().strip()
+            with open(os.path.join(base, d, "idProduct")) as f:
+                pid = f.read().strip()
+        except OSError:
+            continue  # interfaces, or a device going away mid-read
+        if vid != "1d6b":  # Linux Foundation: the root hubs themselves
+            out.add((vid, pid))
+    return out
 RX_ONLY_RADIOS = ("rtlsdr",)
 RTL_SAMPLE_RATE = 1024000  # an RTL-SDR rate (0.9-3.2 MS/s) that fits every bandwidth + LO offset
 

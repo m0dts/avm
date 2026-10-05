@@ -18,6 +18,7 @@ start/stop button into RESTART TO APPLY. Settings are remembered in
 import json
 import os
 import sys
+import time
 
 # One BLAS thread per process (see hf_ofdm_tx.py); before numpy loads.
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
@@ -42,6 +43,8 @@ from touch_rx_page import RxPage
 from touch_tx_page import TxPage
 
 CPU_UPDATE_MS = 2000
+USB_WATCH_MS = 2000   # USB watchdog poll (sysfs only: microseconds)
+USB_RESUME_S = 4.0    # a device must be back this long before TX/RX restarts
 
 
 def _cpu_times():
@@ -138,6 +141,19 @@ class TouchWindow(QtWidgets.QWidget):
             page.setStyleSheet(tw.accent_stylesheet(accent))
 
         self._show_view(self.view.value() or "rx")
+        # USB watchdog: a radio or camera dropping off USB (a bad cable, a
+        # browning-out device, or a Pi whose USB hub has crashed outright)
+        # stops TX/RX cleanly with a message, and restarts it when the device
+        # is back; losing every USB device at once is shown in the title bar.
+        self._usb_seen = False   # any USB device seen since start
+        self._usb_lost = False   # all of them gone: the USB system itself failed
+        for page in (self.tx, self.rx):
+            page._usb = {"watch": None, "resume": None, "back": None}
+            # the user's own START/STOP cancels a pending automatic restart
+            page.run.clicked.connect(lambda *_, p=page: p._usb.update(resume=None, back=None))
+        self._usb_timer = QtCore.QTimer(self)
+        self._usb_timer.timeout.connect(self._usb_tick)
+        self._usb_timer.start(USB_WATCH_MS)
         self._update_indicator()
 
     def _update_cpu(self):
@@ -148,6 +164,54 @@ class TouchWindow(QtWidgets.QWidget):
                 self.cpu.setText(f"CPU {100 * busy / total:.0f}%")
         self._cpu_last = now
 
+    def _usb_needs(self, page, devs):
+        """[(name, attached now)] for the USB devices this page uses."""
+        sdr = page.engine.sdr
+        need = [(tw.RADIO_NAMES.get(sdr, sdr), bool(tw.USB_IDS.get(sdr, set()) & devs))]
+        if page is self.tx and page._source_key() == "device":
+            cam = page.camera.value() or ""
+            if cam.startswith("/dev/"):
+                need.append(("Camera", os.path.exists(cam)))
+        return need
+
+    def _usb_tick(self):
+        devs = tw.usb_devices()
+        if devs is None:
+            return  # not Linux: nothing to watch
+        if devs:
+            self._usb_seen = True
+        lost = self._usb_seen and not devs
+        if lost != self._usb_lost:
+            self._usb_lost = lost
+            self._update_indicator()
+        for page in (self.tx, self.rx):
+            st = page._usb
+            need = self._usb_needs(page, devs)
+            attached = {name for name, ok in need if ok}
+            side = "TX" if page is self.tx else "RX"
+            if page.is_running():
+                st["resume"] = st["back"] = None
+                if st["watch"] is None:
+                    st["watch"] = attached  # watch only what was there at start
+                gone = sorted(st["watch"] - attached)
+                if gone:
+                    page.stop()
+                    page.status.setText(f"{' and '.join(gone)} disconnected from USB -- "
+                                        f"{side} restarts when {'it is' if len(gone) == 1 else 'they are'} back")
+                    st["watch"], st["resume"] = None, set(gone)
+            else:
+                st["watch"] = None
+                if st["resume"]:
+                    if st["resume"] <= attached:
+                        st["back"] = st["back"] or time.monotonic()
+                        if time.monotonic() - st["back"] >= USB_RESUME_S:
+                            st["resume"] = st["back"] = None
+                            page.start()
+                            if page.is_running():
+                                st["watch"] = attached  # watched from the start
+                    else:
+                        st["back"] = None
+
     def _show_view(self, which):
         self.pages.setCurrentWidget(self.tx if which == "tx" else self.rx)
         self.view.setStyleSheet(tw.accent_stylesheet(tw.TX_ACCENT if which == "tx" else tw.RX_ACCENT))
@@ -155,6 +219,9 @@ class TouchWindow(QtWidgets.QWidget):
 
     def _update_indicator(self):
         parts = []
+        if getattr(self, "_usb_lost", False):
+            parts.append(f"<span style='color:{tw.STOP}'>⚠ USB stopped responding: reboot "
+                         f"(check cables / power)</span>")
         if self.tx.is_running():
             parts.append(f"<span style='color:{tw.STOP}'>● ON AIR</span>")
         if self.rx.is_running():
