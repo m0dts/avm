@@ -63,6 +63,7 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
     span_hz = 0.0
     sdr = "pluto"
     rtl_ppm = 0.0
+    lime_port = "Auto"
 
     def _build_rx_cmd(self):
         cmd = super()._build_rx_cmd()
@@ -74,6 +75,8 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
             cmd += ["--sdr", self.sdr, "--gain-file", tw.gain_file_path("rx")]
         if self.sdr == "rtlsdr" and self.rtl_ppm:
             cmd += ["--sdr-ppm", f"{self.rtl_ppm:g}"]
+        if self.sdr == "lime" and self.lime_port != "Auto":
+            cmd += ["--sdr-antenna", self.lime_port]
         return cmd
 
     def _flush_log_buffer(self):
@@ -168,14 +171,19 @@ class RxPage(QtWidgets.QWidget):
         self.ppm = tw.Stepper(-200, 200, 1, int(s_get(settings, "rx_rtl_ppm", 60)), " ppm")
         self.engine.rtl_ppm = float(self.ppm.value())
         self.radio.radio_changed.connect(self.set_radio)
-        rows = [("Freq", tw.freq_radio_row(self.freq, self.radio)), ("Mode", self.mode), ("kHz", self.bw), ("Modul.", self.mod),
-                ("RX gain", self.gain), ("PPM", self.ppm), ("Ref level", ref_row), ("Audio", self.audio_out)]
+        # LimeSDR RX port (LNAL/LNAW/LNAH or Auto): only shown with the LimeSDR
+        self.lime_port = tw.lime_port_picker("rx", s_get(settings, "rx_lime_port", "Auto"))
+        self.engine.lime_port = self.lime_port.value()
+        self.lime_port.changed.connect(self._lime_port_changed)
+        # the radio on its own row (the RX column is too narrow to share Freq's),
+        # with the radio's own extra: the LimeSDR port or the RTL-SDR's PPM
+        rows = [("Freq", self.freq),
+                ("Radio", tw.freq_radio_row(self.radio, self.lime_port, self.ppm)),
+                ("Mode", self.mode), ("kHz", self.bw), ("Modul.", self.mod),
+                ("RX gain", self.gain), ("Ref level", ref_row), ("Audio", self.audio_out)]
         for r, (label, w) in enumerate(rows):
-            lab = tw.row_label(label)
-            grid.addWidget(lab, r, 0)
+            grid.addWidget(tw.row_label(label), r, 0)
             grid.addWidget(w, r, 1)
-            if w is self.ppm:
-                self._ppm_label = lab
         grid.setColumnStretch(1, 1)
         grid.setVerticalSpacing(4)
         right.addLayout(grid)
@@ -272,7 +280,15 @@ class RxPage(QtWidgets.QWidget):
                       rx_ref=self.ref.value() if hasattr(self, "ref") else -25,
                       rx_ref_auto=self.ref_auto.isChecked() if hasattr(self, "ref_auto") else True,
                       rx_sdr=self.engine.sdr,
-                      rx_rtl_ppm=self.ppm.value() if hasattr(self, "ppm") else 60)
+                      rx_rtl_ppm=self.ppm.value() if hasattr(self, "ppm") else 60,
+                      rx_lime_port=self.lime_port.value() if hasattr(self, "lime_port") else "Auto")
+
+    def _lime_port_changed(self, port):
+        """Applied when RX (re)starts."""
+        self.engine.lime_port = port
+        self._save()
+        if self.is_running() and self.engine.sdr == "lime":
+            self.run.set_state("pending")
 
     def _ppm_changed(self, *_):
         """Applied when RX (re)starts: mark a running RTL RX pending."""
@@ -332,8 +348,8 @@ class RxPage(QtWidgets.QWidget):
         """'pluto', 'lime' or 'rtlsdr' -- from the Radio picker. RX gain tops
         out at 61 dB on a LimeSDR, ~49 on an RTL-SDR, 73 on the Pluto."""
         self.radio.set_sdr(sdr)
-        for w in (self.ppm, self._ppm_label):
-            w.setVisible(sdr == "rtlsdr")
+        self.lime_port.setVisible(sdr == "lime")
+        self.ppm.setVisible(sdr == "rtlsdr")
         self.gain.hi = {"lime": 61, "rtlsdr": 49}.get(sdr, 73)
         self.gain.set_value(self.gain.value(), emit=True)
         if force or sdr != self.engine.sdr:

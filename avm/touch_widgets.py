@@ -560,8 +560,9 @@ class RadioPicker(Picker):
             self.radio_changed.emit(sdr)
 
 
-def freq_radio_row(freq, radio):
-    """Freq button and radio picker sharing one row."""
+def freq_radio_row(freq, radio, port=None):
+    """Freq button and radio picker sharing one row (plus the LimeSDR port
+    picker, shown only while the LimeSDR is the radio)."""
     w = QtWidgets.QWidget()
     w.setObjectName("seg")
     lay = QtWidgets.QHBoxLayout(w)
@@ -569,7 +570,21 @@ def freq_radio_row(freq, radio):
     lay.setSpacing(4)
     lay.addWidget(freq, 3)
     lay.addWidget(radio, 2)
+    if port is not None:
+        lay.addWidget(port, 2)
     return w
+
+
+# LimeSDR antenna ports by LimeSuite name. "Auto" picks by frequency (see
+# pluto_soapy_sink._lime_configure); a port the board lacks (e.g. LNAL on a
+# LimeSDR Mini) falls back to Auto at start.
+LIME_PORTS = {"tx": ["Auto", "BAND1", "BAND2"], "rx": ["Auto", "LNAL", "LNAW", "LNAH"]}
+
+
+def lime_port_picker(kind, current):
+    """Picker for the LimeSDR's TX or RX antenna port ("tx" / "rx")."""
+    items = LIME_PORTS[kind]
+    return Picker(f"LimeSDR {kind.upper()} port", items, current if current in items else "Auto")
 
 
 class LiveGain:

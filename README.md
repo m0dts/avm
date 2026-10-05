@@ -53,7 +53,9 @@ only and says so.
 7. **Audio:** Codec2 (3.2 kbps, leaves more room for video) or Opus (better
    quality).
 8. **FPS:** video frame rate.
-9. **Freq and radio:** the transmit frequency, and Pluto or LimeSDR.
+9. **Freq and radio:** the transmit frequency, and Pluto or LimeSDR. With a
+   LimeSDR, a third button picks its antenna port (Auto, BAND1 or BAND2).
+   On a LimeSDR Mini, try the other band if there's no RF output.
 10. **TX gain:** output level. It changes live while on air.
 11. **Mode, kHz and Modul.:** how the signal is built. A–D are robust
     DRM-style modes, and VU is for VHF/UHF mobile and tropo. Widths go from
@@ -81,7 +83,8 @@ only and says so.
    signal. The small notch in the middle is deliberate (an empty centre
    carrier), and it's handy for tuning.
 5. **Freq and radio:** the receive frequency, and Pluto, LimeSDR or RTL-SDR.
-   An RTL-SDR also gets a PPM row to correct its crystal.
+   An RTL-SDR also gets a PPM row to correct its crystal, and a LimeSDR a
+   port button (Auto, LNAL, LNAW or LNAH).
 6. **Mode, kHz and Modul.:** these must match the transmitter.
 7. **RX gain:** changes live.
 8. **Ref level:** the spectrum's top line, or **Auto**.

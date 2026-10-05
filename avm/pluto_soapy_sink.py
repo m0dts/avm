@@ -112,6 +112,13 @@ def _lime_configure(sdr, direction, freq_hz, antenna=None):
     from SoapySDR import SOAPY_SDR_RX
     rx = direction == SOAPY_SDR_RX
     ports = [a for a in sdr.listAntennas(direction, 0) if a != "NONE"]
+    # environment override, e.g. AVM_LIME_TX_ANTENNA=BAND2 for a board whose
+    # ports map differently (the LimeSDR Mini routes one TX socket via BAND1/2)
+    antenna = antenna or os.environ.get("AVM_LIME_RX_ANTENNA" if rx else "AVM_LIME_TX_ANTENNA") or None
+    if antenna and ports and antenna not in ports:
+        print(f"LimeSDR {'RX' if rx else 'TX'}: this board has no port {antenna} -- choosing automatically",
+              file=sys.stderr)
+        antenna = None
     if not antenna:
         if rx:
             if "LNAL" in ports and freq_hz < 1.5e9:

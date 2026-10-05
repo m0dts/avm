@@ -50,10 +50,14 @@ class _TxEngine(media_tx_gui.MediaTxWindow):
         except OSError:
             pass
 
+    lime_port = "Auto"
+
     def _build_tx_cmd(self):
         cmd = super()._build_tx_cmd()
         if self.sdr == "lime":
             cmd += ["--sdr", "lime", "--gain-file", tw.gain_file_path("tx")]
+            if self.lime_port != "Auto":
+                cmd += ["--sdr-antenna", self.lime_port]
         return cmd
 
     def _build_video_source_cmd(self, vbv_seconds=None):
@@ -215,6 +219,9 @@ class TxPage(QtWidgets.QWidget):
         self.gain = tw.Stepper(-89, 0, 1, s_get(settings, "tx_gain", -10), " dB")
         self.radio = tw.RadioPicker("TX radio (connected now)", settings.get("tx_sdr", settings.get("sdr", "pluto")))
         self.radio.radio_changed.connect(self.set_radio)
+        # LimeSDR TX port (BAND1/BAND2 or Auto): only shown with the LimeSDR
+        self.lime_port = tw.lime_port_picker("tx", s_get(settings, "tx_lime_port", "Auto"))
+        self.lime_port.changed.connect(self._lime_port_changed)
         src_row = QtWidgets.QWidget()
         src_row.setObjectName("seg")
         sl = QtWidgets.QHBoxLayout(src_row)
@@ -227,7 +234,7 @@ class TxPage(QtWidgets.QWidget):
         self.callsign = tw.TextButton("Callsign / message", s_get(settings, "tx_callsign", ""),
                                       max_len=media_tx_framer.STATION_ID_LEN)
         rows = [("Call", self.callsign), ("Source", src_row), ("Audio", self.audio), ("FPS", self.fps),
-                ("Freq", tw.freq_radio_row(self.freq, self.radio)), ("TX gain", self.gain),
+                ("Freq", tw.freq_radio_row(self.freq, self.radio, self.lime_port)), ("TX gain", self.gain),
                 ("Mode", self.mode), ("kHz", self.bw), ("Modul.", self.mod)]
         for r, (label, w) in enumerate(rows):
             grid.addWidget(tw.row_label(label), r, 0)
@@ -248,6 +255,8 @@ class TxPage(QtWidgets.QWidget):
         self.gain.changed.connect(self._gain_changed)
 
         self.engine.sdr = self.radio.sdr
+        self.engine.lime_port = self.lime_port.value()
+        self.lime_port.setVisible(self.engine.sdr == "lime")
         self._apply_to_engine()
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -309,7 +318,8 @@ class TxPage(QtWidgets.QWidget):
                       tx_focus_mode=self.focus_mode.value() if hasattr(self, "focus_mode") else "auto",
                       tx_focus=self.focus.value() if hasattr(self, "focus") else 0,
                       tx_bw=self.bw.value(), tx_mod=self.mod.value(), tx_gain=self.gain.value(),
-                      tx_sdr=self.engine.sdr)
+                      tx_sdr=self.engine.sdr,
+                      tx_lime_port=self.lime_port.value() if hasattr(self, "lime_port") else "Auto")
 
     def _refresh_info(self):
         e = self.engine
@@ -345,9 +355,17 @@ class TxPage(QtWidgets.QWidget):
         if self.is_running():
             self.run.set_state("pending")
 
+    def _lime_port_changed(self, port):
+        """Applied when TX (re)starts."""
+        self.engine.lime_port = port
+        self._save()
+        if self.is_running() and self.engine.sdr == "lime":
+            self.run.set_state("pending")
+
     def set_radio(self, sdr):
         """'pluto' or 'lime' -- from the Radio picker."""
         self.radio.set_sdr(sdr)
+        self.lime_port.setVisible(sdr == "lime")
         if sdr != self.engine.sdr:
             self.engine.sdr = sdr
             self._refresh_info()
