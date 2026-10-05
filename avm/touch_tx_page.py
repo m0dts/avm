@@ -463,6 +463,7 @@ class TxPage(QtWidgets.QWidget):
         self._sent = 0
         self._last_error = ""
         tw.write_gain_file("tx", self.gain.value())  # so a stale value can't apply at start
+        self._drop_preview_file()
         self.engine.start()
         if self.is_running():
             self.run.set_state("running")
@@ -481,9 +482,21 @@ class TxPage(QtWidgets.QWidget):
             for p in self.engine.procs:
                 subprocess.run(["pkill", "-TERM", "-P", str(p.pid)], capture_output=True)
         self.engine.stop()
+        self._preview.close()  # let go of the preview file (see _drop_preview_file)
         self.run.set_state("stopped")
         self.preview.clear_image(self._preview_idle_text())
         self.status.setText(f"Stopped ({self._sent} fragments sent)")
+
+    def _drop_preview_file(self):
+        """Before TX starts: let go of the last run's preview file and delete
+        it, so the page only opens the fresh one the video source creates.
+        On Windows a file held open can't be replaced: reading the leftover
+        one made the source give up ("preview disabled") -- no preview, ever."""
+        self._preview.close()
+        try:
+            os.remove(PREVIEW_PATH)
+        except OSError:
+            pass  # not there (first run), or still held: the source reports it
         self.running_changed.emit(False)
 
     def _on_log(self, line):

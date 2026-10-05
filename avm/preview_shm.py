@@ -92,6 +92,7 @@ class PreviewReader:
         if self._mm is not None:
             self._mm.close()
         self._mm = None
+        self._last_seq = None  # a new writer counts from 1 again
 
 
 def yuv420_to_rgb(f, w, h):
