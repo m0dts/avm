@@ -404,6 +404,11 @@ class RxPage(QtWidgets.QWidget):
     def start(self):
         if self._lime_busy():
             return
+        found, why = tw.radio_present(self.engine.sdr, self.engine.pluto_uri.text().strip() or None)
+        if not found:
+            self.status.setText(f"Not started: {why}")
+            tw.notices().add("RX", f"Not started: {why}")
+            return
         self._apply_to_engine()
         self._ok = self._lost = self._bad = 0
         self._mer = []

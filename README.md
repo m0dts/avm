@@ -167,6 +167,11 @@ keeps SDR drivers your system already has, e.g. on DragonOS. It also adds an
 **AVM** icon to the menu and desktop, and an `avm` command. Run it again with
 `--update` to get the latest version, or `--check` to just see the report.
 
+It also asks whether to **turn the screen upside down**, for a touch screen
+mounted the other way up: AVM then rotates the picture and the touch input
+180° while it runs, and puts them back when it quits. Answer later with
+`bash ~/avm/install_avm.sh --rotate180` (or `--no-rotate`).
+
 The first transmit or receive after installing takes a minute or two while
 the modem and codec are compiled for your machine; on a slow CPU it can take
 several minutes. The TX preview shows "Preparing video codec..." meanwhile.

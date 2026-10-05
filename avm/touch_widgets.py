@@ -663,6 +663,40 @@ RX_ONLY_RADIOS = ("rtlsdr",)
 RTL_SAMPLE_RATE = 1024000  # an RTL-SDR rate (0.9-3.2 MS/s) that fits every bandwidth + LO offset
 
 
+def radio_present(sdr, uri=None):
+    """Is the selected radio there? Checked before TX/RX starts, so a
+    missing one is reported plainly instead of as a driver traceback.
+    Returns (True/False, how it was found / what to check).
+    Linux: the USB device list (microseconds); a Pluto not on USB is tried
+    at its network address (iiod, port 30431, 0.5 s). Elsewhere: SoapySDR
+    asked for that driver (~1 s). If the check itself can't run, True --
+    never block a start just because the check failed."""
+    import socket
+    name = RADIO_NAMES.get(sdr, sdr)
+    devs = usb_devices()
+    if devs is not None:
+        if USB_IDS.get(sdr, set()) & devs:
+            return True, f"{name} on USB"
+        if sdr == "pluto":
+            host = (uri or "ip:192.168.2.1").split(":", 1)[-1] if (uri or "ip:").startswith("ip:") else None
+            if host:
+                try:
+                    socket.create_connection((host, 30431), timeout=0.5).close()
+                    return True, f"{name} at {host}"
+                except OSError:
+                    pass
+        return False, f"{name} not found -- check it's plugged in (USB) and powered"
+    try:
+        import SoapySDR
+        SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_ERROR)
+        driver = {"pluto": "plutosdr"}.get(sdr, sdr)
+        if SoapySDR.Device.enumerate(f"driver={driver}"):
+            return True, f"{name} found"
+        return False, f"{name} not found -- check it's plugged in (USB) and powered"
+    except Exception:
+        return True, "not checked"
+
+
 def detect_rx_radios():
     """detect_radios() plus RTL-SDR dongles (receive only)."""
     found = [r for r in detect_radios() if not r.startswith("(no radios")]
