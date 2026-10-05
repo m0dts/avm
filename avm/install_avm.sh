@@ -20,6 +20,9 @@
 #   4. udev rules / RTL-SDR TV-driver blacklist, user groups
 #   5. desktop launcher (menu + desktop icon) for the touch GUI
 # Then it checks every module imports and lists the radios Soapy can see.
+# The whole script is one { } block, so bash reads it all before running:
+# --update replaces this file while it runs.
+{
 set -u
 AVM_REPO="${AVM_REPO:-m0dts/avm}"
 AVM_BRANCH="${AVM_BRANCH:-main}"
@@ -304,3 +307,5 @@ echo "Start AVM from the menu / desktop icon, or:  cd $AVM_DIR && $VENV/bin/pyth
 echo "(use $VENV/bin/python, not plain python3: some modules, e.g. numba on Ubuntu 24.04, are only in the venv)"
 echo "The first TX/RX start compiles the modem and codec (a minute or two); later starts are quick."
 echo "If this run added you to any groups, log out and back in first."
+exit 0
+}
