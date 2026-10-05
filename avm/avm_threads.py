@@ -5,6 +5,7 @@ thread can be attributed: all Python threads otherwise show as "python".
     threading.Thread(target=..., name="rx-spectrum")
 
 Linux only (prctl PR_SET_NAME, 15 characters); a no-op elsewhere."""
+import os
 import sys
 import threading
 
@@ -83,3 +84,21 @@ if sys.platform == "win32":
         _popen_init(self, *args, **kwargs)
 
     _subprocess.Popen.__init__ = _popen_init_no_window
+
+
+# The ffmpeg the installer chose (it writes its folder to ffmpeg_dir.txt,
+# beside this file -- Windows: e.g. a "full" build with Codec2) goes first on
+# PATH, however AVM was started; every helper process inherits it. No file
+# (Linux: the system ffmpeg): PATH as it is.
+def _use_installed_ffmpeg():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg_dir.txt")) as f:
+            d = f.read().strip()
+    except OSError:
+        return
+    path = os.environ.get("PATH", "")
+    if d and os.path.isdir(d) and not path.startswith(d + os.pathsep):
+        os.environ["PATH"] = d + os.pathsep + path
+
+
+_use_installed_ffmpeg()

@@ -188,8 +188,23 @@ if ($ffDir) {
         Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z" -OutFile $arc
         if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
         New-Item -ItemType Directory $tmp | Out-Null
-        & "$env:SystemRoot\System32\tar.exe" -xf $arc -C $tmp
-        if ($LASTEXITCODE -ne 0) { throw "tar couldn't unpack the .7z" }
+        # Windows 11's tar unpacks .7z; Windows 10's often can't -- then use
+        # 7-Zip's small standalone extractor (7zr.exe, from 7-zip.org)
+        $unpacked = $false
+        try {
+            & "$env:SystemRoot\System32\tar.exe" -xf $arc -C $tmp 2>$null
+            $unpacked = ($LASTEXITCODE -eq 0) -and (Get-ChildItem $tmp -Recurse -Filter ffmpeg.exe)
+        } catch { }
+        if (-not $unpacked) {
+            Write-Host "Windows' tar can't unpack .7z here -- using 7-Zip's 7zr.exe"
+            $7zr = Join-Path $env:TEMP "7zr.exe"
+            Invoke-WebRequest "https://www.7-zip.org/a/7zr.exe" -OutFile $7zr
+            if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+            New-Item -ItemType Directory $tmp | Out-Null
+            & $7zr x -y "-o$tmp" $arc | Out-Null
+            Remove-Item $7zr -ErrorAction SilentlyContinue
+            if ($LASTEXITCODE -ne 0) { throw "couldn't unpack the .7z (tar and 7zr both failed)" }
+        }
         $exe = Get-ChildItem $tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
         if (-not $exe) { throw "no ffmpeg.exe in the download" }
         if (Test-Path "$home_\ffmpeg") { Remove-Item -Recurse -Force "$home_\ffmpeg" }
@@ -227,6 +242,9 @@ if ($Check) {
     if (Test-Path $bat) { Write-Host "present: $bat" } else { Write-Host "missing" }
 } else {
     Set-Content -Path $bat -Value $launcher -Encoding ascii
+    # AVM itself puts this ffmpeg first on its PATH however it's started
+    # (avm_threads.py), not only when started through AVM.bat
+    if ($ffDir) { Set-Content -Path (Join-Path $avm "ffmpeg_dir.txt") -Value $ffDir -Encoding ascii }
     $ws = New-Object -ComObject WScript.Shell
     $icon = "$env:SystemRoot\System32\shell32.dll,18"
     foreach ($dir in @([Environment]::GetFolderPath("Desktop"), (Join-Path ([Environment]::GetFolderPath("Programs")) ""))) {

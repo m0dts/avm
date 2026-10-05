@@ -588,17 +588,21 @@ def fragment_size(bw_khz):
 _ffmpeg_encoders = None
 
 
+FFMPEG_PATH = None  # the ffmpeg ffmpeg_has_encoder() asked (for messages)
+
+
 def ffmpeg_has_encoder(name):
     """Whether the ffmpeg on PATH has this encoder (e.g. "libcodec2"),
     checked once. True if ffmpeg can't be asked: don't hide an option just
     because the check itself failed."""
-    global _ffmpeg_encoders
+    global _ffmpeg_encoders, FFMPEG_PATH
     if _ffmpeg_encoders is None:
         import shutil
         import subprocess
+        FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"
         try:
-            out = subprocess.run([shutil.which("ffmpeg") or "ffmpeg", "-hide_banner", "-encoders"],
-                                 capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL).stdout
+            out = subprocess.run([FFMPEG_PATH, "-hide_banner", "-encoders"], capture_output=True,
+                                 text=True, errors="replace", timeout=10, stdin=subprocess.DEVNULL).stdout
             _ffmpeg_encoders = {line.split()[1] for line in out.splitlines() if len(line.split()) > 1}
         except (OSError, subprocess.TimeoutExpired):
             _ffmpeg_encoders = set()

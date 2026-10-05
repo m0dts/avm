@@ -345,7 +345,7 @@ class TxPage(QtWidgets.QWidget):
         if not video:
             warn = "NO VIDEO: link too slow, sending audio only -- use a wider kHz or faster mode"
         elif not warn and getattr(self, "_no_codec2", False):
-            warn = "Codec2 unavailable: this ffmpeg has no Codec2 encoder (using Opus)"
+            warn = f"Codec2 unavailable: {tw.FFMPEG_PATH or 'ffmpeg'} has no Codec2 encoder (using Opus)"
         # the placeholder shows while there is no camera picture
         new_text = self._preview_idle_text()
         if new_text != getattr(self, "_preview_text", None):
