@@ -153,7 +153,11 @@ have_pkg "$PLUTO_PKG" && PKGS="$PKGS $PLUTO_PKG"
 MISSING=""
 for p in $PKGS; do
     if ! have_pkg "$p"; then
-        warn "package $p not offered by apt on this system -- skipped"
+        # these come from pip in step 3 when apt lacks them: nothing to report
+        case "$p" in
+            python3-numba|python3-pyqtgraph|python3-sounddevice|python3-opencv|python3-av) ;;
+            *) warn "package $p not offered by apt on this system -- skipped" ;;
+        esac
     elif ! installed "$p"; then
         MISSING="$MISSING $p"
     fi
@@ -236,7 +240,29 @@ for g in plugdev dialout audio video; do
     if [ $CHECK_ONLY = 1 ]; then echo "not in group $g"
     else $SUDO usermod -aG $g "$USER" && echo "added $USER to $g (log out and back in)"; fi
 done
+
+# Pluto's USB network link (it's ip:192.168.2.1 on it). A desktop's network
+# manager brings it up by DHCP; a minimal install has nothing that does, so
+# a udev rule gives it a fixed address whenever a Pluto is plugged in.
+# (AVM also falls back to opening the Pluto over plain USB without it.)
+PLUTO_RULE=/etc/udev/rules.d/90-avm-pluto-net.rules
+if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    echo "Pluto network: handled by NetworkManager"
+elif [ -f "$PLUTO_RULE" ]; then
+    echo "Pluto network: udev rule present"
+elif [ $CHECK_ONLY = 1 ]; then
+    echo "Pluto network: no network manager -- a udev rule would be added"
+else
+    printf '%s\n' '# AVM: bring up an ADALM-Pluto'"'"'s USB network link (the Pluto is 192.168.2.1)' \
+        'ACTION=="add", SUBSYSTEM=="net", ATTRS{idVendor}=="0456", ATTRS{idProduct}=="b673", RUN+="/bin/sh -c '"'"'ip addr add 192.168.2.10/24 dev %k; ip link set %k up'"'"'"' \
+        | $SUDO tee "$PLUTO_RULE" >/dev/null
+    echo "Pluto network: udev rule added ($PLUTO_RULE)"
+fi
 [ $CHECK_ONLY = 0 ] && $SUDO udevadm control --reload-rules 2>/dev/null && $SUDO udevadm trigger 2>/dev/null
+# a Pluto already plugged in: bring its link up now too
+if [ $CHECK_ONLY = 0 ] && [ -f "$PLUTO_RULE" ]; then
+    $SUDO udevadm trigger --action=add --subsystem-match=net 2>/dev/null
+fi
 
 # ---------------------------------------------------------------- 5. launcher
 say "5. Desktop launcher"

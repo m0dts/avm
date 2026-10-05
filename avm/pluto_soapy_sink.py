@@ -85,7 +85,17 @@ def _open_sdr(driver, uri, what):
     if uri:
         args["uri"] = uri
     print(f"Opening PlutoSDR {what} (uri={uri or 'auto'})...", file=sys.stderr)
-    sdr = SoapySDR.Device(_device_args_string(args))
+    try:
+        sdr = SoapySDR.Device(_device_args_string(args))
+    except RuntimeError as e:
+        if not (uri or "").startswith("ip:"):
+            raise
+        # A Pluto on USB whose network interface isn't up (e.g. a minimal
+        # Linux with no network manager to run DHCP on it) can't be reached
+        # at its IP address, but libiio still finds it directly over USB.
+        print(f"PlutoSDR {what}: no answer at {uri} ({e}) -- trying USB...", file=sys.stderr)
+        sdr = SoapySDR.Device(_device_args_string({"driver": "plutosdr"}))
+        uri = None
     _ensure_fdd_mode(uri)
     return sdr
 
