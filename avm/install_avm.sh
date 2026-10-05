@@ -153,6 +153,27 @@ have_pkg limesuite-udev && PKGS="$PKGS limesuite-udev"
 PLUTO_PKG=soapysdr${SOAPY_ABI}-module-plutosdr
 have_pkg "$PLUTO_PKG" && PKGS="$PKGS $PLUTO_PKG"
 
+# Radio drivers SoapySDR already has (from any source -- e.g. DragonOS ships
+# its own LimeSuite / Soapy builds) are left alone: the distro's packages
+# would try to overwrite the same files, and dpkg refuses.
+SOAPY_MODS="$(SoapySDRUtil --info 2>/dev/null | grep -i 'module found' | tr 'A-Z' 'a-z')"
+drop() { for x in "$@"; do PKGS="$(printf '%s
+' $PKGS | grep -vx "$x" | tr '
+' ' ')"; done; }
+if echo "$SOAPY_MODS" | grep -q lms7support; then
+    drop "soapysdr${SOAPY_ABI}-module-lms7" limesuite-udev
+    echo "LimeSDR driver already installed -- keeping it"
+fi
+if echo "$SOAPY_MODS" | grep -q rtlsdrsupport; then
+    drop "soapysdr${SOAPY_ABI}-module-rtlsdr"
+    echo "RTL-SDR driver already installed -- keeping it"
+fi
+command -v rtl_test >/dev/null && drop rtl-sdr
+if echo "$SOAPY_MODS" | grep -q plutosdrsupport; then
+    drop "$PLUTO_PKG"
+    echo "PlutoSDR driver already installed -- keeping it"
+fi
+
 MISSING=""
 for p in $PKGS; do
     if ! have_pkg "$p"; then
@@ -297,6 +318,19 @@ else
         gio set "$DESKTOP_DIR/avm.desktop" metadata::trusted true 2>/dev/null
     fi
     echo "menu entry + desktop icon 'AVM' -> $AVM_DIR/touch_gui.py"
+fi
+# an 'avm' command too (in ~/.local/bin, on PATH from the next login)
+if [ $CHECK_ONLY = 0 ]; then
+    mkdir -p "$HOME/.local/bin"
+    cat > "$HOME/.local/bin/avm" <<AVMCMD
+#!/bin/sh
+# AVM touch GUI (written by install_avm.sh)
+cd "$AVM_DIR" || exit 1
+export HF_RX_GUI_LOG="$AVM_DIR/gui_logs/rx_session.log"
+exec "$VENV/bin/python" touch_gui.py "\$@"
+AVMCMD
+    chmod +x "$HOME/.local/bin/avm"
+    echo "'avm' command: $HOME/.local/bin/avm"
 fi
 
 # ---------------------------------------------------------------- summary

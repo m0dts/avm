@@ -1,27 +1,124 @@
 # AVM: Audio Video Modem
 
-AVM sends live video and audio over a radio link using SDR hardware. A camera
-and microphone at one end, a picture and sound at the other, carried by an
-OFDM modem. It has a full-screen touch interface and is built to run on a
-Raspberry Pi 4 with a 7" touch screen, which can transmit and receive at the
-same time. It also runs on an Ubuntu/Debian PC, and should run on Windows.
+AVM sends **live video and audio over a narrow radio channel**, using
+low-cost SDR hardware. Point a camera at something at one end, and the
+picture and sound appear at the other, with a station callsign, carried by a
+digital OFDM modem 20 to 250 kHz wide.
 
-## Features
+It's a complete station in one program, with a full-screen touch interface.
+It's built to run on a **Raspberry Pi 4 with a 7" touch screen**, which can
+transmit and receive at the same time. It also runs on an ordinary
+Ubuntu/Debian PC, and should run on Windows.
 
-- **OFDM modem** with LDPC error correction, QPSK or 16QAM. Robust DRM-style
-  modes A to D, plus mode VU for VHF/UHF mobile and troposcatter paths.
-  Signal widths of 20, 40, 80, 160 and 250 kHz.
-- **Wavelet video codec** designed for low, fixed bitrates. It degrades
-  gracefully, and a receiver joining mid-stream builds up the picture within
-  a few seconds.
-- **Opus or Codec2 audio**, kept in sync with the video.
-- **Touch GUI**: TX and RX pages, live spectrum, signal quality (MER and
-  frequency offset), station callsign, camera preview.
-- **Radios** (via SoapySDR): ADALM-Pluto and LimeSDR for TX and RX, and
-  RTL-SDR for RX only.
+## What it's for
 
-On narrow settings where there's no room for video, it sends audio only and
-tells you so.
+Amateur digital TV (DATV) usually needs several MHz of spectrum and fast
+hardware. AVM squeezes a small, low-frame-rate picture and clear audio into a
+channel tens of kHz wide. That opens up uses where wide DATV doesn't fit:
+
+- **Narrowband amateur video** on VHF/UHF bands where a wide signal isn't
+  practical or allowed: pictures as well as voice.
+- **Difficult paths:** the robust modes keep working through multipath and
+  fading. Mode VU is aimed at VHF/UHF mobile and troposcatter (beyond the
+  horizon) links.
+- **Portable, field and emergency links:** a Pi, a small SDR and a camera
+  make a self-contained station, and an RTL-SDR dongle is enough to receive.
+- **Experimenting:** modes, widths, modulation, codecs and the radio are all
+  selectable live, with signal quality shown as you go.
+
+The data rate depends on the width and mode. It ranges from about 10 kbps
+(20 kHz, the most robust settings) to over 100 kbps (250 kHz). For example,
+mode VU at 80 kHz with QPSK carries about 45 kbps: 352×192 video at 10 fps
+plus Codec2 audio. When the settings leave no room for video, AVM sends audio
+only and says so.
+
+## The screens
+
+### Transmit
+
+![AVM transmit page](docs/tx.png)
+
+1. **TX / RX tabs.** Both run at once; the tabs switch what you see. The
+   title bar shows the version and CPU use; **✕** quits.
+2. **Preview:** exactly what's being sent (here the built-in test pattern).
+   The first start on a new machine shows "Preparing video codec..." here
+   instead, while the codec compiles.
+3. **Rates:** video and audio bitrates, the link capacity, resolution and
+   frame rate, the radio, and fragments sent.
+4. **Camera and Mic** (when the source is "Camera + mic").
+5. **Call:** your callsign or a short message, sent with the picture.
+6. **Source and resolution:** camera and mic, or the test pattern. Video sizes
+   go from 192×112 up to 384×224.
+7. **Audio:** Codec2 (3.2 kbps, leaves more room for video) or Opus (better
+   quality).
+8. **FPS:** video frame rate.
+9. **Freq and radio:** the transmit frequency, and Pluto or LimeSDR.
+10. **TX gain:** output level. It changes live while on air.
+11. **Mode, kHz and Modul.:** how the signal is built. A–D are robust
+    DRM-style modes, and VU is for VHF/UHF mobile and tropo. Widths go from
+    20 to 250 kHz, with QPSK (robust) or 16QAM (faster). Narrow widths that a
+    mode can't use are greyed out.
+12. **TX button:** start and stop transmitting. It turns amber if you change
+    a setting that needs a restart.
+
+### Receive
+
+![AVM receive page](docs/rx.png)
+
+1. **Station:** the received callsign or message. It's shown with \*stars\*
+   until it has been received intact.
+2. **Video:** the received picture; tap it for full screen. A receiver
+   tuning in mid-transmission sees the picture fill in as a mosaic within a
+   few seconds.
+3. **Status line:**
+   - **MER:** signal quality in dB; higher is better.
+   - **CFO:** how far the transmitter is off frequency.
+   - **fps:** received frame rate.
+   - **Q:** video frames queued for display.
+   - **% ok:** the share of data blocks received correctly.
+4. **Spectrum:** the live received band. Here it's a real mode VU, 80 kHz
+   signal. The small notch in the middle is deliberate (an empty centre
+   carrier), and it's handy for tuning.
+5. **Freq and radio:** the receive frequency, and Pluto, LimeSDR or RTL-SDR.
+   An RTL-SDR also gets a PPM row to correct its crystal.
+6. **Mode, kHz and Modul.:** these must match the transmitter.
+7. **RX gain:** changes live.
+8. **Ref level:** the spectrum's top line, or **Auto**.
+9. **Audio:** the output device.
+10. **RX button:** start and stop receiving.
+
+## How it works
+
+```
+camera ─► wavelet video codec ─┐                                  ┌─► video decoder ─► screen
+                               ├─► framer ─► OFDM modem ─► SDR ~~► SDR ─► OFDM demodulator ─► deframer ─┤
+mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync)                                  └─► audio decoder ─► speaker
+```
+
+- **OFDM modem:** many closely spaced carriers, with pilots for tracking,
+  LDPC error correction, and a preamble so a receiver can lock on at any
+  time. Its timings are modelled on DRM's robustness modes, plus the
+  VHF/UHF mode VU.
+- **Video codec:** a wavelet codec written for AVM. It produces a fixed
+  number of bytes per frame, so it fits the radio's capacity exactly, and it
+  gets blurrier, not blocky, as the rate drops. A rolling refresh lets late
+  joiners and lost data recover within a few seconds.
+- **Receiver:** plays video and audio in step, at low latency. It skips ahead
+  instead of falling behind if it's ever delayed.
+
+## What you need
+
+- **A computer:** a Raspberry Pi 4, or any 64-bit PC with Ubuntu/Debian or
+  Windows 10/11. A faster CPU allows bigger video.
+- **A radio (SDR):**
+  - **ADALM-Pluto:** TX and RX.
+  - **LimeSDR (USB or Mini):** TX and RX.
+  - **RTL-SDR dongle:** RX only.
+
+  Add filters and an amplifier as needed for your band.
+- **A camera and microphone:** any USB webcam works (e.g. a Logitech C920,
+  whose focus AVM can control). The test pattern needs no camera.
+- **A licence to transmit:** see the note under [Use](#use).
 
 ## Install
 
@@ -69,8 +166,76 @@ An RTL-SDR on Windows also needs its USB driver switched to WinUSB once, with
 [Zadig](https://zadig.akeo.ie).
 
 The first transmit or receive after installing takes a minute or two while
-the modem and codec are compiled for your machine. After that, starts are
-quick.
+the modem and codec are compiled for your machine; on a slow CPU it can take
+several minutes. The TX preview shows "Preparing video codec..." meanwhile.
+After that, starts are quick.
+
+## Small machines: minimal Debian on 8 GB
+
+AVM doesn't need a desktop, only an X server for its full-screen window. A
+full desktop such as LXQt takes about 4 GB, which leaves too little room on
+an 8 GB card or disk. Without one, Debian 13 plus AVM uses about 4.8 GB of a
+5.8 GB root partition, leaving roughly 0.7 GB free. That's from a working
+system with an Intel Atom x5 (4 cores, 1 GHz).
+
+1. **Install Debian (netinstall), 64-bit.** At "Software selection", untick
+   every desktop environment and tick only **SSH server** and **standard
+   system utilities**.
+2. **Give your user sudo**, if you set a root password during install:
+
+   ```bash
+   su -                                   # root's password; note the "-"
+   apt-get install -y sudo && usermod -aG sudo YOURNAME
+   exit
+   ```
+
+   Then log out and back in.
+3. **Install a minimal X server** (about 100–150 MB):
+
+   ```bash
+   sudo apt install --no-install-recommends xserver-xorg-core xserver-xorg-input-libinput xinit openbox x11-xserver-utils
+   ```
+
+4. **Install AVM** with the Linux commands above. On a system like this,
+   the installer also sets up the Pluto's USB network link, so the Pluto
+   answers at 192.168.2.1.
+5. **Start AVM full-screen with `startx`.** Create `~/.xinitrc`:
+
+   ```bash
+   xset s off -dpms s noblank        # no screen blanking
+   openbox &
+   cd ~/avm
+   export HF_RX_GUI_LOG=$HOME/avm/gui_logs/rx_session.log
+   exec ~/venv/bin/python touch_gui.py
+   ```
+
+   Run `startx`, and AVM fills the screen. Quitting AVM returns you to the
+   console.
+6. **Optional: start AVM at power-on.** Run
+   `sudo systemctl edit getty@tty1` and add the following, with your
+   username in place of YOURNAME:
+
+   ```
+   [Service]
+   ExecStart=
+   ExecStart=-/sbin/agetty --autologin YOURNAME --noclear %I $TERM
+   ```
+
+   Then add this line to the end of `~/.bash_profile`:
+
+   ```bash
+   [ -z "$DISPLAY" ] && [ "$(tty)" = /dev/tty1 ] && exec startx
+   ```
+
+Notes:
+
+- With no desktop, there's no PulseAudio or PipeWire. AVM plays and records
+  through ALSA directly, so pick the devices in AVM's audio settings.
+- To find the machine's address for SSH, run `hostname -I` on it.
+- Keep `sudo apt clean` handy: apt's download cache can eat the last few
+  hundred MB.
+- A slow CPU compiles the codec slowly on first use, and it also limits live
+  video. Use a lower resolution or frame rate if the video stutters.
 
 ## Use
 
