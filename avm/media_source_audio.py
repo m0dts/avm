@@ -69,7 +69,7 @@ def main():
     if args.audio_codec == "codec2":
         args.audio_rate = 8000  # libcodec2's only supported input rate -- see -h encoder=libcodec2
 
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
+    cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning"]
     rec = _arecord_cmd(args)
     if rec:
         # arecord captures, ffmpeg only encodes from the pipe. ffmpeg's own
@@ -133,13 +133,13 @@ def main():
         print(f"[media_source_audio] capture: {' '.join(rec)}", file=sys.stderr)
         # arecord -> ffmpeg. If either end goes (TX stopped: the framer closes
         # ffmpeg's output), the other follows via EOF / SIGPIPE.
-        capture = subprocess.Popen(rec, stdout=subprocess.PIPE, **avm_threads.die_with_parent())
+        capture = subprocess.Popen(rec, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **avm_threads.die_with_parent())
         try:
             proc = subprocess.run(cmd, stdin=capture.stdout, **priority, **avm_threads.die_with_parent())
         finally:
             capture.kill()
         sys.exit(proc.returncode)
-    proc = subprocess.run(cmd, **priority, **avm_threads.die_with_parent())
+    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, **priority, **avm_threads.die_with_parent())
     sys.exit(proc.returncode)
 
 

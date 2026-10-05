@@ -402,6 +402,13 @@ class TxPage(QtWidgets.QWidget):
     def _on_log(self, line):
         if "Streamed fragment" in line:
             self._sent += 1
+        # the video source's warm-up (media_source_wavelet.py): the first
+        # start on a machine compiles the codec, minutes on a slow CPU
+        if "preparing video codec" in line:
+            self.preview.clear_image("Preparing video codec...\n"
+                                     "(first start on this machine: can take a few minutes)")
+        elif "video codec ready" in line:
+            self.preview.clear_image("Starting video...")
         low = line.lower()
         if "error" in low or "traceback" in low or "silence-filled" in low:
             self._last_error = line.strip()[:120]

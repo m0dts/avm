@@ -73,13 +73,20 @@ def main():
     frame_bytes = args.frame_bytes or round(args.video_bitrate * 1000 / 8 / args.framerate)
     codec = WaveletCodec(w, h, frame_bytes, leak=args.leak,
                          refresh_frames=round(args.refresh_seconds * args.framerate), rd_trial=args.rd_trial)
+    # JIT warm-up before capture starts: quick once compiled, but the first
+    # run on a machine compiles the codec (minutes on a slow CPU). The GUI
+    # shows these two lines in its preview.
+    print("[media_source_wavelet] preparing video codec...", file=sys.stderr, flush=True)
+    t0 = time.perf_counter()
     codec.encode(np.zeros((h, w), np.uint8), np.zeros((h // 2, w // 2), np.uint8),
-                 np.zeros((h // 2, w // 2), np.uint8))  # JIT warm-up before capture starts
+                 np.zeros((h // 2, w // 2), np.uint8))
+    print(f"[media_source_wavelet] video codec ready ({time.perf_counter() - t0:.1f} s)",
+          file=sys.stderr, flush=True)
     codec.seq = 0
     codec.reset()
 
     # Low-delay input: no probing/buffering beyond what's needed.
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+    cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning",
            "-fflags", "nobuffer", "-flags", "low_delay", "-probesize", "32"]
     cmd += build_video_args(args)
     if args.duration:
@@ -99,7 +106,7 @@ def main():
         except OSError as e:
             print(f"[media_source_wavelet] preview disabled: {e}", file=sys.stderr)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0, **avm_threads.die_with_parent())
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, bufsize=0, **avm_threads.die_with_parent())
     ysz, csz = w * h, (w // 2) * (h // 2)
     fsz = ysz + 2 * csz
     out = sys.stdout.buffer

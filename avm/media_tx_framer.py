@@ -299,7 +299,7 @@ def read_length_prefixed(pipe):
 
 
 def _popen_from_cmdline(cmdline):
-    return subprocess.Popen(_split_cmdline(cmdline), stdout=subprocess.PIPE, **avm_threads.die_with_parent())
+    return subprocess.Popen(_split_cmdline(cmdline), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **avm_threads.die_with_parent())
 
 
 def main():

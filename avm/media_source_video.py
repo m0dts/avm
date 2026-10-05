@@ -88,7 +88,7 @@ def main():
     else:
         x264_params = "nal-hrd=cbr:force-cfr=1:intra-refresh=1:repeat-headers=1:bframes=0:ref=1"
 
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
+    cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning"]
     cmd += build_video_args(args)
     if args.duration:
         cmd += ["-t", str(args.duration)]

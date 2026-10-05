@@ -361,7 +361,7 @@ def main():
 
     audio_kbps = f"{args.audio_bitrate}k"
 
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
+    cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning"]
     if not args.no_video:
         cmd += build_video_args(args)
     if not args.no_audio:

@@ -1034,7 +1034,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         # subprocesses directly (see its own module docstring) instead
         # of being piped into from a single upstream media_source.py --
         # only two processes to chain here now, not three.
-        p_framer = subprocess.Popen(framer_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        p_framer = subprocess.Popen(framer_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     **avm_threads.die_with_parent())
         # Raises hf_ofdm_tx.py's OS scheduling priority above its sibling
         # ffmpeg encoder process(es) and media_tx_framer.py, same reasoning

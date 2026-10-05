@@ -810,7 +810,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
         # media_rx_player.py one, but the same OS-level scheduling
         # interaction applies regardless of which process it's in).
         rx_priority = {"creationflags": subprocess.HIGH_PRIORITY_CLASS} if sys.platform == "win32" else {}
-        p_rx = subprocess.Popen(rx_cmd, stdin=rx_stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        p_rx = subprocess.Popen(rx_cmd, stdin=rx_stdin if rx_stdin is not None else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  **rx_priority)
 
         self.procs = [p_rx]
