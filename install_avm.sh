@@ -7,8 +7,12 @@
 #   bash install_avm.sh
 #
 #   bash install_avm.sh --update     # also fetch the latest AVM from GitHub
-#   bash install_avm.sh --check      # only report what's missing
+#   bash install_avm.sh --check      # only report what's there / missing
+#   bash install_avm.sh --yes        # don't ask before installing
 #   (AVM_INSTALL_DIR=/some/dir to put AVM elsewhere than ~/avm)
+#
+# It first surveys the machine (the --check report: what's already there,
+# what it would install or change) and asks before doing anything.
 #
 # What it does (each step is skipped if already done; safe to re-run):
 #   0. AVM itself: from GitHub, unless this script sits in / beside an AVM
@@ -28,11 +32,13 @@ AVM_REPO="${AVM_REPO:-m0dts/avm}"
 AVM_BRANCH="${AVM_BRANCH:-main}"
 CHECK_ONLY=0
 UPDATE=0
+ASSUME_YES=0
 for a in "$@"; do
     case "$a" in
         --check) CHECK_ONLY=1 ;;
         --update) UPDATE=1 ;;
-        *) echo "unknown option $a (use --check or --update)"; exit 1 ;;
+        --yes|-y) ASSUME_YES=1 ;;
+        *) echo "unknown option $a (use --check, --update or --yes)"; exit 1 ;;
     esac
 done
 # Where AVM is: beside this script (a copied release folder: ./ or ./avm),
@@ -51,6 +57,21 @@ VENV="${AVM_VENV:-$HOME/venv}"
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*"; }
 die()  { printf '\033[31mXX %s\033[0m\n' "$*"; exit 1; }
+
+# Look before touching anything: run this script's own --check survey, show
+# it, and ask. (Skipped with --yes, or when this script isn't a file, e.g.
+# piped into bash -- there's nothing to re-run then.)
+if [ $CHECK_ONLY = 0 ] && [ $ASSUME_YES = 0 ] && [ -n "$SCRIPT_DIR" ]; then
+    printf '\033[1mAVM installer: checking this machine first (nothing is changed yet)...\033[0m\n'
+    bash "${BASH_SOURCE[0]}" --check $([ $UPDATE = 1 ] && echo --update) || exit 1
+    printf '\n\033[1mInstall / change what is listed above as missing? [y/N] \033[0m'
+    ans=""
+    { read -r ans </dev/tty; } 2>/dev/null || true
+    case "$ans" in
+        y|Y|yes|YES) echo ;;
+        *) echo "Nothing changed."; exit 0 ;;
+    esac
+fi
 
 # ---------------------------------------------------------------- platform
 [ -r /etc/os-release ] || die "No /etc/os-release: unsupported system."
@@ -157,24 +178,26 @@ have_pkg "$PLUTO_PKG" && PKGS="$PKGS $PLUTO_PKG"
 # its own LimeSuite / Soapy builds) are left alone: the distro's packages
 # would try to overwrite the same files, and dpkg refuses.
 SOAPY_MODS="$(SoapySDRUtil --info 2>/dev/null | grep -i 'module found' | tr 'A-Z' 'a-z')"
+KEPT=""
 drop() { for x in "$@"; do PKGS="$(printf '%s
 ' $PKGS | grep -vx "$x" | tr '
 ' ' ')"; done; }
 if echo "$SOAPY_MODS" | grep -q lms7support; then
     drop "soapysdr${SOAPY_ABI}-module-lms7" limesuite-udev
-    echo "LimeSDR driver already installed -- keeping it"
+    KEPT="${KEPT}LimeSDR driver already installed (from this system) -- keeping it\n"
 fi
 if echo "$SOAPY_MODS" | grep -q rtlsdrsupport; then
     drop "soapysdr${SOAPY_ABI}-module-rtlsdr"
-    echo "RTL-SDR driver already installed -- keeping it"
+    KEPT="${KEPT}RTL-SDR driver already installed (from this system) -- keeping it\n"
 fi
 command -v rtl_test >/dev/null && drop rtl-sdr
 if echo "$SOAPY_MODS" | grep -q plutosdrsupport; then
     drop "$PLUTO_PKG"
-    echo "PlutoSDR driver already installed -- keeping it"
+    KEPT="${KEPT}PlutoSDR driver already installed (from this system) -- keeping it\n"
 fi
 
 MISSING=""
+PRESENT=0
 for p in $PKGS; do
     if ! have_pkg "$p"; then
         # these come from pip in step 3 when apt lacks them: nothing to report
@@ -184,13 +207,17 @@ for p in $PKGS; do
         esac
     elif ! installed "$p"; then
         MISSING="$MISSING $p"
+    else
+        PRESENT=$((PRESENT + 1))
     fi
 done
 say "1. apt packages"
+[ -n "$KEPT" ] && printf '%b' "$KEPT"
+echo "already installed: $PRESENT package(s)"
 if [ -z "$MISSING" ]; then
-    echo "all present"
+    echo "nothing to install"
 elif [ $CHECK_ONLY = 1 ]; then
-    echo "missing:$MISSING"
+    echo "to install:$MISSING"
 else
     $SUDO apt-get install -y $MISSING || die "apt install failed"
 fi
@@ -246,7 +273,7 @@ for spec in "numpy numpy" "scipy scipy" "numba numba" "cv2 opencv-python-headles
             "PyQt5 PyQt5" "pyqtgraph pyqtgraph" "sounddevice sounddevice" "SoapySDR -"; do
     set -- $spec
     if "$PY" -c "import $1" 2>/dev/null; then
-        printf '  %-12s ok\n' "$1"
+        :  # importable: its version is reported below
     elif [ "$2" = "-" ]; then
         warn "$1 won't import: needs python3-soapysdr (apt) and a venv with --system-site-packages"
     elif [ $CHECK_ONLY = 1 ]; then
@@ -264,6 +291,69 @@ if ! "$PY" -c 'import numba, sys; v = tuple(map(int, numba.__version__.split("."
         echo "  numba: upgrading from pip (apt's is too old)"
         "$VENV/bin/pip" install -q "numba>=0.59" || warn "pip install numba failed"
     fi
+fi
+# Versions, not just presence: what's actually there vs what AVM needs.
+echo
+echo "  versions (as AVM will use them):"
+SYS_NP="$SYS_NP" "$PY" - <<'PYVER'
+import importlib, os, sys
+def ver(mod):
+    try:
+        m = importlib.import_module(mod)
+    except Exception as e:
+        return None, f"won't import: {str(e).splitlines()[0][:60]}"
+    if mod == "PyQt5":
+        from PyQt5 import QtCore
+        return QtCore.PYQT_VERSION_STR, None
+    if mod == "SoapySDR":
+        return m.getAPIVersion(), None
+    return getattr(m, "__version__", "?"), None
+def tup(v):
+    out = []
+    for p in str(v).split("."):
+        d = "".join(c for c in p if c.isdigit())
+        out.append(int(d) if d else 0)
+    return tuple(out)
+sys_np = os.environ.get("SYS_NP", "")
+# (module, label, requirement text, check(version) -> bool)
+checks = [
+    ("numpy", "numpy", f"{sys_np}.x, as the system's" if sys_np else "any",
+     lambda v: not sys_np or str(v).split(".")[0] == sys_np),
+    ("numba", "numba", ">= 0.57", lambda v: tup(v) >= (0, 57)),
+    ("scipy", "scipy", "any", None),
+    ("cv2", "OpenCV", "any", None),
+    ("av", "PyAV", "any", None),
+    ("PyQt5", "PyQt5", "5.x", lambda v: str(v).startswith("5.")),
+    ("pyqtgraph", "pyqtgraph", "any", None),
+    ("sounddevice", "sounddevice", "any", None),
+    ("SoapySDR", "SoapySDR", "API 0.8", lambda v: str(v).startswith("0.8")),
+]
+bad = 0
+pyv = ".".join(map(str, sys.version_info[:3]))
+pyok = sys.version_info >= (3, 9)
+bad += not pyok
+print(f"    {'Python':<12} {pyv:<12} needs >= 3.9{'':<12} {'ok' if pyok else 'TOO OLD'}")
+for mod, label, need, check in checks:
+    v, err = ver(mod)
+    if err:
+        print(f"    {label:<12} {'-':<12} {err}")
+        bad += 1
+        continue
+    good = check is None or check(v)
+    bad += not good
+    print(f"    {label:<12} {str(v):<12} needs {need:<18} {'ok' if good else 'WRONG VERSION'}")
+sys.exit(1 if bad else 0)
+PYVER
+[ $? = 0 ] || warn "something above isn't what AVM needs -- re-run the installer to fix it, or fix it by hand"
+# ffmpeg: its version and the audio encoders AVM uses
+if command -v ffmpeg >/dev/null; then
+    FFV="$(ffmpeg -hide_banner -version 2>/dev/null | head -n1 | awk '{print $3}')"
+    FFE="$(ffmpeg -hide_banner -encoders 2>/dev/null)"
+    printf '    %-12s %-12s %s\n' ffmpeg "$FFV" \
+        "Opus: $(echo "$FFE" | grep -q libopus && echo yes || echo NO)  Codec2: $(echo "$FFE" | grep -q libcodec2 && echo yes || echo 'no (Opus only)')"
+    echo "$FFE" | grep -q libopus || warn "ffmpeg has no Opus encoder: AVM's audio won't work"
+else
+    printf '    %-12s %s\n' ffmpeg "not installed yet"
 fi
 
 # ---------------------------------------------------------------- 4. USB access

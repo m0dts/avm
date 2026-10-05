@@ -148,9 +148,12 @@ wget https://raw.githubusercontent.com/m0dts/avm/main/install_avm.sh
 bash install_avm.sh
 ```
 
-This downloads AVM into `~/avm` and installs everything it needs. It also
-adds an **AVM** icon to the menu and desktop. Run it again with `--update` to
-get the latest version.
+First it checks the machine and lists what's already there, with versions
+and anything it would install or change. Nothing is touched until you answer
+**y**. It then downloads AVM into `~/avm` and installs what's missing. It
+keeps SDR drivers your system already has, e.g. on DragonOS. It also adds an
+**AVM** icon to the menu and desktop, and an `avm` command. Run it again with
+`--update` to get the latest version, or `--check` to just see the report.
 
 **Windows 10/11 (64-bit):**
 
