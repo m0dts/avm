@@ -195,9 +195,8 @@ class TxPage(QtWidgets.QWidget):
             rl.addWidget(labels[-1])
             rl.addWidget(w, 1)
             left.addWidget(row)
-        width = max(lab.sizeHint().width() for lab in labels)  # line the three rows up
-        for lab in labels:
-            lab.setFixedWidth(width)
+        self._left_labels = labels
+        self.fit_left_labels()
         root.addLayout(left, 4)
 
         # right: settings
@@ -365,6 +364,12 @@ class TxPage(QtWidgets.QWidget):
         self._apply_to_engine()
         if self.is_running():
             self.run.set_state("pending")
+
+    def fit_left_labels(self):
+        """Line up the Focus/Camera/Mic labels (again after a re-scale)."""
+        width = max(lab.sizeHint().width() for lab in self._left_labels)
+        for lab in self._left_labels:
+            lab.setFixedWidth(width)
 
     def _lime_port_changed(self, port):
         """Applied when TX (re)starts."""

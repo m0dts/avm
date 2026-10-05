@@ -11,6 +11,11 @@ transmit and receive at the same time. It also runs on an ordinary 64-bit
 Linux PC (Ubuntu or Debian); see [Which platform?](#which-platform) before
 choosing.
 
+> **This is communications quality, not HD!** Think small, low-frame-rate
+> pictures (at most 384×224, typically around 10 fps) and clear speech: good
+> enough to see who's there and what they're showing you, over a channel a
+> fraction of the width of normal DATV. It's not for watching TV.
+
 ## What it's for
 
 Amateur digital TV (DATV) usually needs several MHz of spectrum and fast
@@ -30,8 +35,8 @@ channel tens of kHz wide. That opens up uses where wide DATV doesn't fit:
 The data rate depends on the width and mode. It ranges from about 10 kbps
 (20 kHz, the most robust settings) to over 100 kbps (250 kHz). For example,
 mode VU at 80 kHz with QPSK carries about 45 kbps: 352×192 video at 10 fps
-plus Codec2 audio. When the settings leave no room for video, AVM sends audio
-only and says so.
+plus Codec2 audio. That's communications quality, not HD. When the settings
+leave no room for video, AVM sends audio only and says so.
 
 ## The screens
 

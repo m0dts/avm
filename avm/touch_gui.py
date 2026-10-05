@@ -50,6 +50,7 @@ UPDATE_CHECK_DELAY_MS = 5000  # after start-up: GitHub check runs in the backgro
 # Start screen: past this, it says the codec is compiling (a first start). A
 # cached warm-up is ~1 s on a PC, 3.1 s on an Atom x5 (measured); a compile minutes.
 SPLASH_DELAY_MS = 8000
+RESCALE_DELAY_MS = 300  # resizable window: re-scale this long after resizing stops
 SPLASH_HOLD_MS = 1000   # start screen stays this long after the codec is ready
 
 
@@ -129,6 +130,10 @@ class TouchWindow(QtWidgets.QWidget):
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        # a resizable window may shrink below its contents' current minimum:
+        # _rescale then shrinks fonts and controls to fit
+        root.setSizeConstraint(QtWidgets.QLayout.SetNoConstraint)
+        self.setMinimumSize(480, 288)
 
         bar = QtWidgets.QHBoxLayout()
         bar.setContentsMargins(8, 6, 8, 2)
@@ -175,7 +180,7 @@ class TouchWindow(QtWidgets.QWidget):
         self._cpu_timer = QtCore.QTimer(self)
         self._cpu_timer.timeout.connect(self._update_cpu)
         self._cpu_timer.start(CPU_UPDATE_MS)
-        quit_btn = QtWidgets.QPushButton("✕")
+        self.quit_btn = quit_btn = QtWidgets.QPushButton("✕")
         quit_btn.setObjectName("toggle")
         quit_btn.setFocusPolicy(QtCore.Qt.NoFocus)
         quit_btn.setFixedWidth(round(56 * scale))
@@ -280,6 +285,30 @@ class TouchWindow(QtWidgets.QWidget):
         super().resizeEvent(event)
         if hasattr(self, "_splash"):
             self._splash.setGeometry(self.rect())
+        # a resizable window (Windows): re-scale once the resizing stops
+        if getattr(self, "scalable", False):
+            if not hasattr(self, "_rescale_timer"):
+                self._rescale_timer = QtCore.QTimer(self)
+                self._rescale_timer.setSingleShot(True)
+                self._rescale_timer.timeout.connect(self._rescale)
+            self._rescale_timer.start(RESCALE_DELAY_MS)
+
+    def _rescale(self):
+        """Fonts and controls to suit the window's new height (1.0 = 480 px):
+        the stylesheet carries most sizes; the few fixed ones are reset."""
+        scale = max(0.75, self.height() / 480)
+        if abs(scale - self.scale) < 0.03:
+            return
+        self.scale = tw.SCALE = scale
+        self.app.setStyleSheet(tw.stylesheet(scale, tw.RX_ACCENT))
+        self.notice_btn.setFixedWidth(round(72 * scale))
+        self.quit_btn.setFixedWidth(round(56 * scale))
+        self.rx.station.setFixedHeight(round(28 * scale))
+        self.tx.fit_left_labels()
+        tick_font = self.rx.font()
+        tick_font.setPixelSize(max(9, round(11 * scale)))
+        for side in ("left", "bottom"):
+            self.rx.engine.spectrum_plot.getAxis(side).setStyle(tickFont=tick_font)
 
     def _warmup_poll(self):
         if self._warmup is not None and self._warmup.poll() is None:
@@ -435,13 +464,21 @@ def main():
     gui_layout.set_app_id("hfmodem-touch")
     app.setStyle("Fusion")
     size = os.environ.get("HF_TOUCH_SIZE")
+    # Windows: a normal, resizable window (not full screen) that re-scales
+    # to its size; 80% of the screen height to start, in the 7" panel's shape
+    windowed = sys.platform == "win32" and not size
     if size:
         w, h = (int(v) for v in size.lower().split("x"))
+    elif windowed:
+        geo = app.primaryScreen().availableGeometry()
+        h = round(geo.height() * 0.8)
+        w = min(round(h * 800 / 480), geo.width())
     else:
         geo = app.primaryScreen().geometry()
         w, h = geo.width(), geo.height()
     scale = max(0.75, h / 480)
     win = TouchWindow(app, scale)
+    win.scalable = windowed
     # SIGTERM / Ctrl-C: close normally, so TX/RX and their helper processes
     # are stopped -- killed outright, they used to carry on as orphans. Qt
     # only lets Python handle a signal between events, hence the timer.
@@ -451,7 +488,7 @@ def main():
     wake = QtCore.QTimer()
     wake.timeout.connect(lambda: None)
     wake.start(250)
-    if size:
+    if size or windowed:
         win.resize(w, h)
         win.show()
     else:
