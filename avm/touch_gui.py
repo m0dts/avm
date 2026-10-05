@@ -26,6 +26,7 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 os.chdir(os.path.dirname(os.path.abspath(__file__)))  # engines start their scripts by relative path
 
+import avm_threads
 import avm_update
 import avm_version
 import gui_layout
@@ -46,6 +47,34 @@ from touch_tx_page import TxPage
 
 CPU_UPDATE_MS = 2000
 UPDATE_CHECK_DELAY_MS = 5000  # after start-up: GitHub check runs in the background
+# Start screen: past this, it says the codec is compiling (a first start). A
+# cached warm-up is ~1 s on a PC, 3.1 s on an Atom x5 (measured); a compile minutes.
+SPLASH_DELAY_MS = 8000
+SPLASH_HOLD_MS = 1000   # start screen stays this long after the codec is ready
+
+
+# Compiles (first run) or loads (cached) the wavelet codec's encoder and
+# decoder: the kernels are shape-generic, so one small size covers them all.
+_WARMUP_CODE = "; ".join([
+    "import numpy as np",
+    "from wavelet_codec import WaveletCodec",
+    "w, h = 192, 112",
+    "z = lambda a, b: np.zeros((b, a), np.uint8)",
+    "enc, dec = WaveletCodec(w, h, 200), WaveletCodec(w, h, 200)",
+    "dec.decode(enc.encode(z(w, h), z(w // 2, h // 2), z(w // 2, h // 2)))",
+])
+
+
+def _start_codec_warmup():
+    """Run the codec warm-up in its own process (None if it can't start)."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        return subprocess.Popen([sys.executable, "-c", _WARMUP_CODE], cwd=here,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, **avm_threads.die_with_parent())
+    except OSError:
+        return None
 
 
 class _UpdateResult(QtCore.QObject):
@@ -160,6 +189,18 @@ class TouchWindow(QtWidgets.QWidget):
         # each page checks the other before starting: one LimeSDR can't be
         # opened by TX and RX at once (separate processes; a Pluto can)
         self.tx.peer, self.rx.peer = self.rx, self.tx
+        # Video codec warm-up, in the background from launch: the first run on
+        # a machine compiles it (minutes on a slow CPU; seconds once cached).
+        # TX waits for it rather than going on air without a picture.
+        self._warmup = _start_codec_warmup()
+        self.tx.codec_busy = lambda: self._warmup is not None and self._warmup.poll() is None
+        self._warmup_timer = QtCore.QTimer(self)
+        self._warmup_timer.timeout.connect(self._warmup_poll)
+        self._warmup_timer.start(500)
+        # Start screen over the whole window while that runs: a second or
+        # two normally, and it stays, explaining, if this start compiles.
+        self._warmup_t0 = time.monotonic()
+        self._splash = self._build_splash()
         self.pages.addWidget(self.tx)
         self.pages.addWidget(self.rx)
         root.addWidget(self.pages, 1)
@@ -186,6 +227,8 @@ class TouchWindow(QtWidgets.QWidget):
         self._usb_timer.timeout.connect(self._usb_tick)
         self._usb_timer.start(USB_WATCH_MS)
         self._update_indicator()
+        if not self._splash.isHidden():
+            self._splash.raise_()  # above everything built after it
 
     def _update_cpu(self):
         now = _cpu_times()
@@ -194,6 +237,60 @@ class TouchWindow(QtWidgets.QWidget):
             if total > 0:
                 self.cpu.setText(f"CPU {100 * busy / total:.0f}%")
         self._cpu_last = now
+
+    def _build_splash(self):
+        """Full-window start screen: the name large in the upper middle, a
+        status line under it, the credit small at the bottom right."""
+        w = QtWidgets.QWidget(self)
+        w.setAutoFillBackground(True)
+        w.setStyleSheet(f"background: {tw.BG};")
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.setContentsMargins(round(16 * self.scale), 0, round(16 * self.scale), round(10 * self.scale))
+        lay.addStretch(2)
+        title = QtWidgets.QLabel("AudioVideoModem")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        title.setStyleSheet(f"color: {tw.TEXT}; font-size: {round(52 * self.scale)}px; font-weight: bold;")
+        lay.addWidget(title)
+        lay.addSpacing(round(18 * self.scale))
+        self._splash_status = QtWidgets.QLabel("Preparing codecs...")
+        self._splash_status.setAlignment(QtCore.Qt.AlignCenter)
+        self._splash_status.setWordWrap(True)
+        self._splash_status.setStyleSheet(f"color: {tw.TEXT_DIM};")
+        lay.addWidget(self._splash_status)
+        lay.addStretch(3)
+        credit = QtWidgets.QLabel(f"{avm_version.SHORT_TITLE}  ·  by M0DTS and AI!")
+        credit.setAlignment(QtCore.Qt.AlignRight)
+        credit.setStyleSheet(f"color: {tw.TEXT_DIM}; font-size: {round(12 * self.scale)}px;")
+        lay.addWidget(credit)
+        w.setGeometry(self.rect())
+        w.show()
+        w.raise_()
+        return w
+
+    def _update_splash(self):
+        secs = int(time.monotonic() - self._warmup_t0)
+        if secs * 1000 < SPLASH_DELAY_MS:
+            self._splash_status.setText("Preparing codecs...")
+        else:  # still going: this start is compiling the codec
+            self._splash_status.setText(
+                "Preparing codecs, please wait...\n\nThe first start on this machine compiles "
+                f"the video codec:\nthis can take a few minutes. Later starts are quick.\n\n{secs} s")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_splash"):
+            self._splash.setGeometry(self.rect())
+
+    def _warmup_poll(self):
+        if self._warmup is not None and self._warmup.poll() is None:
+            self._update_splash()
+            return
+        self._warmup_timer.stop()
+        QtCore.QTimer.singleShot(SPLASH_HOLD_MS, self._splash.hide)  # a moment longer to read
+        if self._warmup is not None and self._warmup.returncode:
+            tw.notices().add("TX", "Video codec warm-up failed (exit "
+                                   f"{self._warmup.returncode}); TX will compile it when it starts")
+        self.tx.codec_ready()
 
     def _start_update_check(self):
         """Compare this AVM with GitHub on a background thread (a few small

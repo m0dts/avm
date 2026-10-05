@@ -406,7 +406,24 @@ class TxPage(QtWidgets.QWidget):
     def is_running(self):
         return bool(self.engine.procs)
 
+    # set by the window: True while the video codec is still being prepared
+    # (compiled, on a first start) in the background
+    codec_busy = staticmethod(lambda: False)
+    _waiting_codec = False
+
+    def codec_ready(self):
+        """The window's codec warm-up finished: start a TX that was waiting."""
+        if self._waiting_codec:
+            self._waiting_codec = False
+            self.start()
+
     def _run_clicked(self):
+        if self._waiting_codec:  # tapped while waiting for the codec: cancel
+            self._waiting_codec = False
+            self.run.set_state("stopped")
+            self.status.setText("Cancelled")
+            self.preview.clear_image(self._preview_idle_text())
+            return
         if self.run.state == "stopped":
             self.start()
         elif self.run.state == "pending":
@@ -430,6 +447,14 @@ class TxPage(QtWidgets.QWidget):
         if self._lime_busy():
             return
         self._apply_to_engine()
+        # don't go on air with no picture while the codec compiles: wait
+        if getattr(self.engine, "_video_enabled", True) and self.codec_busy():
+            self._waiting_codec = True
+            self.run.set_state("pending")
+            self.status.setText("Preparing video codec (first start on this machine)...\n"
+                                "TX starts when it's ready -- tap again to cancel")
+            self.preview.clear_image("Preparing video codec...\nTX starts when it's ready")
+            return
         self._sent = 0
         self._last_error = ""
         tw.write_gain_file("tx", self.gain.value())  # so a stale value can't apply at start
