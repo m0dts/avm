@@ -67,12 +67,39 @@ def install(main_name=None):
     threading.Thread._bootstrap_inner = _bootstrap_inner
 
 
+# The ffmpeg the installer chose: it writes the folder to ffmpeg_dir.txt
+# beside this file (Windows: a "full" build, with Codec2). None without that
+# file (Linux: the system ffmpeg, found on PATH as usual).
+def _installed_ffmpeg():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg_dir.txt")) as f:
+            d = f.read().strip()
+    except OSError:
+        return None
+    exe = os.path.join(d, "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
+    return exe if d and os.path.isfile(exe) else None
+
+
+INSTALLED_FFMPEG = _installed_ffmpeg()
+if INSTALLED_FFMPEG:  # also first on PATH, for anything that searches
+    os.environ["PATH"] = os.path.dirname(INSTALLED_FFMPEG) + os.pathsep + os.environ.get("PATH", "")
+
+
+def ffmpeg_exe():
+    """The ffmpeg AVM runs: the installer's, else the first on PATH."""
+    import shutil
+    return INSTALLED_FFMPEG or shutil.which("ffmpeg") or "ffmpeg"
+
+
 # Windows: AVM's GUI has no console, so every console program it starts
 # (python helpers, ffmpeg, ...) would otherwise pop up its own black console
 # window -- and their own helpers likewise. Every AVM process that starts
 # others imports this module, so this one patch covers them all: each new
 # process is created with CREATE_NO_WINDOW (added to any creationflags given,
-# e.g. a priority class). Elsewhere: nothing.
+# e.g. a priority class). It also runs a bare "ffmpeg" as the installer's
+# ffmpeg by full path: Windows' own search can find another one first (e.g.
+# the one conda puts in AVM's Python environment, without Codec2). Elsewhere:
+# nothing.
 if sys.platform == "win32":
     import subprocess as _subprocess
 
@@ -81,24 +108,14 @@ if sys.platform == "win32":
 
     def _popen_init_no_window(self, *args, **kwargs):
         kwargs["creationflags"] = kwargs.get("creationflags", 0) | _CREATE_NO_WINDOW
+        cmd = args[0] if args else kwargs.get("args")
+        if (INSTALLED_FFMPEG and isinstance(cmd, (list, tuple)) and cmd
+                and str(cmd[0]).lower() in ("ffmpeg", "ffmpeg.exe")):
+            cmd = [INSTALLED_FFMPEG] + list(cmd[1:])
+            if args:
+                args = (cmd,) + args[1:]
+            else:
+                kwargs["args"] = cmd
         _popen_init(self, *args, **kwargs)
 
     _subprocess.Popen.__init__ = _popen_init_no_window
-
-
-# The ffmpeg the installer chose (it writes its folder to ffmpeg_dir.txt,
-# beside this file -- Windows: e.g. a "full" build with Codec2) goes first on
-# PATH, however AVM was started; every helper process inherits it. No file
-# (Linux: the system ffmpeg): PATH as it is.
-def _use_installed_ffmpeg():
-    try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg_dir.txt")) as f:
-            d = f.read().strip()
-    except OSError:
-        return
-    path = os.environ.get("PATH", "")
-    if d and os.path.isdir(d) and not path.startswith(d + os.pathsep):
-        os.environ["PATH"] = d + os.pathsep + path
-
-
-_use_installed_ffmpeg()

@@ -599,7 +599,11 @@ def ffmpeg_has_encoder(name):
     if _ffmpeg_encoders is None:
         import shutil
         import subprocess
-        FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"
+        try:
+            import avm_threads
+            FFMPEG_PATH = avm_threads.ffmpeg_exe()  # the installer's, else PATH's
+        except ImportError:
+            FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"
         try:
             out = subprocess.run([FFMPEG_PATH, "-hide_banner", "-encoders"], capture_output=True,
                                  text=True, errors="replace", timeout=10, stdin=subprocess.DEVNULL).stdout
