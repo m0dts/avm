@@ -115,8 +115,12 @@ mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync
 - **A computer:** a Raspberry Pi 4, or any 64-bit PC with Ubuntu/Debian or
   Windows 10/11. A faster CPU allows bigger video.
 - **A radio (SDR):**
-  - **ADALM-Pluto:** TX and RX.
-  - **LimeSDR (USB or Mini):** TX and RX.
+  - **ADALM-Pluto:** TX and RX, both at once from one Pluto.
+  - **LimeSDR (USB or Mini):** TX or RX, but not both at once from one
+    LimeSDR. AVM runs TX and RX as separate programs, and a Lime can only be
+    opened by one of them at a time. To transmit and receive together, pair
+    the Lime with a second radio for RX, such as a cheap RTL-SDR. AVM says
+    "LimeSDR busy" if you try to use one for both.
   - **RTL-SDR dongle:** RX only.
 
   Add filters and an amplifier as needed for your band.

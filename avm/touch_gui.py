@@ -123,6 +123,9 @@ class TouchWindow(QtWidgets.QWidget):
         self.pages = QtWidgets.QStackedWidget()
         self.tx = TxPage(self.settings)
         self.rx = RxPage(self.settings)
+        # each page checks the other before starting: one LimeSDR can't be
+        # opened by TX and RX at once (separate processes; a Pluto can)
+        self.tx.peer, self.rx.peer = self.rx, self.tx
         self.pages.addWidget(self.tx)
         self.pages.addWidget(self.rx)
         root.addWidget(self.pages, 1)

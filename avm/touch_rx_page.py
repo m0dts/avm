@@ -385,7 +385,18 @@ class RxPage(QtWidgets.QWidget):
         else:
             self.stop()
 
+    def _lime_busy(self):
+        """True (and says so) if TX holds the LimeSDR this RX wants."""
+        peer = getattr(self, "peer", None)
+        if (self.engine.sdr == "lime" and peer is not None and peer.is_running()
+                and peer.engine.sdr == "lime"):
+            self.status.setText("LimeSDR busy: TX is using it (one Lime can't do both)")
+            return True
+        return False
+
     def start(self):
+        if self._lime_busy():
+            return
         self._apply_to_engine()
         self._ok = self._lost = self._bad = 0
         self._mer = []

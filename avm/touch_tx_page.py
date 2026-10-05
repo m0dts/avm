@@ -398,7 +398,19 @@ class TxPage(QtWidgets.QWidget):
         else:
             self.stop()
 
+    def _lime_busy(self):
+        """True (and says so) if RX holds the LimeSDR this TX wants."""
+        peer = getattr(self, "peer", None)
+        if (self.engine.sdr == "lime" and peer is not None and peer.is_running()
+                and peer.engine.sdr == "lime"):
+            self.status.setText("LimeSDR busy: RX is using it. One LimeSDR can't do TX and RX\n"
+                                "at once -- stop RX, or receive with another radio (e.g. an RTL-SDR).")
+            return True
+        return False
+
     def start(self):
+        if self._lime_busy():
+            return
         self._apply_to_engine()
         self._sent = 0
         self._last_error = ""
