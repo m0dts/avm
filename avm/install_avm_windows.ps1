@@ -25,13 +25,17 @@ function Die($m)  { Write-Host "XX $m" -ForegroundColor Red; exit 1 }
 # ---------------------------------------------------------------- where things are
 $repo = if ($env:AVM_REPO) { $env:AVM_REPO } else { "m0dts/avm" }
 $branch = if ($env:AVM_BRANCH) { $env:AVM_BRANCH } else { "main" }
-# AVM beside this script (a copied release folder: .\ or .\avm), else
-# %USERPROFILE%\avm (or AVM_INSTALL_DIR), fetched from GitHub if not there yet
+# AVM always lives in %USERPROFILE%\avm (or AVM_INSTALL_DIR). Run from a
+# copy elsewhere (an unzipped download or release folder: AVM beside this
+# script, in .\ or .\avm), that copy is copied there; otherwise it's
+# fetched from GitHub.
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (Test-Path "$here\touch_gui.py") { $avm = $here }
-elseif (Test-Path "$here\avm\touch_gui.py") { $avm = "$here\avm" }
-elseif ($env:AVM_INSTALL_DIR) { $avm = $env:AVM_INSTALL_DIR }
-else { $avm = Join-Path $env:USERPROFILE "avm" }
+$local = $null
+if (Test-Path "$here\touch_gui.py") { $local = $here }
+elseif (Test-Path "$here\avm\touch_gui.py") { $local = "$here\avm" }
+$avm = if ($env:AVM_INSTALL_DIR) { $env:AVM_INSTALL_DIR } else { Join-Path $env:USERPROFILE "avm" }
+$avm = [IO.Path]::GetFullPath($avm).TrimEnd("\")
+$fromLocal = $local -and ([IO.Path]::GetFullPath($local).TrimEnd("\") -ne $avm)
 if (-not [Environment]::Is64BitOperatingSystem) { Die "AVM needs 64-bit Windows (numba has no 32-bit builds)." }
 $home_ = Join-Path $env:LOCALAPPDATA "AVM"
 $envDir = Join-Path $home_ "env"
@@ -42,7 +46,18 @@ New-Item -ItemType Directory -Force $home_ | Out-Null
 
 # ---------------------------------------------------------------- 0. AVM from GitHub
 Say "0. AVM program files"
-if ((Test-Path "$avm\touch_gui.py") -and -not $Update) {
+if ($fromLocal -and -not $Update) {
+    if ($Check) {
+        Write-Host "would copy AVM from $local into $avm"
+    } else {
+        # this copy's files into the user folder (its logs and launcher left
+        # out: step 4 writes the launcher for the user folder)
+        New-Item -ItemType Directory -Force $avm | Out-Null
+        Get-ChildItem $local -Exclude "gui_logs", "AVM.bat", "__pycache__" |
+            Copy-Item -Destination $avm -Recurse -Force
+        Write-Host "copied AVM from $local into $avm (the copy in $local can be deleted)"
+    }
+} elseif ((Test-Path "$avm\touch_gui.py") -and -not $Update) {
     Write-Host "present ($avm); -Update fetches the latest from GitHub"
 } elseif ($Check) {
     Write-Host "would download github.com/$repo ($branch) into $avm"
