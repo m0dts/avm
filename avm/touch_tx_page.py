@@ -200,6 +200,13 @@ class TxPage(QtWidgets.QWidget):
         self.res = tw.Picker("Resolution (16:9)", media_tx_gui.WAVELET_RESOLUTIONS,
                              _valid_res(s_get(settings, "tx_res", "256x144")))
         self.audio =tw.Segmented([("codec2", "Codec2"), ("opus", "Opus")], s_get(settings, "tx_audio", "codec2"))
+        # Not every ffmpeg has a Codec2 encoder (e.g. the standard Windows
+        # builds): TX would fail at start ("Error opening output file").
+        self._no_codec2 = not tw.ffmpeg_has_encoder("libcodec2")
+        if self._no_codec2:
+            self.audio._buttons["codec2"].setEnabled(False)
+            if self.audio.value() == "codec2":
+                self.audio.set_value("opus")
         self.fps = tw.Segmented([(f, f) for f in ("4", "6", "8", "10", "12", "15")], s_get(settings, "tx_fps", "12"))
         self.freq = tw.FreqButton("TX frequency", s_get(settings, "tx_freq", 145500000))
         self.mode = tw.Segmented([(m, m) for m in tw.MODES], tw.saved_mode(s_get(settings, "tx_mode", "A")))
@@ -317,6 +324,8 @@ class TxPage(QtWidgets.QWidget):
         warn = e.video_bitrate_warning.text() or e.audio_packing_warning.text()
         if not video:
             warn = "NO VIDEO: link too slow, sending audio only -- use a wider kHz or faster mode"
+        elif not warn and getattr(self, "_no_codec2", False):
+            warn = "Codec2 unavailable: this ffmpeg has no Codec2 encoder (using Opus)"
         # the placeholder shows while there is no camera picture
         new_text = self._preview_idle_text()
         if new_text != getattr(self, "_preview_text", None):
