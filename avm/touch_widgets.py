@@ -156,8 +156,8 @@ _ERROR_RE = re.compile(r"\b[A-Za-z_]*(Error|Exception)\b|\bERROR\b|^XX ")
 _ERROR_IGNORE = ("Broken pipe", "Error muxing", "Error writing trailer", "Error closing file",
                  "error code: -32", "[video-stats]", "Traceback (most recent call last)",
                  # SoapySDR's Pluto driver looking for network Plutos while
-                 # opening: harmless with a USB Pluto, or no avahi-daemon
-                 'Unable to scan "ip"', "Avahi DNS-SD client")
+                 # opening: harmless (no network Pluto, no avahi-daemon, Windows: no "local")
+                 "Unable to scan", "Avahi DNS-SD client")
 
 
 def error_line(line):
@@ -677,6 +677,9 @@ def detect_radios():
     found = []
     try:
         import SoapySDR
+        # errors only: the Pluto driver warns about every way it looks that
+        # doesn't apply here ('Unable to scan "ip"', 'local: -19' on Windows)
+        SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_ERROR)
         if SoapySDR.Device.enumerate("driver=plutosdr"):
             found.append("PlutoSDR")
         for kw in SoapySDR.Device.enumerate("driver=lime"):

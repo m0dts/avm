@@ -64,3 +64,22 @@ def install(main_name=None):
         orig_bootstrap(self)
 
     threading.Thread._bootstrap_inner = _bootstrap_inner
+
+
+# Windows: AVM's GUI has no console, so every console program it starts
+# (python helpers, ffmpeg, ...) would otherwise pop up its own black console
+# window -- and their own helpers likewise. Every AVM process that starts
+# others imports this module, so this one patch covers them all: each new
+# process is created with CREATE_NO_WINDOW (added to any creationflags given,
+# e.g. a priority class). Elsewhere: nothing.
+if sys.platform == "win32":
+    import subprocess as _subprocess
+
+    _CREATE_NO_WINDOW = 0x08000000
+    _popen_init = _subprocess.Popen.__init__
+
+    def _popen_init_no_window(self, *args, **kwargs):
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _CREATE_NO_WINDOW
+        _popen_init(self, *args, **kwargs)
+
+    _subprocess.Popen.__init__ = _popen_init_no_window

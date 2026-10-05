@@ -28,6 +28,8 @@ import shutil
 import subprocess
 import sys
 
+import avm_threads  # noqa: F401 -- Windows: helpers start without console windows
+
 from media_source import build_video_args, list_devices
 
 
