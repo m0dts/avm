@@ -102,6 +102,8 @@ fi
 say "0. AVM program files"
 if [ -f "$AVM_DIR/touch_gui.py" ] && [ $UPDATE = 0 ]; then
     echo "present ($AVM_DIR); --update fetches the latest from GitHub"
+    # how it compares with GitHub (one line; nothing if offline)
+    [ -f "$AVM_DIR/avm_update.py" ] && python3 "$AVM_DIR/avm_update.py" 2>/dev/null | head -n 1
 elif [ $CHECK_ONLY = 1 ]; then
     echo "would download github.com/$AVM_REPO ($AVM_BRANCH) into $AVM_DIR"
 else

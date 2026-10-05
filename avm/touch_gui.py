@@ -18,6 +18,7 @@ start/stop button into RESTART TO APPLY. Settings are remembered in
 import json
 import os
 import sys
+import threading
 import time
 
 # One BLAS thread per process (see hf_ofdm_tx.py); before numpy loads.
@@ -25,6 +26,7 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 os.chdir(os.path.dirname(os.path.abspath(__file__)))  # engines start their scripts by relative path
 
+import avm_update
 import avm_version
 import gui_layout
 
@@ -43,6 +45,12 @@ from touch_rx_page import RxPage
 from touch_tx_page import TxPage
 
 CPU_UPDATE_MS = 2000
+UPDATE_CHECK_DELAY_MS = 5000  # after start-up: GitHub check runs in the background
+
+
+class _UpdateResult(QtCore.QObject):
+    """Carries the background GitHub check's result to the GUI thread."""
+    done = QtCore.pyqtSignal(list)
 USB_WATCH_MS = 2000   # USB watchdog poll (sysfs only: microseconds)
 USB_RESUME_S = 4.0    # a device must be back this long before TX/RX restarts
 
@@ -106,6 +114,19 @@ class TouchWindow(QtWidgets.QWidget):
         # may shrink to nothing, so the radio picker and quit always fit
         self.indicator.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         bar.addWidget(self.indicator, 1)
+        # shown only when GitHub has newer AVM files (see _start_update_check)
+        self.update_btn = QtWidgets.QPushButton("⬆ Update")
+        self.update_btn.setObjectName("toggle")
+        self.update_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.update_btn.setStyleSheet(f"color: {tw.RX_ACCENT};")
+        self.update_btn.clicked.connect(self._show_update)
+        self.update_btn.hide()
+        bar.addWidget(self.update_btn)
+        bar.addSpacing(8)
+        self._update_files = []
+        self._update_result = _UpdateResult()
+        self._update_result.done.connect(self._update_checked)
+        QtCore.QTimer.singleShot(UPDATE_CHECK_DELAY_MS, self._start_update_check)
         # warning button: errors seen this session (tw.notices); tap for the list
         self.notice_btn = QtWidgets.QPushButton("⚠")
         self.notice_btn.setObjectName("toggle")
@@ -173,6 +194,50 @@ class TouchWindow(QtWidgets.QWidget):
             if total > 0:
                 self.cpu.setText(f"CPU {100 * busy / total:.0f}%")
         self._cpu_last = now
+
+    def _start_update_check(self):
+        """Compare this AVM with GitHub on a background thread (a few small
+        HTTPS requests); no network: no button, nothing else happens."""
+        def run():
+            try:
+                changed = avm_update.check()
+            except Exception:
+                return
+            self._update_result.done.emit(changed)
+        threading.Thread(target=run, daemon=True, name="update-check").start()
+
+    def _update_checked(self, changed):
+        self._update_files = changed
+        self.update_btn.setVisible(bool(changed))
+
+    def _show_update(self):
+        """Ask, then: stop TX/RX, fetch the new files from GitHub, restart."""
+        files = self._update_files
+        listed = "\n".join("   " + f for f in files[:10]) + ("\n   ..." if len(files) > 10 else "")
+        box = QtWidgets.QMessageBox(
+            QtWidgets.QMessageBox.Question, "Update available",
+            f"A newer AVM is on GitHub ({len(files)} file(s) differ):\n{listed}\n\n"
+            "Update now? TX/RX stop, AVM downloads the new files and restarts.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, self)
+        if box.exec_() != QtWidgets.QMessageBox.Yes:
+            return
+        self.tx.shutdown()
+        self.rx.shutdown()
+        save_settings(self.settings)
+        self.update_btn.setText("Updating...")
+        self.update_btn.setEnabled(False)
+        self.app.processEvents()
+        try:
+            avm_update.apply()
+        except Exception as e:
+            self.update_btn.setText("⬆ Update")
+            self.update_btn.setEnabled(True)
+            QtWidgets.QMessageBox.warning(self, "Update failed",
+                                          f"Nothing was changed.\n\n{e}\n\nYou can also update with:\n"
+                                          f"   {avm_update.UPDATE_CMD}")
+            return
+        # restart: the same program, arguments and environment, now updated
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def _update_notice_btn(self):
         n = tw.notices().count()
