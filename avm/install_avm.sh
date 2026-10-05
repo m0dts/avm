@@ -354,6 +354,10 @@ if command -v ffmpeg >/dev/null; then
     printf '    %-12s %-12s %s\n' ffmpeg "$FFV" \
         "Opus: $(echo "$FFE" | grep -q libopus && echo yes || echo NO)  Codec2: $(echo "$FFE" | grep -q libcodec2 && echo yes || echo 'no (Opus only)')"
     echo "$FFE" | grep -q libopus || warn "ffmpeg has no Opus encoder: AVM's audio won't work"
+    # Debian / Ubuntu / Raspberry Pi OS ffmpeg includes Codec2; a custom or
+    # third-party build (some SDR distributions) may not
+    echo "$FFE" | grep -q libcodec2 || warn "this ffmpeg ($(command -v ffmpeg)) has no Codec2: AVM offers Opus only.
+   For Codec2, use the distribution's ffmpeg: sudo apt install --reinstall ffmpeg libcodec2-dev"
 else
     printf '    %-12s %s\n' ffmpeg "not installed yet"
 fi

@@ -130,34 +130,59 @@ if (Test-Env) {
 
 # ---------------------------------------------------------------- 3. ffmpeg
 Say "3. ffmpeg"
-$ffDir = $null
+# AVM needs ffmpeg with Opus and Codec2. Use the first ffmpeg found that has
+# both; otherwise download gyan.dev's "full" build (it has both; the common
+# BtbN builds lack Codec2) into %LOCALAPPDATA%\AVM\ffmpeg. It's a .7z, which
+# Windows' own tar.exe (bsdtar) unpacks -- no 7-Zip needed.
+function Get-FfEncoders($exe) {
+    try { return ((& $exe -hide_banner -encoders 2>$null) -join "`n") } catch { return "" }
+}
+$candidates = @("$avm\ffmpeg\bin", "$home_\ffmpeg\bin", "C:\ffmpeg\bin")
 $onPath = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-foreach ($d in @("$avm\ffmpeg\bin", "$home_\ffmpeg\bin", "C:\ffmpeg\bin")) {
-    if (Test-Path "$d\ffmpeg.exe") { $ffDir = $d; break }
+if ($onPath) { $candidates += (Split-Path -Parent $onPath.Source) }
+$ffDir = $null
+$partial = $null   # an ffmpeg without Codec2, if that's all there is
+foreach ($d in $candidates) {
+    if (-not (Test-Path "$d\ffmpeg.exe")) { continue }
+    $enc = Get-FfEncoders "$d\ffmpeg.exe"
+    if ($enc -match "libcodec2" -and $enc -match "libopus") { $ffDir = $d; break }
+    if (-not $partial) { $partial = $d }
 }
-if (-not $ffDir -and $onPath) { $ffDir = Split-Path -Parent $onPath.Source }
 if ($ffDir) {
-    Write-Host "using $ffDir\ffmpeg.exe"
+    Write-Host "using $ffDir\ffmpeg.exe (Opus and Codec2)"
 } elseif ($Check) {
-    Write-Host "not found (would be downloaded)"
+    if ($partial) { Write-Host "$partial\ffmpeg.exe has no Codec2: the full build would be downloaded" }
+    else { Write-Host "not found: the full build would be downloaded" }
 } else {
-    $zip = Join-Path $env:TEMP "ffmpeg-avm.zip"
-    Write-Host "downloading ffmpeg (~150 MB)..."
-    Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $zip
+    if ($partial) { Write-Host "$partial\ffmpeg.exe has no Codec2 -- getting the full build" }
+    $arc = Join-Path $env:TEMP "ffmpeg-avm-full.7z"
     $tmp = Join-Path $home_ "ffmpeg_tmp"
-    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-    Expand-Archive $zip -DestinationPath $tmp
-    $inner = Get-ChildItem $tmp -Directory | Select-Object -First 1
-    if (Test-Path "$home_\ffmpeg") { Remove-Item -Recurse -Force "$home_\ffmpeg" }
-    Move-Item $inner.FullName "$home_\ffmpeg"
-    Remove-Item -Recurse -Force $tmp; Remove-Item $zip
-    $ffDir = "$home_\ffmpeg\bin"
-    Write-Host "installed to $ffDir"
+    try {
+        Write-Host "downloading ffmpeg full build (~170 MB, gyan.dev)..."
+        Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z" -OutFile $arc
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        New-Item -ItemType Directory $tmp | Out-Null
+        & "$env:SystemRoot\System32\tar.exe" -xf $arc -C $tmp
+        if ($LASTEXITCODE -ne 0) { throw "tar couldn't unpack the .7z" }
+        $exe = Get-ChildItem $tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+        if (-not $exe) { throw "no ffmpeg.exe in the download" }
+        if (Test-Path "$home_\ffmpeg") { Remove-Item -Recurse -Force "$home_\ffmpeg" }
+        Move-Item (Split-Path -Parent $exe.DirectoryName) "$home_\ffmpeg"
+        $ffDir = "$home_\ffmpeg\bin"
+        Write-Host "installed to $ffDir"
+    } catch {
+        Warn "couldn't get the full ffmpeg build ($($_.Exception.Message))"
+        if ($partial) { $ffDir = $partial; Warn "using $partial\ffmpeg.exe: Opus only, no Codec2" }
+        else { Die "no ffmpeg: AVM needs one. Put a 'full' build in C:\ffmpeg and re-run." }
+    } finally {
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+        if (Test-Path $arc) { Remove-Item $arc -ErrorAction SilentlyContinue }
+    }
 }
 if ($ffDir) {
-    $enc = (& "$ffDir\ffmpeg.exe" -hide_banner -encoders 2>$null) -join "`n"
+    $enc = Get-FfEncoders "$ffDir\ffmpeg.exe"
     if ($enc -notmatch "libopus") { Warn "this ffmpeg has no Opus encoder: Opus audio won't work" }
-    if ($enc -notmatch "libcodec2") { Warn "this ffmpeg has no Codec2 encoder: use Opus audio (or a 'full' build, e.g. gyan.dev, in C:\ffmpeg)" }
+    if ($enc -notmatch "libcodec2") { Warn "this ffmpeg has no Codec2 encoder: AVM offers Opus only" }
 }
 
 # ---------------------------------------------------------------- 4. launcher
