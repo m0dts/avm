@@ -415,6 +415,7 @@ class TxPage(QtWidgets.QWidget):
                 and peer.engine.sdr == "lime"):
             self.status.setText("LimeSDR busy: RX is using it. One LimeSDR can't do TX and RX\n"
                                 "at once -- stop RX, or receive with another radio (e.g. an RTL-SDR).")
+            tw.notices().add("TX", "Not started: the LimeSDR is in use by RX (one Lime can't do both)")
             return True
         return False
 
@@ -451,6 +452,16 @@ class TxPage(QtWidgets.QWidget):
     def _on_log(self, line):
         if "Streamed fragment" in line:
             self._sent += 1
+        # Problems go to the title bar's errors list, not the status line:
+        # real errors, plus lowercase "error" lines and audio underruns
+        low = line.lower()
+        err = tw.error_line(line)
+        if not err and ("silence-filled" in low or re.search(r"\berror\b", low)) \
+                and not any(x in line for x in tw._ERROR_IGNORE):
+            err = line.strip()
+        if err:
+            tw.notices().add("TX", err)
+            self._last_error = err[:120]  # for "TX stopped: <why>" if it then stops
         # the video source's warm-up (media_source_wavelet.py): the first
         # start on a machine compiles the codec, minutes on a slow CPU
         if "preparing video codec" in line:
@@ -458,9 +469,6 @@ class TxPage(QtWidgets.QWidget):
                                      "(first start on this machine: can take a few minutes)")
         elif "video codec ready" in line:
             self.preview.clear_image("Starting video...")
-        low = line.lower()
-        if "error" in low or "traceback" in low or "silence-filled" in low:
-            self._last_error = line.strip()[:120]
 
     def _tick(self):
         if self.is_running():
@@ -469,9 +477,10 @@ class TxPage(QtWidgets.QWidget):
                 self.stop()
                 self.status.setText(("TX stopped: " + self._last_error) if self._last_error
                                     else "TX stopped unexpectedly")
+                tw.notices().add("TX", "TX stopped unexpectedly" +
+                                 (f" ({self._last_error})" if self._last_error else ""))
                 return
-            self.status.setText(f"On air  ·  {self._sent} fragments sent"
-                                + (f"\n{self._last_error}" if self._last_error else ""))
+            self.status.setText(f"On air  ·  {self._sent} fragments sent")
             if not self.isVisible():
                 return  # on the RX view: nobody sees the preview
             rgb = self._preview.read()

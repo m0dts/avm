@@ -391,6 +391,7 @@ class RxPage(QtWidgets.QWidget):
         if (self.engine.sdr == "lime" and peer is not None and peer.is_running()
                 and peer.engine.sdr == "lime"):
             self.status.setText("LimeSDR busy: TX is using it (one Lime can't do both)")
+            tw.notices().add("RX", "Not started: the LimeSDR is in use by TX (one Lime can't do both)")
             return True
         return False
 
@@ -417,6 +418,9 @@ class RxPage(QtWidgets.QWidget):
         self.running_changed.emit(False)
 
     def _on_log(self, line):
+        err = tw.error_line(line)
+        if err:
+            tw.notices().add("RX", err)
         # MER from each fragment's EVM (RMS error / ideal): MER = -20 log10(EVM)
         m = re.search(r"Fragment seq=\d+: .*?EVM=([\d.]+)%", line)
         if m and float(m.group(1)) > 0:
@@ -450,6 +454,7 @@ class RxPage(QtWidgets.QWidget):
             if e.procs[0].poll() is not None:
                 self.stop()
                 self.status.setText("RX stopped unexpectedly")
+                tw.notices().add("RX", "RX stopped unexpectedly")
                 return
             self.status.setText(self._status_line())
 

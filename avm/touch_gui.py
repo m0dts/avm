@@ -106,6 +106,16 @@ class TouchWindow(QtWidgets.QWidget):
         # may shrink to nothing, so the radio picker and quit always fit
         self.indicator.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         bar.addWidget(self.indicator, 1)
+        # warning button: errors seen this session (tw.notices); tap for the list
+        self.notice_btn = QtWidgets.QPushButton("⚠")
+        self.notice_btn.setObjectName("toggle")
+        self.notice_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.notice_btn.setFixedWidth(round(72 * scale))  # room for "⚠ 99"
+        self.notice_btn.clicked.connect(lambda: tw.NoticesDialog(self).exec_())
+        tw.notices().changed.connect(self._update_notice_btn)
+        bar.addWidget(self.notice_btn)
+        bar.addSpacing(12)
+        self._update_notice_btn()
         # whole-system CPU (all cores), every CPU_UPDATE_MS
         self.cpu = QtWidgets.QLabel("CPU --")
         self.cpu.setObjectName("dim")
@@ -164,6 +174,12 @@ class TouchWindow(QtWidgets.QWidget):
                 self.cpu.setText(f"CPU {100 * busy / total:.0f}%")
         self._cpu_last = now
 
+    def _update_notice_btn(self):
+        n = tw.notices().count()
+        self.notice_btn.setText(f"⚠ {n}" if n else "⚠")
+        # red while there's something to read, dim otherwise
+        self.notice_btn.setStyleSheet(f"color: {tw.STOP if n else tw.TEXT_DIM};")
+
     def _usb_needs(self, page, devs):
         """[(name, attached now)] for the USB devices this page uses."""
         sdr = page.engine.sdr
@@ -183,6 +199,9 @@ class TouchWindow(QtWidgets.QWidget):
         lost = self._usb_seen and not devs
         if lost != self._usb_lost:
             self._usb_lost = lost
+            if lost:
+                tw.notices().add("USB", "Every USB device disappeared at once: the USB system "
+                                        "has failed -- reboot (check cables / power)")
             self._update_indicator()
         for page in (self.tx, self.rx):
             st = page._usb
@@ -196,6 +215,8 @@ class TouchWindow(QtWidgets.QWidget):
                 gone = sorted(st["watch"] - attached)
                 if gone:
                     page.stop()
+                    tw.notices().add("USB", f"{' and '.join(gone)} disconnected from USB while "
+                                            f"{side} was running ({side} stopped; restarts when it is back)")
                     page.status.setText(f"{' and '.join(gone)} disconnected from USB -- "
                                         f"{side} restarts when {'it is' if len(gone) == 1 else 'they are'} back")
                     st["watch"], st["resume"] = None, set(gone)

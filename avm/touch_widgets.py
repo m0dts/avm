@@ -6,9 +6,11 @@ scales with the window height (scale 1.0 = 480 px), so the same layout
 works on a 1080p monitor.
 """
 import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -100,6 +102,107 @@ class Segmented(QtWidgets.QWidget):
         b = self._buttons.get(v)
         if b is not None:
             b.setChecked(True)
+
+
+class Notices(QtCore.QObject):
+    """Errors and warnings seen this session, for the title bar's warning
+    button (touch_gui). A repeat of the newest entry from the same source
+    just bumps its count, so a looping error can't flood the list."""
+    changed = QtCore.pyqtSignal()
+    MAX = 200
+
+    def __init__(self):
+        super().__init__()
+        self.items = []  # [time, source, text, count], oldest first
+
+    def add(self, source, text):
+        text = " ".join(str(text).split())[:300]
+        if not text:
+            return
+        now = time.strftime("%H:%M:%S")
+        if self.items and self.items[-1][1] == source and self.items[-1][2] == text:
+            self.items[-1][0] = now
+            self.items[-1][3] += 1
+        else:
+            self.items.append([now, source, text, 1])
+            del self.items[:-self.MAX]
+        self.changed.emit()
+
+    def clear(self):
+        self.items = []
+        self.changed.emit()
+
+    def count(self):
+        return sum(item[3] for item in self.items)
+
+
+_notices = None
+
+
+def notices():
+    """The session's one Notices store."""
+    global _notices
+    if _notices is None:
+        _notices = Notices()
+    return _notices
+
+
+# A process log line that reports a real problem: the final line of a Python
+# traceback ("RuntimeError: ..."), an "Error"/"ERROR" message, or an "XX"
+# installer-style failure. Not stats lines that merely count errors
+# ("0 errors" -- plural never matches), nor ffmpeg's routine complaints when
+# its output pipe closes as TX stops.
+_ERROR_RE = re.compile(r"\b[A-Za-z_]*(Error|Exception)\b|\bERROR\b|^XX ")
+_ERROR_IGNORE = ("Broken pipe", "Error muxing", "Error writing trailer", "Error closing file",
+                 "error code: -32", "[video-stats]", "Traceback (most recent call last)")
+
+
+def error_line(line):
+    """The message to report if this log line is an error, else None."""
+    if not _ERROR_RE.search(line) or any(x in line for x in _ERROR_IGNORE):
+        return None
+    return line.strip()
+
+
+class NoticesDialog(QtWidgets.QDialog):
+    """Full-window list of the session's errors, newest first, with a button
+    to clear them."""
+
+    def __init__(self, parent):
+        super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        self.setModal(True)
+        lay = QtWidgets.QVBoxLayout(self)
+        top = QtWidgets.QHBoxLayout()
+        t = QtWidgets.QLabel("Errors and warnings")
+        t.setObjectName("big")
+        top.addWidget(t, 1)
+        clear = QtWidgets.QPushButton("Clear errors")
+        clear.clicked.connect(self._clear)
+        top.addWidget(clear)
+        close = QtWidgets.QPushButton("Close")
+        close.clicked.connect(self.accept)
+        top.addWidget(close)
+        lay.addLayout(top)
+        self.list = QtWidgets.QListWidget()
+        self.list.setWordWrap(True)
+        self.list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        QtWidgets.QScroller.grabGesture(self.list.viewport(), QtWidgets.QScroller.LeftMouseButtonGesture)
+        lay.addWidget(self.list, 1)
+        self._fill()
+        self.setGeometry(parent.window().geometry())
+
+    def _fill(self):
+        self.list.clear()
+        items = notices().items
+        if not items:
+            self.list.addItem("No errors.")
+            return
+        for t, source, text, n in reversed(items):
+            self.list.addItem(f"{t}  {source}: {text}" + (f"   ×{n}" if n > 1 else ""))
+
+    def _clear(self):
+        notices().clear()
+        self._fill()
 
 
 class TouchListDialog(QtWidgets.QDialog):
