@@ -214,9 +214,30 @@ fi
 
 # ---------------------------------------------------------------- 3. venv
 say "3. Python venv ($VENV)"
+# Keep numpy on the system's major version for every pip install here: apt's
+# own modules (OpenCV, PyAV...) are built for it, and a numpy 1 <-> 2 switch
+# breaks them ("_ARRAY_API not found"). pip would otherwise pull numpy 2 in
+# with an upgraded numba on numpy-1 systems (Ubuntu 22.04, DragonOS).
+SYS_NP="$(/usr/bin/python3 -c 'import numpy; print(numpy.__version__.split(".")[0])' 2>/dev/null)"
+NP_PIN="$(mktemp)"
+case "$SYS_NP" in
+    1) echo "numpy<2" > "$NP_PIN" ;;
+    2) echo "numpy>=2" > "$NP_PIN" ;;
+esac
+export PIP_CONSTRAINT="$NP_PIN"
 if [ $CHECK_ONLY = 0 ]; then
     [ -x "$VENV/bin/python" ] || python3 -m venv --system-site-packages "$VENV" || die "venv creation failed"
     "$VENV/bin/pip" install -q --upgrade pyqtgraph sounddevice || die "pip install failed"
+fi
+# repair a venv where an earlier run let pip switch numpy's major version
+VENV_NP="$("$VENV/bin/python" -c 'import numpy; print(numpy.__version__.split(".")[0])' 2>/dev/null)"
+if [ -n "$SYS_NP" ] && [ -n "$VENV_NP" ] && [ "$VENV_NP" != "$SYS_NP" ]; then
+    if [ $CHECK_ONLY = 1 ]; then
+        echo "  numpy $VENV_NP.x in the venv but the system's is $SYS_NP.x (would be fixed)"
+    else
+        echo "  numpy: venv has $VENV_NP.x, system modules need $SYS_NP.x -- fixing"
+        "$VENV/bin/pip" install -q "$(cat "$NP_PIN")" || warn "numpy fix failed"
+    fi
 fi
 PY="$VENV/bin/python"
 [ -x "$PY" ] || PY=python3
