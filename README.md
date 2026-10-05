@@ -8,7 +8,8 @@ digital OFDM modem 20 to 250 kHz wide.
 It's a complete station in one program, with a full-screen touch interface.
 It's built to run on a **Raspberry Pi 4 with a 7" touch screen**, which can
 transmit and receive at the same time. It also runs on an ordinary
-Ubuntu/Debian PC, and should run on Windows.
+Ubuntu/Debian PC, and should run on Windows; see
+[Which platform?](#which-platform) before choosing.
 
 ## What it's for
 
@@ -121,6 +122,24 @@ mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync
 - **A licence to transmit:** see the note under [Use](#use).
 
 ## Install
+
+### Which platform?
+
+**A Raspberry Pi 4 is the recommended way to run AVM.** It's what AVM is
+developed and tested on, and the installer is made for a fresh 64-bit
+Raspberry Pi OS card. If you already have a Portsdown
+DATV station, it has the right hardware (a Pi 4 with the 7" touch screen and
+a Pluto or LimeSDR). Just make a new SD card for AVM, and swap cards to
+switch between Portsdown and AVM.
+
+**Windows, or a Linux PC or distribution you've set up yourself, will likely
+need some work from you.** The installers handle the common cases, but every
+machine differs: other SDR software already installed, a different ffmpeg
+build, missing drivers, sound and camera setups. It isn't possible to
+support every combination, so on these, expect to sort out the odd problem
+yourself.
+
+### Installing
 
 **Linux (Ubuntu 22.04+, Debian 12+, Raspberry Pi OS, 64-bit):**
 
