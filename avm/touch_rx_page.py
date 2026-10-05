@@ -166,7 +166,8 @@ class RxPage(QtWidgets.QWidget):
         rl.addWidget(self.ref_auto, 2)
         rl.addWidget(self.ref, 5)
         self.radio = tw.RadioPicker("RX radio (connected now)", settings.get("rx_sdr", settings.get("sdr", "pluto")),
-                                     rx=True)
+                                     rx=True, pluto_uri=settings.get("rx_pluto_uri", ""))
+        self._pluto_uri = self.radio.pluto_uri  # to notice a change of route
         # RTL-SDR crystal correction (no TCXO); only shown with an RTL-SDR
         self.ppm = tw.Stepper(-200, 200, 1, int(s_get(settings, "rx_rtl_ppm", 60)), " ppm")
         self.engine.rtl_ppm = float(self.ppm.value())
@@ -246,6 +247,9 @@ class RxPage(QtWidgets.QWidget):
     def _apply_to_engine(self):
         tw.enforce_mode_bandwidth(self.mode, self.bw)
         e = self.engine
+        # how the Pluto is reached: the route picked in the radio list, else
+        # its usual network address (pluto_soapy_sink falls back to a search)
+        e.pluto_uri.setText(self.radio.pluto_uri or "ip:192.168.2.1")
         e.input_mode.setCurrentText("pluto")
         e.rf_freq.setText(str(self.freq.hz()))
         e.mode.setCurrentText(self.mode.value())
@@ -280,6 +284,7 @@ class RxPage(QtWidgets.QWidget):
                       rx_ref=self.ref.value() if hasattr(self, "ref") else -25,
                       rx_ref_auto=self.ref_auto.isChecked() if hasattr(self, "ref_auto") else True,
                       rx_sdr=self.engine.sdr,
+                      rx_pluto_uri=self.radio.pluto_uri if hasattr(self, "radio") else "",
                       rx_rtl_ppm=self.ppm.value() if hasattr(self, "ppm") else 60,
                       rx_lime_port=self.lime_port.value() if hasattr(self, "lime_port") else "Auto")
 
@@ -358,7 +363,10 @@ class RxPage(QtWidgets.QWidget):
         self.ppm.setVisible(sdr == "rtlsdr")
         self.gain.hi = {"lime": 61, "rtlsdr": 49}.get(sdr, 73)
         self.gain.set_value(self.gain.value(), emit=True)
-        if force or sdr != self.engine.sdr:
+        uri = self.radio.pluto_uri
+        changed_uri = uri != getattr(self, "_pluto_uri", uri)
+        self._pluto_uri = uri
+        if force or sdr != self.engine.sdr or changed_uri:
             self.engine.sdr = sdr
             if not force:
                 self._apply_to_engine()  # the RTL-SDR's own sample rate

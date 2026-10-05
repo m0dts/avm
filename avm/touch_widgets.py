@@ -710,6 +710,20 @@ def detect_rx_radios():
     return found or ["(no radios found -- check USB / power)"]
 
 
+# "PlutoSDR (USB)" / "PlutoSDR (IP 192.168.2.1)" -> the SoapySDR uri it was
+# found at (filled in by detect_radios)
+PLUTO_URIS = {}
+
+
+def pluto_label(uri):
+    """List entry for a Pluto found at this uri ("usb:1.6.5", "ip:...")."""
+    if uri.startswith("usb:"):
+        return "PlutoSDR (USB)"
+    if uri.startswith("ip:"):
+        return f"PlutoSDR (IP {uri[3:]})"
+    return "PlutoSDR"
+
+
 def detect_radios():
     """The SDRs connected right now, for the Radio pickers: 'PlutoSDR' and/or
     one entry per LimeSDR (its model, e.g. LimeSDR-USB or LimeSDR Mini, and
@@ -722,8 +736,13 @@ def detect_radios():
         # errors only: the Pluto driver warns about every way it looks that
         # doesn't apply here ('Unable to scan "ip"', 'local: -19' on Windows)
         SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_ERROR)
-        if SoapySDR.Device.enumerate("driver=plutosdr"):
-            found.append("PlutoSDR")
+        # one entry per way a Pluto was found: a USB Pluto usually shows
+        # twice, as its cable also carries a network link (192.168.2.1)
+        for kw in SoapySDR.Device.enumerate("driver=plutosdr"):
+            label = pluto_label(dict(kw).get("uri", ""))
+            if label not in found:
+                found.append(label)
+                PLUTO_URIS[label] = dict(kw).get("uri", "")
         for kw in SoapySDR.Device.enumerate("driver=lime"):
             kw = dict(kw)
             name = kw.get("name") or kw.get("label", "LimeSDR").split(" [")[0]
@@ -745,20 +764,31 @@ class RadioPicker(Picker):
 
     SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL"}  # fits beside the frequency
 
-    def __init__(self, title, sdr, rx=False):
+    def __init__(self, title, sdr, rx=False, pluto_uri=""):
         allowed = RADIO_NAMES if rx else {k: v for k, v in RADIO_NAMES.items() if k not in RX_ONLY_RADIOS}
         sdr = sdr if sdr in allowed else "pluto"
+        self.pluto_uri = pluto_uri or ""  # how the Pluto is reached ("" = default)
         super().__init__(title, detect_rx_radios if rx else detect_radios, self.SHORT[sdr])
         self.sdr = sdr
+        self.set_sdr(sdr)
         self.changed.connect(self._picked)
+
+    def _short(self, sdr):
+        if sdr == "pluto" and self.pluto_uri.startswith("usb:"):
+            return "Pluto USB"
+        if sdr == "pluto" and self.pluto_uri.startswith("ip:"):
+            return "Pluto IP"
+        return self.SHORT[sdr]
 
     def set_sdr(self, sdr):
         self.sdr = sdr
-        self.set_value(self.SHORT[sdr])
+        self.set_value(self._short(sdr))
 
     def _picked(self, label):
         sdr = ("lime" if label.startswith("Lime") else "pluto" if label.startswith("Pluto")
                else "rtlsdr" if label.startswith("RTL-SDR") else None)
+        if sdr == "pluto":
+            self.pluto_uri = PLUTO_URIS.get(label, "")
         self.set_sdr(sdr or self.sdr)  # "(no radios found)" keeps the previous choice
         if sdr:
             self.radio_changed.emit(sdr)

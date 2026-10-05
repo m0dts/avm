@@ -221,7 +221,9 @@ class TxPage(QtWidgets.QWidget):
         self.bw = tw.Segmented([(b, b) for b in tw.BANDWIDTHS_KHZ], tw.saved_bandwidth(s_get(settings, "tx_bw", "80")))
         self.mod = tw.Segmented([("qpsk", "QPSK"), ("16qam", "16QAM")], s_get(settings, "tx_mod", "qpsk"))
         self.gain = tw.Stepper(-89, 0, 1, s_get(settings, "tx_gain", -10), " dB")
-        self.radio = tw.RadioPicker("TX radio (connected now)", settings.get("tx_sdr", settings.get("sdr", "pluto")))
+        self.radio = tw.RadioPicker("TX radio (connected now)", settings.get("tx_sdr", settings.get("sdr", "pluto")),
+                                    pluto_uri=settings.get("tx_pluto_uri", ""))
+        self._pluto_uri = self.radio.pluto_uri  # to notice a change of route
         self.radio.radio_changed.connect(self.set_radio)
         # LimeSDR TX port (BAND1/BAND2 or Auto): only shown with the LimeSDR
         self.lime_port = tw.lime_port_picker("tx", s_get(settings, "tx_lime_port", "Auto"))
@@ -271,6 +273,9 @@ class TxPage(QtWidgets.QWidget):
     def _apply_to_engine(self):
         tw.enforce_mode_bandwidth(self.mode, self.bw)
         e = self.engine
+        # how the Pluto is reached: the route picked in the radio list, else
+        # its usual network address (pluto_soapy_sink falls back to a search)
+        e.pluto_uri.setText(self.radio.pluto_uri or "ip:192.168.2.1")
         e.source_combo.setCurrentText(self._source_key())
         e.station_id.setText(self.callsign.value())
         e.video_device.setEditText(self.camera.value())
@@ -329,6 +334,7 @@ class TxPage(QtWidgets.QWidget):
                       tx_focus=self.focus.value() if hasattr(self, "focus") else 0,
                       tx_bw=self.bw.value(), tx_mod=self.mod.value(), tx_gain=self.gain.value(),
                       tx_sdr=self.engine.sdr,
+                      tx_pluto_uri=self.radio.pluto_uri if hasattr(self, "radio") else "",
                       tx_lime_port=self.lime_port.value() if hasattr(self, "lime_port") else "Auto")
 
     def _refresh_info(self):
@@ -388,12 +394,14 @@ class TxPage(QtWidgets.QWidget):
             self.status.setText(msg)
             tw.notices().add("TX", msg)
         self.lime_port.setVisible(sdr == "lime")
-        if sdr != self.engine.sdr:
+        uri = self.radio.pluto_uri
+        if sdr != self.engine.sdr or uri != getattr(self, "_pluto_uri", uri):
             self.engine.sdr = sdr
             self._refresh_info()
             self._save()
             if self.is_running():
                 self.run.set_state("pending")
+        self._pluto_uri = uri
 
     def _gain_changed(self, db):
         self.engine.tx_gain.setValue(db)
