@@ -67,6 +67,12 @@ echo "AVM:    $AVM_DIR"
 echo "venv:   $VENV"
 [ "$(id -u)" = 0 ] && die "Run as your normal user, not root (it uses sudo where needed)."
 SUDO=sudo
+# Debian installed with a root password leaves the user without sudo
+if [ $CHECK_ONLY = 0 ] && ! { command -v sudo >/dev/null && sudo -v; }; then
+    die "This needs sudo for your user ($USER). As root, run once:
+     su -c 'apt-get install -y sudo && usermod -aG sudo $USER'
+   then log out and back in, and run this installer again."
+fi
 
 # ---------------------------------------------------------------- 0. AVM from GitHub
 say "0. AVM program files"
@@ -201,8 +207,15 @@ for spec in "numpy numpy" "scipy scipy" "numba numba" "cv2 opencv-python-headles
         "$VENV/bin/pip" install -q "$2" || warn "pip install $2 failed"
     fi
 done
-"$PY" -c 'import numba, sys; v = tuple(map(int, numba.__version__.split(".")[:2])); sys.exit(v < (0, 57))' 2>/dev/null \
-    || warn "numba older than 0.57: if the modem fails to compile, run: $VENV/bin/pip install -U numba"
+# Debian 12's apt numba (0.56) predates Python 3.11 support: use pip's instead
+if ! "$PY" -c 'import numba, sys; v = tuple(map(int, numba.__version__.split(".")[:2])); sys.exit(v < (0, 57))' 2>/dev/null; then
+    if [ $CHECK_ONLY = 1 ]; then
+        echo "  numba older than 0.57 (would be upgraded from pip)"
+    else
+        echo "  numba: upgrading from pip (apt's is too old)"
+        "$VENV/bin/pip" install -q "numba>=0.59" || warn "pip install numba failed"
+    fi
+fi
 
 # ---------------------------------------------------------------- 4. USB access
 say "4. USB access"
