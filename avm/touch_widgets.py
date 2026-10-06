@@ -468,6 +468,8 @@ class Stepper(QtWidgets.QWidget):
     """[-] value [+] with auto-repeat when held. Emits changed(value)."""
     changed = QtCore.pyqtSignal(float)
 
+    signed = False  # show "+3" for positive values (offsets)
+
     def __init__(self, lo, hi, step, value, suffix="", parent=None):
         super().__init__(parent)
         self.setObjectName("seg")
@@ -500,7 +502,7 @@ class Stepper(QtWidgets.QWidget):
         if v == self._value:
             return
         self._value = v
-        self.label.setText(f"{v:g}{self.suffix}")
+        self.label.setText(f"{v:+g}{self.suffix}" if self.signed and v else f"{v:g}{self.suffix}")
         if emit:
             self.changed.emit(v)
 
@@ -538,6 +540,19 @@ def write_gain_file(direction, db):
     try:
         with open(gain_file_path(direction), "w") as f:
             f.write(f"{db:.2f}\n")
+    except OSError:
+        pass
+
+
+def freq_offset_file_path():
+    """Where the touch GUI writes the live RX frequency offset (Hz)."""
+    return gain_file_path("rx_freq_offset")
+
+
+def write_freq_offset_file(hz):
+    try:
+        with open(freq_offset_file_path(), "w") as f:
+            f.write(f"{hz:.0f}\n")
     except OSError:
         pass
 

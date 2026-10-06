@@ -127,7 +127,7 @@ def make_reader(args, cfg):
                                tune_offset_hz=args.lo_offset_hz,
                                warmup_discard_s=args.rx_warmup_s,
                                driver=args.sdr, antenna=args.sdr_antenna, gain_file=args.gain_file,
-                               ppm=args.sdr_ppm)
+                               ppm=args.sdr_ppm, freq_offset_file=args.freq_offset_file)
         fe_lo = args.lo_offset_hz
     if not use_frontend:
         return reader
@@ -1545,6 +1545,9 @@ def main():
     ap.add_argument("--gain-file", type=str, default=None,
                      help="Watch this file for a new --rx-gain value (dB) while running -- live "
                           "gain from a GUI, for radios without an outside control route (LimeSDR).")
+    ap.add_argument("--freq-offset-file", type=str, default=None,
+                     help="Watch this file for a receive frequency offset (Hz) while running: the "
+                          "radio re-tunes by that much (the GUI's Offset stepper).")
     ap.add_argument("--pluto-uri", type=str, default=None,
                      help="SoapySDR device URI for --input pluto, e.g. 'ip:192.168.2.1' for a "
                           "network-attached Pluto (required if hf_ofdm_tx.py is using the SAME "

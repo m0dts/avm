@@ -464,7 +464,7 @@ class PlutoRxSource:
     def __init__(self, freq_hz, sample_rate_hz, rx_gain_db=30.0, agc=False,
                  uri=None, bandwidth_hz=None, buffer_size=1 << 15, stream_bufflen=None,
                  lo_offset_hz=0.0, warmup_discard_s=0.75, tune_offset_hz=None,
-                 driver="pluto", antenna=None, gain_file=None, ppm=0.0):
+                 driver="pluto", antenna=None, gain_file=None, ppm=0.0, freq_offset_file=None):
         """lo_offset_hz: shift received samples back by this much (see _run).
         ppm: RTL-SDR crystal correction (ignored by the other radios).
         tune_offset_hz: tune the actual LO this far from freq_hz (default:
@@ -496,6 +496,11 @@ class PlutoRxSource:
         self.sample_rate_hz = sample_rate_hz
         self._sample_count = 0
         self.sdr.setFrequency(SOAPY_SDR_RX, 0, freq_hz + tune_offset_hz)
+        self._tune_hz = freq_hz + tune_offset_hz  # the LO, before any live offset
+        self._freq_offset_hz = 0.0
+        if freq_offset_file:
+            # live receive offset from the GUI (Hz): re-tunes the radio
+            GainFileWatcher(freq_offset_file, self.set_freq_offset)
         if driver == "rtlsdr" and ppm:
             # Older SoapyRTLSDR silently ignores setFrequencyCorrection; its
             # "CORR" frequency component (librtlsdr's ppm) works on all.
@@ -661,6 +666,16 @@ class PlutoRxSource:
                     return
             self._new_data.clear()
             self._new_data.wait(timeout=timeout)
+
+    def set_freq_offset(self, hz):
+        """Shift the receive frequency by hz (live, from the GUI's Offset
+        stepper): the LO moves, the digital LO-offset correction stays."""
+        from SoapySDR import SOAPY_SDR_RX
+        if hz == self._freq_offset_hz:
+            return
+        self._freq_offset_hz = hz
+        self.sdr.setFrequency(SOAPY_SDR_RX, 0, self._tune_hz + hz)
+        print(f"RX frequency offset {hz / 1e3:+.0f} kHz", file=sys.stderr)
 
     def set_gain(self, db):
         """Adjusts real RX gain live, e.g. from a GUI slider -- safe to

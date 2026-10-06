@@ -73,6 +73,8 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
             cmd += ["--spectrum-span-hz", f"{self.span_hz:.0f}"]
         if self.sdr in ("lime", "rtlsdr"):
             cmd += ["--sdr", self.sdr, "--gain-file", tw.gain_file_path("rx")]
+        # live receive offset (the page's Offset stepper), any radio
+        cmd += ["--freq-offset-file", tw.freq_offset_file_path()]
         if self.sdr == "rtlsdr" and self.rtl_ppm:
             cmd += ["--sdr-ppm", f"{self.rtl_ppm:g}"]
         if self.sdr == "lime" and self.lime_port != "Auto":
@@ -178,7 +180,12 @@ class RxPage(QtWidgets.QWidget):
         self.lime_port.changed.connect(self._lime_port_changed)
         # the radio on its own row (the RX column is too narrow to share Freq's),
         # with the radio's own extra: the LimeSDR port or the RTL-SDR's PPM
-        rows = [("Freq", self.freq),
+        # receive offset, live: nudges the receiver onto an off-frequency signal
+        self.offset = tw.Stepper(-100, 100, 1, s_get(settings, "rx_offset_khz", 0), " kHz")
+        self.offset.signed = True
+        self.offset.set_value(self.offset.value())
+        self.offset.changed.connect(self._offset_changed)
+        rows = [("Freq", tw.freq_radio_row(self.freq, self.offset)),
                 ("Radio", tw.freq_radio_row(self.radio, self.lime_port, self.ppm)),
                 ("Mode", self.mode), ("kHz", self.bw), ("Modul.", self.mod),
                 ("RX gain", self.gain), ("Ref level", ref_row), ("Audio", self.audio_out)]
@@ -286,7 +293,13 @@ class RxPage(QtWidgets.QWidget):
                       rx_sdr=self.engine.sdr,
                       rx_pluto_uri=self.radio.pluto_uri if hasattr(self, "radio") else "",
                       rx_rtl_ppm=self.ppm.value() if hasattr(self, "ppm") else 60,
+                      rx_offset_khz=self.offset.value() if hasattr(self, "offset") else 0,
                       rx_lime_port=self.lime_port.value() if hasattr(self, "lime_port") else "Auto")
+
+    def _offset_changed(self, khz):
+        """Live: the running receiver re-tunes by this much (~0.2 s)."""
+        tw.write_freq_offset_file(khz * 1000)
+        self._save()
 
     def _lime_port_changed(self, port):
         """Applied when RX (re)starts."""
@@ -423,6 +436,7 @@ class RxPage(QtWidgets.QWidget):
         self._cfo = []
         self._events.clear()
         tw.write_gain_file("rx", self.gain.value())  # so a stale value can't apply at start
+        tw.write_freq_offset_file(self.offset.value() * 1000)
         self.engine.start()
         if self.is_running():
             self.run.set_state("running")
