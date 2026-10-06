@@ -235,7 +235,13 @@ DRM_MODES = {
     # troposcatter delay spreads (HF modes spend 3-15 ms there). A +-1.1 kHz
     # oscillator error at 432 MHz stays within half a carrier, so no integer
     # CFO search. See sim_hf_channel.py's VHF/UHF channel presets.
-    "VU": {"spacing_hz": 2500.0, "guard_fraction": 1 / 12, "freq_int": 4, "time_int": 4, "preamble_halves": 16,
+    # preamble_halves 32 (was 16): with 16, the short (3.2 ms) preamble was
+    # the weak point -- on AWGN at 80 kHz, 2-3 in 24 fragments went
+    # undetected at 2.2-3 dB SNR where mode A found all 24, ~1 dB worse on
+    # air. 32 (6.4 ms) detects all 24 from 2.2 dB, matching A, for ~3 ms
+    # more airtime per fragment. Changes VU's on-air format: both ends must
+    # use the same value.
+    "VU": {"spacing_hz": 2500.0, "guard_fraction": 1 / 12, "freq_int": 4, "time_int": 4, "preamble_halves": 32,
           "min_occupancy_khz": 80,  # 20/40 kHz (8/15 carriers) failed to decode even on a clean channel
           "note": "VHF/UHF mobile + troposcatter (not DRM)"},
 }
@@ -246,6 +252,8 @@ if _os.environ.get("HF_MODE_VU_FREQ_INT"):
     DRM_MODES["VU"]["freq_int"] = int(_os.environ["HF_MODE_VU_FREQ_INT"])
 if _os.environ.get("HF_MODE_VU_GUARD"):
     DRM_MODES["VU"]["guard_fraction"] = float(_os.environ["HF_MODE_VU_GUARD"])
+if _os.environ.get("HF_MODE_VU_PREAMBLE_HALVES"):  # experiment: sync sensitivity vs airtime
+    DRM_MODES["VU"]["preamble_halves"] = int(_os.environ["HF_MODE_VU_PREAMBLE_HALVES"])
 
 # Exact carrier index ranges [Kmin, Kmax] by (mode, occupancy_khz), from
 # Dream's iTableCarrierKmin/Kmax (6 occupancies x 4 modes; rows in the

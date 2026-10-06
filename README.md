@@ -253,6 +253,12 @@ Notes:
 
 Both ends must use the same mode, width and modulation.
 
+**Mode VU changed in October 2026:** its preamble is now twice as long, so
+weak signals are found reliably (about 1 dB better at 80 kHz). Stations on
+older versions can't receive
+the new VU and vice versa, so update both ends to use VU (modes A–D are
+unaffected).
+
 If a radio or camera drops off USB while running (a loose cable, a device
 browning out), AVM stops that side, says which device went, and restarts
 it by itself once the device is back. If every USB device disappears at

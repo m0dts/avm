@@ -498,9 +498,6 @@ class PlutoRxSource:
         self.sdr.setFrequency(SOAPY_SDR_RX, 0, freq_hz + tune_offset_hz)
         self._tune_hz = freq_hz + tune_offset_hz  # the LO, before any live offset
         self._freq_offset_hz = 0.0
-        if freq_offset_file:
-            # live receive offset from the GUI (Hz): re-tunes the radio
-            GainFileWatcher(freq_offset_file, self.set_freq_offset)
         if driver == "rtlsdr" and ppm:
             # Older SoapyRTLSDR silently ignores setFrequencyCorrection; its
             # "CORR" frequency component (librtlsdr's ppm) works on all.
@@ -576,6 +573,12 @@ class PlutoRxSource:
         if gain_file:
             GainFileWatcher(gain_file, self.set_gain)
         self.sdr.activateStream(self.stream)
+        if freq_offset_file:
+            # Live receive offset from the GUI (Hz): re-tunes the radio. Only
+            # now, after set-up: the RTL's ppm correction and the Lime's port
+            # set-up re-tune it from the base frequency, which silently undid
+            # an offset applied earlier (the stepper showed it, unused).
+            GainFileWatcher(freq_offset_file, self.set_freq_offset)
         name = {"lime": "LimeSDR", "rtlsdr": "RTL-SDR"}.get(driver, "PlutoSDR")
         print(f"{name} RX active: freq={freq_hz/1e6:.4f}MHz "
               f"(LO tuned to {(freq_hz + tune_offset_hz)/1e6:.4f}MHz, {tune_offset_hz/1e3:+.1f}kHz "
