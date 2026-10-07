@@ -1,20 +1,26 @@
-"""Is this AVM up to date with GitHub? Compares each file here with the
-repository's avm/ folder by git blob hash (what GitHub's tree API lists), so
-it works however AVM was installed -- installer, copy or deploy.
+"""Is there a newer AVM on GitHub? Compares version numbers: this AVM's
+(avm_version.VERSION, 1.0.x) with the VERSION file at the top of the
+repository -- one small plain download, no GitHub API (so no rate limit), and
+only a HIGHER number counts: a development copy that's ahead of GitHub, or
+one with local edits, is never offered an "update" backwards. CHANGES.md
+there says what each version brought.
 
-    python avm_update.py          # report, for a terminal / the installer
+    python avm_update.py           # this version vs GitHub's, and what's new
+    python avm_update.py --files   # also: which files here differ from GitHub's
 
 The touch GUI runs check() in the background at start-up and shows an
-"Update" button when files differ. No internet: check() raises OSError (the
-GUI then shows nothing)."""
-import hashlib
-import json
+"Update" button with the new version when there is one; apply() fetches it.
+No internet: check() raises OSError (the GUI then shows nothing)."""
+import io
 import os
+import re
 import sys
+import tarfile
 import urllib.request
 
 REPO = os.environ.get("AVM_REPO", "m0dts/avm")
 BRANCH = os.environ.get("AVM_BRANCH", "main")
+RAW = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 SUBDIR = "avm/"  # the program files' folder in the repository
 UPDATE_CMD = "bash ~/avm/install_avm.sh --update"
 # files whose update means the installer itself should run again (it may
@@ -60,43 +66,90 @@ def run_installer_then_restart(avm_dir=None):
     return False
 
 
-def _blob_sha(data):
-    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+def _version_tuple(text):
+    """'1.0.12' -> (1, 0, 12); anything else -> None."""
+    m = re.fullmatch(r"\s*v?(\d+)\.(\d+)\.(\d+)\s*", text or "")
+    return tuple(int(x) for x in m.groups()) if m else None
 
 
-def git_blob_shas(path):
-    """The hashes git (and GitHub) could give this file: as it is, and with
-    Windows line endings turned to LF (git for Windows may store either)."""
-    with open(path, "rb") as f:
-        data = f.read()
-    shas = {_blob_sha(data)}
-    if b"\r\n" in data:
-        shas.add(_blob_sha(data.replace(b"\r\n", b"\n")))
-    return shas
+def local_version():
+    import avm_version
+    return avm_version.VERSION
 
 
-def remote_files(timeout=8.0):
-    """{path inside avm/: blob hash} on GitHub."""
-    url = f"https://api.github.com/repos/{REPO}/git/trees/{BRANCH}?recursive=1"
-    req = urllib.request.Request(url, headers={"User-Agent": "avm-update-check",
-                                               "Accept": "application/vnd.github+json"})
+def _fetch(url, timeout):
+    req = urllib.request.Request(url, headers={"User-Agent": "avm-update",
+                                               "Cache-Control": "no-cache"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        tree = json.load(r)
-    return {e["path"][len(SUBDIR):]: e["sha"] for e in tree.get("tree", [])
-            if e.get("type") == "blob" and e["path"].startswith(SUBDIR)}
+        return r.read()
 
 
-def check(avm_dir=None, timeout=8.0):
-    """Files whose GitHub version differs from (or is missing in) avm_dir,
-    sorted. Empty: up to date. Raises OSError / ValueError if GitHub can't
-    be reached or read."""
+def remote_version(timeout=8.0):
+    """GitHub's VERSION file, e.g. '1.0.4'. Raises OSError / ValueError."""
+    text = _fetch(f"{RAW}/VERSION", timeout).decode("utf-8", "replace").strip()
+    if not _version_tuple(text):
+        raise ValueError(f"VERSION on GitHub isn't a version number: {text[:30]!r}")
+    return text
+
+
+def check(timeout=8.0):
+    """GitHub's version if it's NEWER than this one, else None. Raises
+    OSError / ValueError if GitHub can't be reached or read."""
+    remote = remote_version(timeout)
+    return remote if _version_tuple(remote) > _version_tuple(local_version()) else None
+
+
+def changes_since(version, timeout=8.0, limit=12):
+    """What CHANGES.md on GitHub lists for versions newer than `version`, as
+    text ('' if none or it can't be read). Sections start '## 1.0.x'."""
+    try:
+        text = _fetch(f"{RAW}/CHANGES.md", timeout).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return ""
+    have = _version_tuple(version)
+    out, keep = [], False
+    for line in text.splitlines():
+        m = re.match(r"^##\s+v?(\d+\.\d+\.\d+)", line)
+        if m:
+            keep = _version_tuple(m.group(1)) > have
+        if keep and line.strip():
+            out.append(line.lstrip("#").strip() if m else line)
+    return "\n".join(out[:limit]) + ("\n..." if len(out) > limit else "")
+
+
+def _same(local_path, data):
+    """Does this file already hold data? (CRLF vs LF doesn't count: git for
+    Windows may store either.)"""
+    try:
+        with open(local_path, "rb") as f:
+            have = f.read()
+    except OSError:
+        return False
+    return have == data or (have.replace(b"\r\n", b"\n")
+                            == data.replace(b"\r\n", b"\n"))
+
+
+def _download(timeout):
+    """{path inside avm/: contents} from GitHub's archive of the branch."""
+    archive = _fetch(f"https://github.com/{REPO}/archive/refs/heads/{BRANCH}.tar.gz", timeout)
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        for m in tar.getmembers():
+            parts = m.name.split("/", 1)  # "<repo>-<branch>/avm/..."
+            if m.isfile() and len(parts) == 2 and parts[1].startswith(SUBDIR):
+                rel = parts[1][len(SUBDIR):]
+                if rel and ".." not in rel.split("/"):
+                    files[rel] = tar.extractfile(m).read()
+    if "touch_gui.py" not in files:
+        raise ValueError("the download has no AVM in it")
+    return files
+
+
+def differing_files(avm_dir=None, timeout=60.0):
+    """Files here that differ from GitHub's (or are missing), sorted."""
     avm_dir = avm_dir or os.path.dirname(os.path.abspath(__file__))
-    changed = []
-    for rel, sha in remote_files(timeout).items():
-        local = os.path.join(avm_dir, *rel.split("/"))
-        if not os.path.isfile(local) or sha not in git_blob_shas(local):
-            changed.append(rel)
-    return sorted(changed)
+    return sorted(rel for rel, data in _download(timeout).items()
+                  if not _same(os.path.join(avm_dir, *rel.split("/")), data))
 
 
 def apply(avm_dir=None, timeout=60.0):
@@ -104,26 +157,9 @@ def apply(avm_dir=None, timeout=60.0):
     files only: no system packages, so no sudo). Each file is written to a
     temporary name, then swapped in, so a failed download changes nothing.
     Returns the files updated. Settings and logs are untouched."""
-    import io
-    import tarfile
     avm_dir = avm_dir or os.path.dirname(os.path.abspath(__file__))
-    changed = set(check(avm_dir))
-    if not changed:
-        return []
-    url = f"https://github.com/{REPO}/archive/refs/heads/{BRANCH}.tar.gz"
-    req = urllib.request.Request(url, headers={"User-Agent": "avm-update"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        archive = r.read()
-    new = {}
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
-        for m in tar.getmembers():
-            parts = m.name.split("/", 1)  # "<repo>-<branch>/avm/..."
-            if m.isfile() and len(parts) == 2 and parts[1].startswith(SUBDIR):
-                rel = parts[1][len(SUBDIR):]
-                if rel in changed and ".." not in rel.split("/"):
-                    new[rel] = tar.extractfile(m).read()
-    if set(new) != changed:
-        raise ValueError(f"download is missing {len(changed - set(new))} file(s)")
+    new = {rel: data for rel, data in _download(timeout).items()
+           if not _same(os.path.join(avm_dir, *rel.split("/")), data)}
     tmp = []
     try:
         for rel, data in new.items():
@@ -142,18 +178,26 @@ def apply(avm_dir=None, timeout=60.0):
 
 
 def main():
+    here = local_version()
     try:
-        changed = check()
+        remote = remote_version()
     except (OSError, ValueError) as e:
-        print(f"AVM files: couldn't check GitHub ({e})")
+        print(f"AVM v{here}: couldn't check GitHub ({e})")
         return 2
-    if not changed:
-        print(f"AVM files: up to date with github.com/{REPO}")
-        return 0
-    print(f"AVM files: {len(changed)} differ from github.com/{REPO} -- update with: {UPDATE_CMD}")
-    for f in changed:
-        print(f"    {f}")
-    return 1
+    newer = _version_tuple(remote) > _version_tuple(here)
+    if newer:
+        print(f"AVM v{here}: v{remote} is available -- update with: {UPDATE_CMD}")
+        notes = changes_since(here)
+        if notes:
+            print("    " + notes.replace("\n", "\n    "))
+    elif _version_tuple(remote) == _version_tuple(here):
+        print(f"AVM v{here}: up to date with github.com/{REPO}")
+    else:
+        print(f"AVM v{here}: newer than github.com/{REPO} (v{remote})")
+    if "--files" in sys.argv:
+        diff = differing_files()
+        print(f"files differing from GitHub's: {len(diff)}" + "".join(f"\n    {f}" for f in diff))
+    return 1 if newer else 0
 
 
 if __name__ == "__main__":

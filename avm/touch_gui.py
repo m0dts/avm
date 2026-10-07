@@ -79,8 +79,11 @@ def _start_codec_warmup():
 
 
 class _UpdateResult(QtCore.QObject):
-    """Carries the background GitHub check's result to the GUI thread."""
-    done = QtCore.pyqtSignal(list)
+    """Carries the background GitHub check's result to the GUI thread:
+    (newer version, its change notes)."""
+    done = QtCore.pyqtSignal(object)
+
+
 USB_WATCH_MS = 2000   # USB watchdog poll (sysfs only: microseconds)
 USB_RESUME_S = 4.0    # a device must be back this long before TX/RX restarts
 
@@ -157,7 +160,7 @@ class TouchWindow(QtWidgets.QWidget):
         self.update_btn.hide()
         bar.addWidget(self.update_btn)
         bar.addSpacing(8)
-        self._update_files = []
+        self._update_version, self._update_notes = None, ""
         self._update_result = _UpdateResult()
         self._update_result.done.connect(self._update_checked)
         QtCore.QTimer.singleShot(UPDATE_CHECK_DELAY_MS, self._start_update_check)
@@ -322,28 +325,32 @@ class TouchWindow(QtWidgets.QWidget):
         self.tx.codec_ready()
 
     def _start_update_check(self):
-        """Compare this AVM with GitHub on a background thread (a few small
-        HTTPS requests); no network: no button, nothing else happens."""
+        """Is there a newer version on GitHub? Checked on a background thread
+        (two tiny downloads: VERSION, and CHANGES.md if newer). No network,
+        or not newer: no button, nothing else happens."""
         def run():
             try:
-                changed = avm_update.check()
+                newer = avm_update.check()
+                notes = avm_update.changes_since(avm_update.local_version()) if newer else ""
             except Exception:
                 return
-            self._update_result.done.emit(changed)
+            self._update_result.done.emit((newer, notes))
         threading.Thread(target=run, daemon=True, name="update-check").start()
 
-    def _update_checked(self, changed):
-        self._update_files = changed
-        self.update_btn.setVisible(bool(changed))
+    def _update_checked(self, result):
+        self._update_version, self._update_notes = result
+        if self._update_version:
+            self.update_btn.setText(f"⬆ v{self._update_version}")
+        self.update_btn.setVisible(bool(self._update_version))
 
     def _show_update(self):
         """Ask, then: stop TX/RX, fetch the new files from GitHub, restart."""
-        files = self._update_files
-        listed = "\n".join("   " + f for f in files[:10]) + ("\n   ..." if len(files) > 10 else "")
+        notes = self._update_notes or "(no change notes)"
         box = QtWidgets.QMessageBox(
             QtWidgets.QMessageBox.Question, "Update available",
-            f"A newer AVM is on GitHub ({len(files)} file(s) differ):\n{listed}\n\n"
-            "Update now? TX/RX stop, AVM downloads the new files and restarts.",
+            f"AVM v{self._update_version} is available -- you have v{avm_update.local_version()}.\n\n"
+            f"What's new:\n{notes}\n\n"
+            "Update now? TX/RX stop, AVM downloads the new version and restarts.",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, self)
         if box.exec_() != QtWidgets.QMessageBox.Yes:
             return
@@ -356,7 +363,7 @@ class TouchWindow(QtWidgets.QWidget):
         try:
             updated = avm_update.apply()
         except Exception as e:
-            self.update_btn.setText("⬆ Update")
+            self.update_btn.setText(f"⬆ v{self._update_version}")
             self.update_btn.setEnabled(True)
             QtWidgets.QMessageBox.warning(self, "Update failed",
                                           f"Nothing was changed.\n\n{e}\n\nYou can also update with:\n"
