@@ -1,5 +1,10 @@
 # AVM: Audio Video Modem
 
+> **⚠ Experimental release.** AVM is a work in progress: expect rough edges,
+> changes between versions (including on-air format changes, so both ends may
+> need the same version), and the odd bug. Please report problems, and don't
+> rely on it for anything that matters yet.
+
 AVM sends **live video and audio over a narrow radio channel**, using
 low-cost SDR hardware. Point a camera at something at one end, and the
 picture and sound appear at the other, with a station callsign, carried by a
@@ -37,6 +42,20 @@ The data rate depends on the width and mode. It ranges from about 10 kbps
 mode VU at 80 kHz with QPSK carries about 45 kbps: 352×192 video at 10 fps
 plus Codec2 audio. That's communications quality, not HD. When the settings
 leave no room for video, AVM sends audio only and says so.
+
+### Designed for HF and unstable VHF/UHF paths
+
+AVM's multi-carrier (OFDM) modes are built for channels that fight back:
+multipath, fading, Doppler and drift on HF, and on VHF/UHF mobile and
+troposcatter paths. That's where they earn their keep.
+
+On a clean, steady path, such as a **satellite link (QO-100 and the like),
+DVB-S2 is much better**: a single-carrier system is more power-efficient
+there, and well-established DATV gear does it properly. AVM works over a
+satellite (some have tried it on QO-100, and the RX frequency offset helps
+with LNB drift), but it isn't what it's designed for. That said, we're radio
+amateurs and we're allowed to experiment! A single-carrier satellite mode
+may be added later.
 
 ## The screens
 
@@ -285,4 +304,7 @@ licence), and you must stay within your band and power limits.
 
 ## Author
 
-Rob, M0DTS
+Rob, M0DTS.
+
+AVM is AI-generated: it was written by Claude (Anthropic's AI), instructed,
+tested and steered by M0DTS.
