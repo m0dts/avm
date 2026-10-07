@@ -256,6 +256,8 @@ class RxPage(QtWidgets.QWidget):
     # ------------------------------------------------------------------
     def _apply_to_engine(self):
         tw.enforce_mode_bandwidth(self.mode, self.bw)
+        # after the width check: it can change the width (e.g. VU needs 80 kHz+)
+        self._update_tuning_bar()
         e = self.engine
         # how the Pluto is reached: the route picked in the radio list, else
         # its usual network address (pluto_soapy_sink falls back to a search)
@@ -370,8 +372,7 @@ class RxPage(QtWidgets.QWidget):
             zone.setRegion((at - pull, at + pull))
 
     def _changed(self, *_):
-        self._update_tuning_bar()
-        self._apply_to_engine()
+        self._apply_to_engine()  # (updates the tuning indicator too)
         if self.is_running():
             self.run.set_state("pending")
 

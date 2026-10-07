@@ -3,6 +3,10 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.3 (2026-10-07)
+- RX tuning indicator also follows automatic width changes (e.g. switching to VU)
+- README: experimental release, designed for HF and unstable paths, screenshots fixed
+
 ## 1.0.2 (2026-10-07)
 - Update check compares version numbers (no GitHub API, never offers an older version) and shows what's new
 - CHANGES.md lists each release
