@@ -38,6 +38,8 @@ MER_STALE_S = 2.0
 STATUS_WINDOW_S = 5
 # spectrum Auto: re-fit every this-many seconds; manual mode uses this dB/div
 AUTOSCALE_S = 5
+TUNE_BAR_COLOUR = "#4fc3f7"  # spectrum tuning indicator: signal band (light blue, not the yellow trace)
+TUNE_OK_COLOUR = "#66bb6a"   # ...and the +- pull-in zones at the centre and edges (green)
 MANUAL_DB_PER_DIV = 2.5
 AUTOSCALE_MAX_DB_PER_DIV = 5.0  # cap: a very low floor drops off the bottom instead
 
@@ -139,6 +141,7 @@ class RxPage(QtWidgets.QWidget):
             spec.getAxis(side).setStyle(tickFont=tick_font)
         left.addWidget(spec, 2)
         root.addLayout(left, 3)
+        self._add_tuning_bar(spec)
 
         # right: settings, station, start/stop (bottom right, same place as TX's)
         right = QtWidgets.QVBoxLayout()
@@ -315,7 +318,59 @@ class RxPage(QtWidgets.QWidget):
         if self.is_running() and self.engine.sdr == "rtlsdr":
             self.run.set_state("pending")
 
+    def _add_tuning_bar(self, spec):
+        """Tuning indicator behind the spectrum trace. Blue band: where the
+        signal should sit (the mode's occupied width), dashed centre line.
+        Green zones, +- the CFO pull-in (see _tuning_geometry) at each band
+        edge: tune so the signal's edges sit inside them, and it locks
+        without degrading.
+        Follows mode and width."""
+        import pyqtgraph as pg
+        from PyQt5 import QtGui
+        band = QtGui.QColor(TUNE_BAR_COLOUR).getRgb()[:3]
+        ok = QtGui.QColor(TUNE_OK_COLOUR).getRgb()[:3]
+        self._tune_inner = pg.LinearRegionItem(movable=False, brush=pg.mkBrush(*band, 35), pen=pg.mkPen(None))
+        self._tune_zones = [pg.LinearRegionItem(movable=False, brush=pg.mkBrush(*ok, 80), pen=pg.mkPen(None))
+                            for _ in range(2)]  # low edge, high edge
+        self._tune_centre = pg.InfiniteLine(pos=0, angle=90, movable=False,
+                                            pen=pg.mkPen(*band, 130, width=1, style=QtCore.Qt.DashLine))
+        for z, item in [(-30, self._tune_inner)] + [(-20, zn) for zn in self._tune_zones] + [(-10, self._tune_centre)]:
+            item.setZValue(z)  # behind the trace
+            spec.addItem(item)
+        self._update_tuning_bar()
+
+    _tuning_cache = {}
+
+    @classmethod
+    def _tuning_geometry(cls, mode, khz):
+        """(signal low Hz, signal high Hz, pull-in Hz) relative to the tuned
+        frequency. Pull-in: the integer-CFO search (+-30 carriers, plus the
+        +-1 carrier fractional estimate) or the room left before the front
+        end's filter edge (fs/2), whichever is smaller -- beyond it the outer
+        carriers start to be cut and decoding degrades."""
+        key = (mode, khz)
+        if key not in cls._tuning_cache:
+            cfg = ofdm.build_config(mode, float(khz), fec_scheme="ldpc")
+            sp = cfg.carrier_spacing
+            bins = [b if b < cfg.n_fft // 2 else b - cfg.n_fft for b in cfg.fft_bins]
+            lo, hi = (min(bins) - 0.5) * sp, (max(bins) + 0.5) * sp
+            room = min(cfg.fs / 2 - hi, cfg.fs / 2 + lo)
+            cls._tuning_cache[key] = (lo, hi, max(0.0, min(31 * sp, room)))
+        return cls._tuning_cache[key]
+
+    def _update_tuning_bar(self):
+        if not hasattr(self, "_tune_inner"):
+            return
+        try:
+            lo, hi, pull = self._tuning_geometry(self.mode.value(), self.bw.value())
+        except Exception:
+            return  # an invalid combination being switched through: keep the last bar
+        self._tune_inner.setRegion((lo, hi))
+        for zone, at in zip(self._tune_zones, (lo, hi)):
+            zone.setRegion((at - pull, at + pull))
+
     def _changed(self, *_):
+        self._update_tuning_bar()
         self._apply_to_engine()
         if self.is_running():
             self.run.set_state("pending")

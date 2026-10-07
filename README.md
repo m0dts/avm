@@ -86,15 +86,26 @@ leave no room for video, AVM sends audio only and says so.
    - **% ok:** the share of data blocks received correctly.
 4. **Spectrum:** the live received band. Here it's a real mode VU, 80 kHz
    signal. The small notch in the middle is deliberate (an empty centre
-   carrier), and it's handy for tuning.
-5. **Freq and radio:** the receive frequency, and Pluto, LimeSDR or RTL-SDR.
-   An RTL-SDR also gets a PPM row to correct its crystal, and a LimeSDR a
-   port button (Auto, LNAL, LNAW or LNAH).
-6. **Mode, kHz and Modul.:** these must match the transmitter.
-7. **RX gain:** changes live.
-8. **Ref level:** the spectrum's top line, or **Auto**.
-9. **Audio:** the output device.
-10. **RX button:** start and stop receiving.
+   carrier), and it's handy for tuning. The **tuning indicator** behind the
+   trace shows where the signal should sit for the selected mode and width:
+   - **light blue band:** the signal's width, with a dashed centre line;
+   - **green zones at each edge:** how far the signal can drift (the
+     frequency-offset pull-in) and still lock without losing sensitivity.
+     Tune so the signal's edges sit inside them.
+5. **Freq and Offset:** the receive frequency, and a **−/+ offset** in 1 kHz
+   steps (±100 kHz). The offset applies live, to pull an off-frequency
+   signal (e.g. a drifting LNB on a satellite path) back into the green
+   zones.
+6. **Radio:** Pluto, LimeSDR or RTL-SDR, from the radios connected now. A
+   Pluto shows how it's connected (**USB** or **IP**), and AVM uses the one
+   you pick. An RTL-SDR also gets a **PPM** setting to correct its crystal,
+   and a LimeSDR a port button (Auto, LNAL, LNAW or LNAH).
+7. **Mode, kHz and Modul.:** these must match the transmitter.
+8. **RX gain:** changes live.
+9. **Ref level:** the spectrum's top line, or **Auto**.
+10. **Audio:** the output device.
+11. **RX button:** start and stop receiving. It checks the radio is
+    connected first, and says so if it isn't.
 
 ## How it works
 
@@ -166,6 +177,9 @@ and anything it would install or change. Nothing is touched until you answer
 keeps SDR drivers your system already has, e.g. on DragonOS. It also adds an
 **AVM** icon to the menu and desktop, and an `avm` command. Run it again with
 `--update` to get the latest version, or `--check` to just see the report.
+
+AVM's version (1.0.x, going up by one each release) shows in its title bar,
+and in the [VERSION](VERSION) file here.
 
 It also asks whether to **turn the screen upside down**, for a touch screen
 mounted the other way up: AVM then rotates the picture and the touch input
