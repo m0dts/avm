@@ -184,17 +184,8 @@ class TxPage(QtWidgets.QWidget):
         # camera and mic under the preview
         self.camera = tw.Picker("Camera", _video_devices, s_get(settings, "tx_camera", "/dev/video0"))
         self.mic = tw.Picker("Microphone", _audio_devices, s_get(settings, "tx_mic", "default"))
+        # camera and mic pickers live on the Config tab (touch_config_page)
         labels = [self.focus_row.layout().itemAt(0).widget()]
-        for label, w in (("Camera", self.camera), ("Mic", self.mic)):
-            row = QtWidgets.QWidget()
-            row.setObjectName("seg")
-            rl = QtWidgets.QHBoxLayout(row)
-            rl.setContentsMargins(0, 0, 0, 0)
-            rl.setSpacing(6)
-            labels.append(tw.row_label(label))
-            rl.addWidget(labels[-1])
-            rl.addWidget(w, 1)
-            left.addWidget(row)
         self._left_labels = labels
         self.fit_left_labels()
         root.addLayout(left, 4)
@@ -239,8 +230,9 @@ class TxPage(QtWidgets.QWidget):
         # --station-id: 20 characters, repeated every 24 fragments)
         self.callsign = tw.TextButton("Callsign / message", s_get(settings, "tx_callsign", ""),
                                       max_len=media_tx_framer.STATION_ID_LEN)
-        rows = [("Call", self.callsign), ("Source", src_row), ("Audio", self.audio), ("FPS", self.fps),
-                ("Freq", tw.freq_radio_row(self.freq, self.radio, self.lime_port)), ("TX gain", self.gain),
+        # callsign and radio (with its Lime port) live on the Config tab
+        rows = [("Source", src_row), ("Audio", self.audio), ("FPS", self.fps),
+                ("Freq", self.freq), ("TX gain", self.gain),
                 ("Mode", self.mode), ("kHz", self.bw), ("Modul.", self.mod)]
         for r, (label, w) in enumerate(rows):
             grid.addWidget(tw.row_label(label), r, 0)
@@ -376,6 +368,18 @@ class TxPage(QtWidgets.QWidget):
         width = max(lab.sizeHint().width() for lab in self._left_labels)
         for lab in self._left_labels:
             lab.setFixedWidth(width)
+
+    def set_content(self, content):
+        """What TX sends (the Config tab's Content): "auto" (video if the
+        link has room, else audio only), "audio" (audio only) or "video"
+        (video only) -- the engine's own force-audio/video switches."""
+        e = self.engine
+        e.force_audio_only.setChecked(content == "audio")
+        e.force_video_only.setChecked(content == "video")
+        self.s["tx_content"] = content
+        self._apply_to_engine()
+        if self.is_running():
+            self.run.set_state("pending")
 
     def _lime_port_changed(self, port):
         """Applied when TX (re)starts."""

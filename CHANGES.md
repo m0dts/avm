@@ -3,6 +3,12 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.4 (2026-10-08)
+- New Config tab: radios, camera, mic, audio out, content (auto/audio only/video only), callsign, spectrum averaging
+- RX Header and Frame lock lamps (green/orange/red over 2 s) replace % ok
+- spectrum averaging applies live
+- settings saved to disk as you go
+
 ## 1.0.3 (2026-10-07)
 - RX tuning indicator also follows automatic width changes (e.g. switching to VU)
 - README: experimental release, designed for HF and unstable paths, screenshots fixed

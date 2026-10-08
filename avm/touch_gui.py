@@ -42,6 +42,7 @@ if os.environ.get("WAYLAND_DISPLAY") and "QT_QPA_PLATFORM" not in os.environ:
 from PyQt5 import QtCore, QtWidgets
 
 import touch_widgets as tw
+from touch_config_page import ConfigPage
 from touch_rx_page import RxPage
 from touch_tx_page import TxPage
 
@@ -84,6 +85,7 @@ class _UpdateResult(QtCore.QObject):
     done = QtCore.pyqtSignal(object)
 
 
+SETTINGS_AUTOSAVE_MS = 2000  # settings written to disk this soon after a change
 USB_WATCH_MS = 2000   # USB watchdog poll (sysfs only: microseconds)
 USB_RESUME_S = 4.0    # a device must be back this long before TX/RX restarts
 
@@ -140,7 +142,8 @@ class TouchWindow(QtWidgets.QWidget):
 
         bar = QtWidgets.QHBoxLayout()
         bar.setContentsMargins(8, 6, 8, 2)
-        self.view = tw.Segmented([("tx", "TX"), ("rx", "RX")], self.settings.get("view", "rx"))
+        self.view = tw.Segmented([("config", "CONFIG"), ("tx", "TX"), ("rx", "RX")],
+                                 self.settings.get("view", "rx"))
         for b in self.view._buttons.values():
             b.setObjectName("toggle")
         self.view.changed.connect(self._show_view)
@@ -209,6 +212,10 @@ class TouchWindow(QtWidgets.QWidget):
         # two normally, and it stays, explaining, if this start compiles.
         self._warmup_t0 = time.monotonic()
         self._splash = self._build_splash()
+        # Config: radios, devices, content, callsign... (the pages' own
+        # widgets, placed there) -- built after the TX and RX pages
+        self.config = ConfigPage(self.settings, self.tx, self.rx)
+        self.pages.addWidget(self.config)
         self.pages.addWidget(self.tx)
         self.pages.addWidget(self.rx)
         root.addWidget(self.pages, 1)
@@ -217,7 +224,7 @@ class TouchWindow(QtWidgets.QWidget):
         # Each page keeps its own accent colour (checked buttons), set once:
         # re-applying the app-wide stylesheet on every TX/RX switch restyled
         # every widget, hidden engines included -- a visibly slow switch.
-        for page, accent in ((self.tx, tw.TX_ACCENT), (self.rx, tw.RX_ACCENT)):
+        for page, accent in ((self.config, tw.CONFIG_ACCENT), (self.tx, tw.TX_ACCENT), (self.rx, tw.RX_ACCENT)):
             page.setStyleSheet(tw.accent_stylesheet(accent))
 
         self._show_view(self.view.value() or "rx")
@@ -234,6 +241,12 @@ class TouchWindow(QtWidgets.QWidget):
         self._usb_timer = QtCore.QTimer(self)
         self._usb_timer.timeout.connect(self._usb_tick)
         self._usb_timer.start(USB_WATCH_MS)
+        # Settings to disk soon after any change, not only on a clean quit:
+        # a crash or a power cut (a Pi kiosk) would otherwise lose them
+        self._saved_json = json.dumps(self.settings, sort_keys=True)
+        self._save_timer = QtCore.QTimer(self)
+        self._save_timer.timeout.connect(self._autosave)
+        self._save_timer.start(SETTINGS_AUTOSAVE_MS)
         self._update_indicator()
         if not self._splash.isHidden():
             self._splash.raise_()  # above everything built after it
@@ -312,6 +325,12 @@ class TouchWindow(QtWidgets.QWidget):
         tick_font.setPixelSize(max(9, round(11 * scale)))
         for side in ("left", "bottom"):
             self.rx.engine.spectrum_plot.getAxis(side).setStyle(tickFont=tick_font)
+
+    def _autosave(self):
+        now = json.dumps(self.settings, sort_keys=True)
+        if now != self._saved_json:
+            save_settings(self.settings)
+            self._saved_json = now
 
     def _warmup_poll(self):
         if self._warmup is not None and self._warmup.poll() is None:
@@ -440,8 +459,10 @@ class TouchWindow(QtWidgets.QWidget):
                         st["back"] = None
 
     def _show_view(self, which):
-        self.pages.setCurrentWidget(self.tx if which == "tx" else self.rx)
-        self.view.setStyleSheet(tw.accent_stylesheet(tw.TX_ACCENT if which == "tx" else tw.RX_ACCENT))
+        page, accent = {"config": (self.config, tw.CONFIG_ACCENT), "tx": (self.tx, tw.TX_ACCENT)}.get(
+            which, (self.rx, tw.RX_ACCENT))
+        self.pages.setCurrentWidget(page)
+        self.view.setStyleSheet(tw.accent_stylesheet(accent))
         self.settings["view"] = which
 
     def _update_indicator(self):

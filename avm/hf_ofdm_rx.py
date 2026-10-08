@@ -1228,6 +1228,23 @@ def _build_spectrum_computer(cfg, args, reader):
     accumulated yet."""
     FFT_SIZE = SPECTRUM_FFT_SIZE
     SPECTRUM_AVERAGES = args.spectrum_averages
+    # --spectrum-averages-file: a new value from the GUI applies live (one
+    # stat() per spectrum update, ~4 a second)
+    avg_state = {"key": None, "n": SPECTRUM_AVERAGES}
+
+    def _live_averages():
+        path = getattr(args, "spectrum_averages_file", None)
+        if path:
+            try:
+                st = os.stat(path)
+                key = (st.st_mtime_ns, st.st_size)
+                if key != avg_state["key"]:
+                    avg_state["key"] = key
+                    with open(path) as f:
+                        avg_state["n"] = max(1, min(256, int(f.read().strip())))
+            except (OSError, ValueError):
+                pass
+        return avg_state["n"]
     fs = args.sample_rate or cfg.fs
     span = getattr(args, "spectrum_span_hz", 0.0) or 0.0
     source = reader
@@ -1307,7 +1324,8 @@ def _build_spectrum_computer(cfg, args, reader):
         windowed = samples[-FFT_SIZE:] * np.hanning(FFT_SIZE)
         spectrum = np.fft.fftshift(np.fft.fft(windowed))
         power_history.append(np.abs(spectrum) ** 2)
-        if len(power_history) > SPECTRUM_AVERAGES:
+        averages = _live_averages()
+        while len(power_history) > averages:
             power_history.pop(0)
         avg_power = np.mean(power_history, axis=0)
         return 10 * np.log10(avg_power[keep] + 1e-12) + display_offset_db
@@ -1610,6 +1628,9 @@ def main():
                           "from the raw SDR samples (when the front end resamples, e.g. Pluto "
                           "at 550 kS/s) shifted by the LO offset, so the signal sits centred "
                           "with noise floor either side -- e.g. 1.5x the occupancy.")
+    ap.add_argument("--spectrum-averages-file", type=str, default=None, metavar="PATH",
+                     help="Watch this file for a new --spectrum-averages value while running "
+                          "(the GUI's live setting).")
     ap.add_argument("--spectrum-averages", type=int, default=8, metavar="N",
                      help="Number of FFT frames to average for the --gui spectrum display "
                           "(default 8). Higher values smooth the trace but slow its response "

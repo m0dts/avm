@@ -25,6 +25,7 @@ TEXT = "#e6e8eb"
 TEXT_DIM = "#9aa0a8"
 TX_ACCENT = "#e07a2e"    # orange
 RX_ACCENT = "#2ea8b0"    # teal
+CONFIG_ACCENT = "#8e7cc3"  # violet: the Config tab
 GO = "#2f9e5a"
 STOP = "#c0392b"
 WARN = "#e0b030"
@@ -540,6 +541,19 @@ def write_gain_file(direction, db):
     try:
         with open(gain_file_path(direction), "w") as f:
             f.write(f"{db:.2f}\n")
+    except OSError:
+        pass
+
+
+def spectrum_averages_file_path():
+    """Where the touch GUI writes the live spectrum averaging (frames)."""
+    return gain_file_path("rx_spectrum_averages")
+
+
+def write_spectrum_averages_file(n):
+    try:
+        with open(spectrum_averages_file_path(), "w") as f:
+            f.write(f"{int(n)}\n")
     except OSError:
         pass
 

@@ -36,6 +36,10 @@ MER_AVERAGE = 8
 MER_STALE_S = 2.0
 # good/bad fragment counts on the status line cover the last this-many seconds
 STATUS_WINDOW_S = 5
+# Header / Frame lock lamps under the video: over the last LOCK_WINDOW_S
+# (longer if fragments come further apart), all / some / none decoded
+LOCK_WINDOW_S = 2.0
+LAMP_ALL, LAMP_SOME, LAMP_NONE, LAMP_OFF = "#43a047", "#fb8c00", "#e53935", "#4a4d52"
 # spectrum Auto: re-fit every this-many seconds; manual mode uses this dB/div
 AUTOSCALE_S = 5
 TUNE_BAR_COLOUR = "#4fc3f7"  # spectrum tuning indicator: signal band (light blue, not the yellow trace)
@@ -77,6 +81,8 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
             cmd += ["--sdr", self.sdr, "--gain-file", tw.gain_file_path("rx")]
         # live receive offset (the page's Offset stepper), any radio
         cmd += ["--freq-offset-file", tw.freq_offset_file_path()]
+        # live spectrum averaging (the Config tab)
+        cmd += ["--spectrum-averages-file", tw.spectrum_averages_file_path()]
         if self.sdr == "rtlsdr" and self.rtl_ppm:
             cmd += ["--sdr-ppm", f"{self.rtl_ppm:g}"]
         if self.sdr == "lime" and self.lime_port != "Auto":
@@ -129,7 +135,24 @@ class RxPage(QtWidgets.QWidget):
         video.installEventFilter(self)
         self.status = tw.ElideLabel("Idle")
         self.status.setObjectName("value")
-        left.addWidget(self.status)
+        # Header / Frame lock lamps, then the status line, on one row
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setSpacing(6)
+        self._lamps = {}
+        for name in ("Header", "Frame"):
+            lamp = QtWidgets.QLabel()
+            size = round(14 * tw.SCALE)
+            lamp.setFixedSize(size, size)
+            lamp.setToolTip(f"{name} lock over the last {LOCK_WINDOW_S:g} s: green all, orange some, red none")
+            self._lamps[name] = lamp
+            status_row.addWidget(lamp)
+            text = QtWidgets.QLabel(name)
+            text.setObjectName("dim")
+            status_row.addWidget(text)
+            status_row.addSpacing(4)
+        status_row.addWidget(self.status, 1)
+        left.addLayout(status_row)
+        self._set_lamps(None)
         spec = self.engine.spectrum_plot
         spec.setParent(None)
         spec.setMinimumHeight(80)
@@ -188,10 +211,11 @@ class RxPage(QtWidgets.QWidget):
         self.offset.signed = True
         self.offset.set_value(self.offset.value())
         self.offset.changed.connect(self._offset_changed)
+        # radio (with its Lime port / RTL ppm) and audio output live on the
+        # Config tab (touch_config_page)
         rows = [("Freq", tw.freq_radio_row(self.freq, self.offset)),
-                ("Radio", tw.freq_radio_row(self.radio, self.lime_port, self.ppm)),
                 ("Mode", self.mode), ("kHz", self.bw), ("Modul.", self.mod),
-                ("RX gain", self.gain), ("Ref level", ref_row), ("Audio", self.audio_out)]
+                ("RX gain", self.gain), ("Ref level", ref_row)]
         for r, (label, w) in enumerate(rows):
             grid.addWidget(tw.row_label(label), r, 0)
             grid.addWidget(w, r, 1)
@@ -493,6 +517,7 @@ class RxPage(QtWidgets.QWidget):
         self._events.clear()
         tw.write_gain_file("rx", self.gain.value())  # so a stale value can't apply at start
         tw.write_freq_offset_file(self.offset.value() * 1000)
+        tw.write_spectrum_averages_file(self.engine.spectrum_averages.value())
         self.engine.start()
         if self.is_running():
             self.run.set_state("running")
@@ -501,6 +526,7 @@ class RxPage(QtWidgets.QWidget):
 
     def stop(self):
         self.engine.stop()
+        self._set_lamps(None)
         self.run.set_state("stopped")
         self.status.setText(f"Stopped  ·  {self._ok} OK, {self._lost} lost, {self._bad} bad"
                             f"  ·  {self._mer_text()}  ·  {self._cfo_text()}")
@@ -526,14 +552,14 @@ class RxPage(QtWidgets.QWidget):
                 self._cfo.append(float(c.group(1)))
                 del self._cfo[:-MER_AVERAGE]
             self._ok += 1
-            self._events.append((now, True))
+            self._events.append((now, True, True))   # (time, header ok, frame ok)
         elif "CRC MISMATCH" in line:
             self._bad += 1
-            self._events.append((now, False))
+            self._events.append((now, True, False))  # header decoded, payload didn't
         m = re.search(r"\((\d+) fragment\(s\) lost", line)
         if m:
             self._lost += int(m.group(1))
-            self._events.extend([(now, False)] * int(m.group(1)))
+            self._events.extend([(now, False, False)] * int(m.group(1)))
 
     def _tick(self):
         e = self.engine
@@ -546,21 +572,49 @@ class RxPage(QtWidgets.QWidget):
                 tw.notices().add("RX", "RX stopped unexpectedly")
                 return
             self.status.setText(self._status_line())
+            self._update_lamps()
+
+    def set_spectrum_averages(self, n):
+        """FFT frames averaged per spectrum update (the Config tab: 4, 8,
+        16 or 32). Live: the running receiver re-reads it (no restart)."""
+        self.engine.spectrum_averages.setValue(int(n))
+        self.s["rx_spec_avg"] = int(n)
+        tw.write_spectrum_averages_file(n)
 
     def _status_line(self):
-        """One row: MER, video fps, video queue, good/bad over STATUS_WINDOW_S."""
-        cutoff = time.monotonic() - STATUS_WINDOW_S
-        while self._events and self._events[0][0] < cutoff:
-            self._events.popleft()
-        good = sum(1 for _, ok in self._events if ok)
-        bad = len(self._events) - good
+        """One row: MER, CFO, video fps, video queue (lock: the lamps)."""
         m = re.search(r"Video: (\d+)/", self.engine.video_stats_label.text())
         fps = f"{m.group(1)} fps" if m else "-- fps"
         video = getattr(self.engine, "_video", None)
         queue = f"Q {video.queue_depth()}" if video is not None else "Q --"
-        # single-spaced separators: with CFO the line just fits the 7" panel
-        ok = f"{100 * good / (good + bad):.0f}% ok" if good + bad else "--% ok"  # over STATUS_WINDOW_S
-        return f"{self._mer_text(live=True)} · {self._cfo_text()} · {fps} · {queue} · {ok}"
+        return f"{self._mer_text(live=True)} · {self._cfo_text()} · {fps} · {queue}"
+
+    def _lock_window(self):
+        """Seconds the lamps judge over: LOCK_WINDOW_S, or longer when
+        fragments are further apart than that (slow modes), so a window
+        always spans a couple of them."""
+        times = [e[0] for e in self._events]
+        gaps = [b - a for a, b in zip(times, times[1:]) if b > a]
+        typical = sorted(gaps)[len(gaps) // 2] if gaps else 0.0
+        return max(LOCK_WINDOW_S, 2.5 * typical)
+
+    def _update_lamps(self):
+        cutoff = time.monotonic() - max(STATUS_WINDOW_S, self._lock_window())
+        while self._events and self._events[0][0] < cutoff:
+            self._events.popleft()
+        recent = [e for e in self._events if e[0] >= time.monotonic() - self._lock_window()]
+        self._set_lamps(recent)
+
+    def _set_lamps(self, events):
+        """events: (time, header ok, frame ok) in the window; None = idle."""
+        for i, name in ((1, "Header"), (2, "Frame")):
+            if events is None:
+                colour = LAMP_OFF
+            else:
+                good = sum(1 for e in events if e[i])
+                colour = (LAMP_NONE if not good else LAMP_ALL if good == len(events) else LAMP_SOME)
+            r = self._lamps[name].width() // 4
+            self._lamps[name].setStyleSheet(f"background: {colour}; border-radius: {r}px;")
 
     def _mer_text(self, live=False):
         # live: nothing decoded for MER_STALE_S (signal gone) reads 0, not the last value

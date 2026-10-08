@@ -59,34 +59,60 @@ may be added later.
 
 ## The screens
 
+The tabs along the top switch between **CONFIG**, **TX** and **RX**. TX and
+RX both run at once; the tabs only change what you see. The title bar also
+shows the version, the ⚠ errors list, CPU use and **✕** to quit.
+
+### Config
+
+![AVM config page](docs/config.png)
+
+The set-up choices, which rarely change once a station is running:
+
+1. **Mode type:** HF, VHF/UHF or SAT. Not available yet (TBC).
+2. **TX radio:** Pluto or LimeSDR. A LimeSDR also gets an antenna-port button
+   (Auto, BAND1 or BAND2); on a LimeSDR Mini, try the other band if there's
+   no RF output.
+3. **RX radio:** Pluto, LimeSDR or RTL-SDR, from the radios connected now. A
+   Pluto shows how it's connected (**USB** or **IP**), and AVM uses the one
+   you pick. An RTL-SDR also gets a **PPM** setting to correct its crystal,
+   and a LimeSDR a port button (Auto, LNAL, LNAW or LNAH).
+4. **Camera** and **Mic:** the capture devices (when TX's source is "Camera +
+   mic").
+5. **Audio out:** where received audio plays.
+6. **Content:** what TX sends. **Auto** sends video whenever the link has room
+   for it, otherwise audio only; **Audio only** and **Video only** force it.
+7. **Callsign:** your callsign or a short message, sent with the picture.
+8. **Spectrum avg:** how many measurements the RX spectrum averages (4, 8,
+   16 or 32): higher is smoother, lower reacts faster. Applies live.
+
+Changing any of these except Spectrum avg while transmitting or receiving
+turns that tab's button to **RESTART TO APPLY**. Settings are saved as you
+go.
+
 ### Transmit
 
 ![AVM transmit page](docs/tx.png)
 
-1. **TX / RX tabs.** Both run at once; the tabs switch what you see. The
-   title bar shows the version and CPU use; **✕** quits.
-2. **Preview:** exactly what's being sent (here the built-in test pattern).
+1. **Preview:** exactly what's being sent (here the built-in test pattern).
    The first start on a new machine shows "Preparing video codec..." here
    instead, while the codec compiles.
-3. **Rates:** video and audio bitrates, the link capacity, resolution and
+2. **Rates:** video and audio bitrates, the link capacity, resolution and
    frame rate, the radio, and fragments sent.
-4. **Camera and Mic** (when the source is "Camera + mic").
-5. **Call:** your callsign or a short message, sent with the picture.
-6. **Source and resolution:** camera and mic, or the test pattern. Video sizes
+3. **Source and resolution:** camera and mic, or the test pattern. Video sizes
    go from 192×112 up to 384×224.
-7. **Audio:** Codec2 (3.2 kbps, leaves more room for video) or Opus (better
+4. **Audio:** Codec2 (3.2 kbps, leaves more room for video) or Opus (better
    quality).
-8. **FPS:** video frame rate.
-9. **Freq and radio:** the transmit frequency, and Pluto or LimeSDR. With a
-   LimeSDR, a third button picks its antenna port (Auto, BAND1 or BAND2).
-   On a LimeSDR Mini, try the other band if there's no RF output.
-10. **TX gain:** output level. It changes live while on air.
-11. **Mode, kHz and Modul.:** how the signal is built. A–D are robust
-    DRM-style modes, and VU is for VHF/UHF mobile and tropo. Widths go from
-    20 to 250 kHz, with QPSK (robust) or 16QAM (faster). Narrow widths that a
-    mode can't use are greyed out.
-12. **TX button:** start and stop transmitting. It turns amber if you change
-    a setting that needs a restart.
+5. **FPS:** video frame rate.
+6. **Freq:** the transmit frequency.
+7. **TX gain:** output level. It changes live while on air.
+8. **Mode, kHz and Modul.:** how the signal is built. A–D are robust
+   DRM-style modes, and VU is for VHF/UHF mobile and tropo. Widths go from
+   20 to 250 kHz, with QPSK (robust) or 16QAM (faster). Narrow widths that a
+   mode can't use are greyed out.
+9. **TX button:** start and stop transmitting. It checks the radio is
+   connected first, and shows **RESTART TO APPLY** if you change a setting
+   that needs a restart.
 
 ### Receive
 
@@ -97,12 +123,14 @@ may be added later.
 2. **Video:** the received picture; tap it for full screen. A receiver
    tuning in mid-transmission sees the picture fill in as a mosaic within a
    few seconds.
-3. **Status line:**
+3. **Lock lamps and status line:**
+   - **Header** and **Frame** lamps, over the last 2 seconds: **green** when
+     every fragment's header (or whole frame) decoded, **orange** when some
+     did, **red** when none did.
    - **MER:** signal quality in dB; higher is better.
    - **CFO:** how far the transmitter is off frequency.
    - **fps:** received frame rate.
    - **Q:** video frames queued for display.
-   - **% ok:** the share of data blocks received correctly.
 4. **Spectrum:** the live received band. Here it's a real mode VU, 80 kHz
    signal. The small notch in the middle is deliberate (an empty centre
    carrier), and it's handy for tuning. The **tuning indicator** behind the
@@ -115,16 +143,11 @@ may be added later.
    steps (±100 kHz). The offset applies live, to pull an off-frequency
    signal (e.g. a drifting LNB on a satellite path) back into the green
    zones.
-6. **Radio:** Pluto, LimeSDR or RTL-SDR, from the radios connected now. A
-   Pluto shows how it's connected (**USB** or **IP**), and AVM uses the one
-   you pick. An RTL-SDR also gets a **PPM** setting to correct its crystal,
-   and a LimeSDR a port button (Auto, LNAL, LNAW or LNAH).
-7. **Mode, kHz and Modul.:** these must match the transmitter.
-8. **RX gain:** changes live.
-9. **Ref level:** the spectrum's top line, or **Auto**.
-10. **Audio:** the output device.
-11. **RX button:** start and stop receiving. It checks the radio is
-    connected first, and says so if it isn't.
+6. **Mode, kHz and Modul.:** these must match the transmitter.
+7. **RX gain:** changes live.
+8. **Ref level:** the spectrum's top line, or **Auto**.
+9. **RX button:** start and stop receiving. It checks the radio is
+   connected first, and says so if it isn't.
 
 ## How it works
 
