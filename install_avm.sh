@@ -187,6 +187,11 @@ have_pkg libiio0 || PKGS="${PKGS/libiio0/libiio1}"
 have_pkg limesuite-udev && PKGS="$PKGS limesuite-udev"
 PLUTO_PKG=soapysdr${SOAPY_ABI}-module-plutosdr
 have_pkg "$PLUTO_PKG" && PKGS="$PKGS $PLUTO_PKG"
+# Airspy R2/Mini and HF+ (receive only), where the distro has them
+AIRSPY_PKG=soapysdr${SOAPY_ABI}-module-airspy
+AIRSPYHF_PKG=soapysdr${SOAPY_ABI}-module-airspyhf
+have_pkg "$AIRSPY_PKG" && PKGS="$PKGS $AIRSPY_PKG"
+have_pkg "$AIRSPYHF_PKG" && PKGS="$PKGS $AIRSPYHF_PKG"
 
 # Radio drivers SoapySDR already has (from any source -- e.g. DragonOS ships
 # its own LimeSuite / Soapy builds) are left alone: the distro's packages
@@ -205,6 +210,8 @@ if echo "$SOAPY_MODS" | grep -q rtlsdrsupport; then
     KEPT="${KEPT}RTL-SDR driver already installed (from this system) -- keeping it\n"
 fi
 command -v rtl_test >/dev/null && drop rtl-sdr
+echo "$SOAPY_MODS" | grep -q "airspysupport" && drop "$AIRSPY_PKG"
+echo "$SOAPY_MODS" | grep -q "airspyhfsupport" && drop "$AIRSPYHF_PKG"
 if echo "$SOAPY_MODS" | grep -q plutosdrsupport; then
     drop "$PLUTO_PKG"
     KEPT="${KEPT}PlutoSDR driver already installed (from this system) -- keeping it\n"

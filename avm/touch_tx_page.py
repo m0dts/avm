@@ -29,6 +29,8 @@ import touch_widgets as tw
 
 PREVIEW_PATH = preview_shm.default_path() + "_tx"
 SOURCES = {"test": "Test pattern", "device": "Camera + mic"}  # engine source -> label
+# audio only on a link more than this many times what it uses: warn (wasted)
+WASTED_LINK_RATIO = 1.5
 TX_QUEUE_DEPTH = 1  # fragments built ahead of the radio (see _apply_to_engine)
 # Waveform RMS as a fraction of DAC full scale. OFDM I/Q peaks run up to
 # ~15 dB above RMS (measured, mode VU 80 kHz): 0.2 touches full scale on
@@ -267,7 +269,7 @@ class TxPage(QtWidgets.QWidget):
         e = self.engine
         # how the Pluto is reached: the route picked in the radio list, else
         # its usual network address (pluto_soapy_sink falls back to a search)
-        e.pluto_uri.setText(self.radio.pluto_uri or "ip:192.168.2.1")
+        e.pluto_uri.setText(self.radio.pluto_uri or tw.default_pluto_uri())
         e.source_combo.setCurrentText(self._source_key())
         e.station_id.setText(self.callsign.value())
         e.video_device.setEditText(self.camera.value())
@@ -334,14 +336,25 @@ class TxPage(QtWidgets.QWidget):
         audio = 3.2 if self.audio.value() == "codec2" else e.audio_bitrate.value()
         video = getattr(e, "_video_enabled", True)
         self.rates.setText(f"Video {e.video_bitrate.value():.1f} kbps   Audio {audio:.1f} kbps" if video
-                           else f"NO VIDEO   Audio {audio:.1f} kbps")
+                           else f"{'AUDIO ONLY' if self.s.get('tx_content') == 'audio' else 'NO VIDEO'}"
+                                f"   Audio {audio:.1f} kbps")
         m = re.search(r"~([\d.]+)\s*kbps", e.link_capacity_label.text())
         link = f"Link {m.group(1)} kbps" if m else "Link --"
         self.link.setText(f"{link}  ·  {e.resolution.currentText()} @ {e.framerate.value():g} fps"
                           f"  ·  {'LimeSDR' if e.sdr == 'lime' else 'PlutoSDR'}")
         warn = e.video_bitrate_warning.text() or e.audio_packing_warning.text()
-        if not video:
+        forced_audio = self.s.get("tx_content", "auto") == "audio"
+        if not video and not forced_audio:
             warn = "NO VIDEO: link too slow, sending audio only -- use a wider kHz or faster mode"
+        if not video and m:
+            # Audio only on a link far bigger than it needs: the rest goes
+            # out as padding -- full width and power for nothing. A narrower
+            # width puts the same power in less bandwidth and reaches further.
+            link_kbps = float(m.group(1))
+            if link_kbps > WASTED_LINK_RATIO * audio:
+                waste = (f"Audio only uses {audio:.0f} of {link_kbps:.0f} kbps -- a narrower kHz "
+                         f"would reach further")
+                warn = waste if forced_audio else f"{warn}; {waste}"
         elif not warn and getattr(self, "_no_codec2", False):
             warn = f"Codec2 unavailable: {tw.FFMPEG_PATH or 'ffmpeg'} has no Codec2 encoder (using Opus)"
         # the placeholder shows while there is no camera picture
@@ -356,6 +369,8 @@ class TxPage(QtWidgets.QWidget):
     def _preview_idle_text(self):
         if getattr(self.engine, "_video_enabled", True):
             return "Camera preview\nwhile transmitting"
+        if self.s.get("tx_content", "auto") == "audio":
+            return "AUDIO ONLY\n(Config: Content)"
         return "NO VIDEO\naudio only at this mode / kHz"
 
     def _changed(self, *_):
@@ -415,7 +430,7 @@ class TxPage(QtWidgets.QWidget):
             return
         if self.is_running():
             if tw.LiveGain.available():
-                self.live_gain.set(self.engine.pluto_uri.text().strip() or "ip:192.168.2.1", db)
+                self.live_gain.set(self.engine.pluto_uri.text().strip() or tw.default_pluto_uri() or "ip:192.168.2.1", db)
             else:
                 self.run.set_state("pending")
 

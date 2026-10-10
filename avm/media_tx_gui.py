@@ -618,6 +618,9 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         # kbps: mono speech gains little above 16, and on the slow links
         # every kbps under 10 goes to video instead.
         AUDIO_MIN_KBPS, AUDIO_MAX_KBPS = 8.0, 16.0
+        # Audio only (forced, or no room for video): the whole link is
+        # audio's, so allow Opus up to its full-quality range
+        AUDIO_ONLY_MAX_KBPS = 48.0
         audio_kbps = min(max(usable_kbps * AUDIO_SHARE, AUDIO_MIN_KBPS), AUDIO_MAX_KBPS)
 
         # A smooth kbps-vs-kbps comparison misses a real, discrete effect.
@@ -717,19 +720,19 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                 f"{(1 - TIMING_MARGIN_FRAC) * 100:.0f}% timing margin -> "
                 f"audio {audio_kbps:.1f}kbps + video {video_kbps:.1f}kbps")
         else:
-            # Audio-only: still capped at AUDIO_MAX_KBPS (more buys little
-            # for mono speech), and the packing cliff bites (see above), so
-            # search the packing-safe range up to that rather than assuming
-            # a flat value is safe.
+            # Audio-only: capped at AUDIO_ONLY_MAX_KBPS (48: full-quality
+            # Opus; with video on, audio keeps to AUDIO_MAX_KBPS), and the
+            # packing cliff bites (see above), so search the packing-safe
+            # range up to that rather than assuming a flat value is safe.
             audio_only_kbps = AUDIO_MIN_KBPS
             if link_fragment_rate > 0:
                 candidate = AUDIO_MIN_KBPS
-                while candidate <= min(usable_kbps, AUDIO_MAX_KBPS):
+                while candidate <= min(usable_kbps, AUDIO_ONLY_MAX_KBPS):
                     if _packing_safe_kbps(candidate):
                         audio_only_kbps = candidate
                     candidate += 0.1
             else:
-                audio_only_kbps = min(usable_kbps, AUDIO_MAX_KBPS)
+                audio_only_kbps = min(usable_kbps, AUDIO_ONLY_MAX_KBPS)
             self.audio_bitrate.setValue(round(audio_only_kbps, 1))
             reason = "forced audio-only" if forced_audio_only else \
                 f"too little left for video after audio's {AUDIO_MIN_KBPS:.0f}kbps floor"

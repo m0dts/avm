@@ -268,7 +268,7 @@ class TouchWindow(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(w)
         lay.setContentsMargins(round(16 * self.scale), 0, round(16 * self.scale), round(10 * self.scale))
         lay.addStretch(2)
-        title = QtWidgets.QLabel("AudioVideoModem")
+        title = QtWidgets.QLabel(tw.logo_html("AudioVideoModem", tw.TEXT))  # A V M in the logo colours
         title.setAlignment(QtCore.Qt.AlignCenter)
         title.setStyleSheet(f"color: {tw.TEXT}; font-size: {round(52 * self.scale)}px; font-weight: bold;")
         lay.addWidget(title)
@@ -279,7 +279,8 @@ class TouchWindow(QtWidgets.QWidget):
         self._splash_status.setStyleSheet(f"color: {tw.TEXT_DIM};")
         lay.addWidget(self._splash_status)
         lay.addStretch(3)
-        credit = QtWidgets.QLabel(f"{avm_version.SHORT_TITLE}  ·  by M0DTS and AI!")
+        credit = QtWidgets.QLabel(tw.logo_html(avm_version.SHORT_TITLE, tw.TEXT_DIM)
+                                  + f"<span style='color:{tw.TEXT_DIM}'>  ·  by M0DTS and AI!</span>")
         credit.setAlignment(QtCore.Qt.AlignRight)
         credit.setStyleSheet(f"color: {tw.TEXT_DIM}; font-size: {round(12 * self.scale)}px;")
         lay.addWidget(credit)
@@ -475,7 +476,7 @@ class TouchWindow(QtWidgets.QWidget):
         if self.rx.is_running():
             parts.append(f"<span style='color:{tw.RX_ACCENT}'>● RX</span>")
         self.indicator.setText("&nbsp;&nbsp;&nbsp;".join(parts) or
-                               f"<span style='color:{tw.TEXT_DIM}'>{avm_version.SHORT_TITLE}</span>")
+                               tw.logo_html(avm_version.SHORT_TITLE, tw.TEXT_DIM))
 
     def _quit(self):
         if self.tx.is_running() or self.rx.is_running():

@@ -129,7 +129,7 @@ Say "2. Python environment ($envDir)"
 # headless OpenCV: the default build drags in Qt6 next to AVM's PyQt5
 $pkgs = @("python=3.12", "numpy", "scipy", "numba", "pyqt=5", "pyqtgraph", "py-opencv=*=headless*", "av",
           "python-sounddevice", "soapysdr", "soapysdr-module-plutosdr", "soapysdr-module-lms7",
-          "soapysdr-module-rtlsdr")
+          "soapysdr-module-rtlsdr", "soapysdr-module-airspy", "soapysdr-module-airspyhf")
 $imports = "numpy scipy numba cv2 av PyQt5 pyqtgraph sounddevice SoapySDR"
 function Test-Env {
     if (-not (Test-Path $py)) { return $false }

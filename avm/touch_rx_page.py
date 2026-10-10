@@ -65,7 +65,7 @@ def _station_text(engine_text):
 
 class _RxEngine(media_rx_gui.MediaRxWindow):
     """The full RX window, never shown; adds a wider spectrum span and the
-    radio choice (PlutoSDR, LimeSDR or RTL-SDR)."""
+    radio choice (PlutoSDR, LimeSDR, RTL-SDR or Airspy)."""
     span_hz = 0.0
     sdr = "pluto"
     rtl_ppm = 0.0
@@ -77,7 +77,7 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
         cmd += ["--no-output-pacing"]
         if self.span_hz and "--spectrum-stderr" in cmd:
             cmd += ["--spectrum-span-hz", f"{self.span_hz:.0f}"]
-        if self.sdr in ("lime", "rtlsdr"):
+        if self.sdr in tw.GAIN_FILE_RADIOS:
             cmd += ["--sdr", self.sdr, "--gain-file", tw.gain_file_path("rx")]
         # live receive offset (the page's Offset stepper), any radio
         cmd += ["--freq-offset-file", tw.freq_offset_file_path()]
@@ -285,7 +285,7 @@ class RxPage(QtWidgets.QWidget):
         e = self.engine
         # how the Pluto is reached: the route picked in the radio list, else
         # its usual network address (pluto_soapy_sink falls back to a search)
-        e.pluto_uri.setText(self.radio.pluto_uri or "ip:192.168.2.1")
+        e.pluto_uri.setText(self.radio.pluto_uri or tw.default_pluto_uri())
         e.input_mode.setCurrentText("pluto")
         e.rf_freq.setText(str(self.freq.hz()))
         e.mode.setCurrentText(self.mode.value())
@@ -443,8 +443,10 @@ class RxPage(QtWidgets.QWidget):
         self._set_scale(self.ref.value(), div)
 
     def set_radio(self, sdr, force=False):
-        """'pluto', 'lime' or 'rtlsdr' -- from the Radio picker. RX gain tops
-        out at 61 dB on a LimeSDR, ~49 on an RTL-SDR, 73 on the Pluto."""
+        """'pluto', 'lime', 'rtlsdr', 'airspy' or 'airspyhf' -- from the Radio
+        picker. RX gain tops out at 61 dB on a LimeSDR, ~49 on an RTL-SDR,
+        45 on an Airspy (LNA+mixer+VGA), 73 on the Pluto. The HF+ runs its
+        own AGC (its gain setting is ignored)."""
         self.radio.set_sdr(sdr)
         self.freq.set_radio(sdr)
         if not self.freq.in_range():
@@ -454,7 +456,7 @@ class RxPage(QtWidgets.QWidget):
             tw.notices().add("RX", msg)
         self.lime_port.setVisible(sdr == "lime")
         self.ppm.setVisible(sdr == "rtlsdr")
-        self.gain.hi = {"lime": 61, "rtlsdr": 49}.get(sdr, 73)
+        self.gain.hi = {"lime": 61, "rtlsdr": 49, "airspy": 45, "airspyhf": 45}.get(sdr, 73)
         self.gain.set_value(self.gain.value(), emit=True)
         uri = self.radio.pluto_uri
         changed_uri = uri != getattr(self, "_pluto_uri", uri)
@@ -470,12 +472,12 @@ class RxPage(QtWidgets.QWidget):
     def _gain_changed(self, db):
         self.engine.rx_gain.setValue(db)
         self._save()
-        if self.engine.sdr in ("lime", "rtlsdr"):
+        if self.engine.sdr in tw.GAIN_FILE_RADIOS:
             tw.write_gain_file("rx", db)  # the running RX process picks it up
             return
         if self.is_running():
             if tw.LiveGain.available():
-                self.live_gain.set(self.engine.pluto_uri.text().strip() or "ip:192.168.2.1", db)
+                self.live_gain.set(self.engine.pluto_uri.text().strip() or tw.default_pluto_uri() or "ip:192.168.2.1", db)
             else:
                 self.run.set_state("pending")
 

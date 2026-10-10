@@ -3,6 +3,18 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.7 (2026-10-10)
+- Airspy R2/Mini and Airspy HF+ supported as RX radios
+
+## 1.0.6 (2026-10-10)
+- LibreSDR support: Pluto-firmware radios found at 192.168.2.1 or 192.168.1.10 (Ethernet), whichever answers
+- AVM logo colours (A red, V green, M blue)
+
+## 1.0.5 (2026-10-08)
+- Audio only: Opus up to 48 kbps (was 16)
+- TX says AUDIO ONLY instead of NO VIDEO when that's the Content setting
+- TX warns when audio only leaves most of the link unused (a narrower kHz reaches further)
+
 ## 1.0.4 (2026-10-08)
 - New Config tab: radios, camera, mic, audio out, content (auto/audio only/video only), callsign, spectrum averaging
 - RX Header and Frame lock lamps (green/orange/red over 2 s) replace % ok

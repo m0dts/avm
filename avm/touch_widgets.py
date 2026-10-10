@@ -26,6 +26,24 @@ TEXT_DIM = "#9aa0a8"
 TX_ACCENT = "#e07a2e"    # orange
 RX_ACCENT = "#2ea8b0"    # teal
 CONFIG_ACCENT = "#8e7cc3"  # violet: the Config tab
+# The name's letters, as a logo: A red, V green, M blue
+LOGO_COLOURS = {"A": "#e53935", "V": "#43a047", "M": "#1e88e5"}
+
+
+def logo_html(text, rest_colour=None):
+    """Rich text with the name coloured as the logo: in "AVM v1.0.5" the
+    A, V and M; in "AudioVideoModem" the capital A, V and M. Other text in
+    rest_colour (or the label's own colour)."""
+    def esc(c):
+        return {"<": "&lt;", ">": "&gt;", "&": "&amp;"}.get(c, c)
+    out, coloured = [], set()
+    for c in text:
+        if c in LOGO_COLOURS and c not in coloured:  # each letter once: the name, not later text
+            coloured.add(c)
+            out.append(f"<span style='color:{LOGO_COLOURS[c]}'>{c}</span>")
+        else:
+            out.append(f"<span style='color:{rest_colour}'>{esc(c)}</span>" if rest_colour else esc(c))
+    return "".join(out)
 GO = "#2f9e5a"
 STOP = "#c0392b"
 WARN = "#e0b030"
@@ -414,8 +432,10 @@ class TextButton(QtWidgets.QPushButton):
 # Tuning range per radio, MHz. Pluto: AD9363 70-6000 with the common
 # firmware tweak (325-3800 stock). LimeSDR: LMS7002M via LimeSuite down to
 # 0.1 MHz (below ~30 MHz by NCO offset; the Mini is specified from 10 MHz).
-# RTL-SDR: R820T tuner range (no HF direct sampling here).
-FREQ_RANGE_MHZ = {"pluto": (70.0, 6000.0), "lime": (0.1, 3800.0), "rtlsdr": (24.0, 1766.0)}
+# RTL-SDR: R820T tuner range (no HF direct sampling here). Airspy R2/Mini:
+# R820T2, 24-1800. Airspy HF+: 0.5 kHz-31 MHz and 60-260 MHz (gap between).
+FREQ_RANGE_MHZ = {"pluto": (70.0, 6000.0), "lime": (0.1, 3800.0), "rtlsdr": (24.0, 1766.0),
+                  "airspy": (24.0, 1800.0), "airspyhf": (0.01, 260.0)}
 
 
 class FreqButton(QtWidgets.QPushButton):
@@ -659,13 +679,16 @@ def saved_bandwidth(value):
     return value if value in BANDWIDTHS_KHZ else "80"
 
 
-RADIO_NAMES = {"pluto": "PlutoSDR", "lime": "LimeSDR", "rtlsdr": "RTL-SDR"}
+RADIO_NAMES = {"pluto": "PlutoSDR", "lime": "LimeSDR", "rtlsdr": "RTL-SDR",
+               "airspy": "Airspy", "airspyhf": "Airspy HF+"}
 # USB vendor:product IDs per radio, for the USB watchdog (touch_gui). A radio
 # that isn't on USB at all (e.g. a Pluto on the network) simply isn't watched.
 USB_IDS = {
     "pluto": {("0456", "b673")},                      # ADALM-Pluto
     "lime": {("1d50", "6108"), ("0403", "601f")},     # LimeSDR-USB; LimeSDR Mini (FTDI FT601)
     "rtlsdr": {("0bda", "2838"), ("0bda", "2832")},   # RTL2832U dongles
+    "airspy": {("1d50", "60a1")},                     # Airspy R2 / Mini
+    "airspyhf": {("03eb", "800c")},                   # Airspy HF+ Discovery / Dual
 }
 
 
@@ -688,7 +711,37 @@ def usb_devices():
         if vid != "1d6b":  # Linux Foundation: the root hubs themselves
             out.add((vid, pid))
     return out
-RX_ONLY_RADIOS = ("rtlsdr",)
+# Network addresses a Pluto-firmware radio answers at out of the box:
+# PlutoSDR's USB network link, and LibreSDR's Ethernet port.
+PLUTO_DEFAULT_HOSTS = ("192.168.2.1", "192.168.1.10")
+PLUTO_PROBE_CACHE_S = 20
+_pluto_probe = {"t": -1e9, "host": None}
+
+
+def iiod_answers(host, timeout=0.5):
+    """Is an iiod (libiio server, port 30431) listening at host?"""
+    import socket
+    try:
+        socket.create_connection((host, 30431), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
+def default_pluto_uri():
+    """'ip:<addr>' for the first default address that answers (PlutoSDR,
+    then LibreSDR), or '' to let libiio search (USB). Cached briefly so
+    applying settings doesn't keep probing."""
+    now = time.monotonic()
+    if now - _pluto_probe["t"] > PLUTO_PROBE_CACHE_S:
+        _pluto_probe["host"] = next((h for h in PLUTO_DEFAULT_HOSTS if iiod_answers(h)), None)
+        _pluto_probe["t"] = now
+    return f"ip:{_pluto_probe['host']}" if _pluto_probe["host"] else ""
+
+
+RX_ONLY_RADIOS = ("rtlsdr", "airspy", "airspyhf")
+# radios whose live gain goes via a file the RX process watches (no iio_attr)
+GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf")
 RTL_SAMPLE_RATE = 1024000  # an RTL-SDR rate (0.9-3.2 MS/s) that fits every bandwidth + LO offset
 
 
@@ -707,13 +760,12 @@ def radio_present(sdr, uri=None):
         if USB_IDS.get(sdr, set()) & devs:
             return True, f"{name} on USB"
         if sdr == "pluto":
-            host = (uri or "ip:192.168.2.1").split(":", 1)[-1] if (uri or "ip:").startswith("ip:") else None
-            if host:
-                try:
-                    socket.create_connection((host, 30431), timeout=0.5).close()
+            hosts = list(PLUTO_DEFAULT_HOSTS)
+            if uri and uri.startswith("ip:"):
+                hosts.insert(0, uri.split(":", 1)[1])
+            for host in dict.fromkeys(hosts):
+                if iiod_answers(host):
                     return True, f"{name} at {host}"
-                except OSError:
-                    pass
         return False, f"{name} not found -- check it's plugged in (USB) and powered"
     try:
         import SoapySDR
@@ -727,7 +779,7 @@ def radio_present(sdr, uri=None):
 
 
 def detect_rx_radios():
-    """detect_radios() plus RTL-SDR dongles (receive only)."""
+    """detect_radios() plus receive-only radios (RTL-SDR, Airspy)."""
     found = [r for r in detect_radios() if not r.startswith("(no radios")]
     try:
         import SoapySDR
@@ -736,6 +788,15 @@ def detect_rx_radios():
             found.append(f"RTL-SDR {kw.get('serial', '').lstrip('0')[-8:]}".strip())
     except Exception as e:
         found.append(f"(RTL-SDR search failed: {e})")
+    # Airspy R2/Mini and HF+ (SoapyAirspy / SoapyAirspyHF modules)
+    for driver, name in (("airspy", "Airspy"), ("airspyhf", "Airspy HF+")):
+        try:
+            import SoapySDR
+            for kw in SoapySDR.Device.enumerate(f"driver={driver}"):
+                kw = dict(kw)
+                found.append(f"{name} {kw.get('serial', '').lstrip('0')[-8:]}".strip())
+        except Exception:
+            pass  # module not installed
     return found or ["(no radios found -- check USB / power)"]
 
 
@@ -772,6 +833,12 @@ def detect_radios():
             if label not in found:
                 found.append(label)
                 PLUTO_URIS[label] = dict(kw).get("uri", "")
+        # libiio's own search doesn't look on Ethernet (LibreSDR 192.168.1.10)
+        for host in PLUTO_DEFAULT_HOSTS:
+            label = pluto_label(f"ip:{host}")
+            if label not in found and iiod_answers(host, 0.3):
+                found.append(label)
+                PLUTO_URIS[label] = f"ip:{host}"
         for kw in SoapySDR.Device.enumerate("driver=lime"):
             kw = dict(kw)
             name = kw.get("name") or kw.get("label", "LimeSDR").split(" [")[0]
@@ -791,7 +858,7 @@ class RadioPicker(Picker):
     receive-only radios (RTL-SDR)."""
     radio_changed = QtCore.pyqtSignal(str)
 
-    SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL"}  # fits beside the frequency
+    SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL", "airspy": "Airspy", "airspyhf": "HF+"}  # fits beside the frequency
 
     def __init__(self, title, sdr, rx=False, pluto_uri=""):
         allowed = RADIO_NAMES if rx else {k: v for k, v in RADIO_NAMES.items() if k not in RX_ONLY_RADIOS}
@@ -815,7 +882,9 @@ class RadioPicker(Picker):
 
     def _picked(self, label):
         sdr = ("lime" if label.startswith("Lime") else "pluto" if label.startswith("Pluto")
-               else "rtlsdr" if label.startswith("RTL-SDR") else None)
+               else "rtlsdr" if label.startswith("RTL-SDR")
+               else "airspyhf" if label.startswith("Airspy HF+")
+               else "airspy" if label.startswith("Airspy") else None)
         if sdr == "pluto":
             self.pluto_uri = PLUTO_URIS.get(label, "")
         self.set_sdr(sdr or self.sdr)  # "(no radios found)" keeps the previous choice

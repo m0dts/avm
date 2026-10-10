@@ -129,6 +129,15 @@ def make_reader(args, cfg):
                                driver=args.sdr, antenna=args.sdr_antenna, gain_file=args.gain_file,
                                ppm=args.sdr_ppm, freq_offset_file=args.freq_offset_file)
         fe_lo = args.lo_offset_hz
+        if reader.sample_rate_hz != capture_fs:
+            # the radio only offers fixed rates (Airspy) and picked another
+            capture_fs = reader.sample_rate_hz
+            use_frontend = capture_fs != cfg.fs and not args.legacy_frontend
+            args.capture_sample_rate = capture_fs
+            args.frontend_active = use_frontend
+            args.sample_rate = capture_fs
+            # the LO-offset shift: the front end's job if there is one, else the source's
+            reader.lo_offset_hz = 0.0 if use_frontend else args.lo_offset_hz
     if not use_frontend:
         return reader
     from rx_frontend import FrontEnd, FrontEndReader
@@ -1548,11 +1557,12 @@ def main():
                           "gain-control/DC-offset/quadrature-tracking settling time -- confirmed for "
                           "real: a freshly-started RX decoded far worse than the identical settings "
                           "moments later after just restarting the RX process. 0 disables it.")
-    ap.add_argument("--sdr", choices=["pluto", "lime", "rtlsdr"], default="pluto",
+    ap.add_argument("--sdr", choices=["pluto", "lime", "rtlsdr", "airspy", "airspyhf"], default="pluto",
                      help="Radio for --input pluto: 'pluto' (PlutoSDR, default), 'lime' "
                           "(LimeSDR-USB or LimeSDR Mini; manual gain only, no AGC) or 'rtlsdr' "
                           "(RTL2832U dongle, receive only; --sample-rate must be 225-300 kS/s or "
-                          "0.9-3.2 MS/s, e.g. 1024000).")
+                          "0.9-3.2 MS/s, e.g. 1024000), 'airspy' (Airspy R2/Mini) or 'airspyhf' "
+                          "(Airspy HF+), receive only, at their nearest offered sample rate.")
     ap.add_argument("--sdr-ppm", type=float, default=0.0,
                      help="RTL-SDR crystal correction in ppm (a dongle without a TCXO can be "
                           "+-50 ppm: 21 kHz at 432 MHz, beyond the HF modes' CFO search).")

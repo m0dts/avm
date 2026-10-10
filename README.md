@@ -73,7 +73,7 @@ The set-up choices, which rarely change once a station is running:
 2. **TX radio:** Pluto or LimeSDR. A LimeSDR also gets an antenna-port button
    (Auto, BAND1 or BAND2); on a LimeSDR Mini, try the other band if there's
    no RF output.
-3. **RX radio:** Pluto, LimeSDR or RTL-SDR, from the radios connected now. A
+3. **RX radio:** Pluto, LimeSDR, RTL-SDR or Airspy, from the radios connected now. A
    Pluto shows how it's connected (**USB** or **IP**), and AVM uses the one
    you pick. An RTL-SDR also gets a **PPM** setting to correct its crystal,
    and a LimeSDR a port button (Auto, LNAL, LNAW or LNAH).
@@ -174,12 +174,21 @@ mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync
   Debian Linux. A faster CPU allows bigger video.
 - **A radio (SDR):**
   - **ADALM-Pluto:** TX and RX, both at once from one Pluto.
+  - **LibreSDR** (and other boards running Pluto firmware): works as a
+    Pluto. On USB it's the same as a Pluto; on Ethernet AVM looks at both
+    192.168.2.1 and 192.168.1.10 (LibreSDR's default) and uses whichever
+    answers.
   - **LimeSDR (USB or Mini):** TX or RX, but not both at once from one
     LimeSDR. AVM runs TX and RX as separate programs, and a Lime can only be
     opened by one of them at a time. To transmit and receive together, pair
     the Lime with a second radio for RX, such as a cheap RTL-SDR. AVM says
     "LimeSDR busy" if you try to use one for both.
   - **RTL-SDR dongle:** RX only.
+  - **Airspy R2 / Mini:** RX only, 24-1800 MHz. These sample at 2.5 MS/s
+    (R2) or 3 MS/s (Mini), which is more work for a Raspberry Pi than an
+    RTL-SDR.
+  - **Airspy HF+ (Discovery / Dual):** RX only, HF up to 31 MHz and
+    60-260 MHz, using its own AGC (AVM's RX gain setting doesn't apply).
 
   Add filters and an amplifier as needed for your band.
 - **A camera and microphone:** any USB webcam works (e.g. a Logitech C920,
