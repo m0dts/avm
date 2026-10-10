@@ -9,7 +9,6 @@
 #   bash install_avm.sh --update     # also fetch the latest AVM from GitHub
 #   bash install_avm.sh --check      # only report what's there / missing
 #   bash install_avm.sh --yes        # don't ask before installing
-#   bash install_avm.sh --rotate180  # touch screen mounted upside down (--no-rotate: normal)
 #   (AVM_INSTALL_DIR=/some/dir to put AVM elsewhere than ~/avm)
 #
 # It first surveys the machine (the --check report: what's already there,
@@ -34,15 +33,13 @@ AVM_BRANCH="${AVM_BRANCH:-main}"
 CHECK_ONLY=0
 UPDATE=0
 ASSUME_YES=0
-ROTATE=""   # "180" / "0" from --rotate180 / --no-rotate; "" = ask (or keep)
 for a in "$@"; do
     case "$a" in
         --check) CHECK_ONLY=1 ;;
         --update) UPDATE=1 ;;
         --yes|-y) ASSUME_YES=1 ;;
-        --rotate180) ROTATE=180 ;;
-        --no-rotate) ROTATE=0 ;;
-        *) echo "unknown option $a (use --check, --update, --yes, --rotate180 or --no-rotate)"; exit 1 ;;
+        --rotate180|--no-rotate) ;;  # screen rotation was removed (1.0.9): set the display up yourself
+        *) echo "unknown option $a (use --check, --update or --yes)"; exit 1 ;;
     esac
 done
 # Where AVM is: beside this script (a copied release folder: ./ or ./avm),
@@ -487,38 +484,6 @@ AVMCMD
     echo "'avm' command: $HOME/.local/bin/avm"
 fi
 
-# ---------------------------------------------------------------- 6. screen
-say "6. Screen orientation"
-# For a touch screen mounted the other way up: AVM turns the picture and the
-# touch input 180 degrees while it runs (screen_rotate.py), back when it quits.
-ROT_FILE="$AVM_DIR/screen_rotation"
-ROT_NOW="$(cat "$ROT_FILE" 2>/dev/null)"
-[ "$ROT_NOW" = 180 ] || ROT_NOW=0
-if [ $CHECK_ONLY = 1 ]; then
-    [ "$ROT_NOW" = 180 ] && echo "upside down (rotated 180)" || echo "normal (not rotated)"
-else
-    if [ -z "$ROTATE" ] && [ $ASSUME_YES = 0 ]; then
-        def="n"; [ "$ROT_NOW" = 180 ] && def="y"
-        printf 'Turn the screen upside down (rotate 180) while AVM runs? [%s] '             "$([ $def = y ] && echo Y/n || echo y/N)"
-        ans=""
-        { read -r ans </dev/tty; } 2>/dev/null || true
-        [ -z "$ans" ] && ans=$def
-        case "$ans" in y|Y|yes|YES) ROTATE=180 ;; *) ROTATE=0 ;; esac
-    fi
-    [ -z "$ROTATE" ] && ROTATE=$ROT_NOW   # --yes without a choice: keep as it is
-    echo "$ROTATE" > "$ROT_FILE"
-    if [ "$ROTATE" = 180 ]; then
-        echo "AVM will turn the screen upside down while it runs"
-        # the tools it uses: xrandr + xinput (X11), wlr-randr (Wayland)
-        NEED=""
-        for p in x11-xserver-utils xinput wlr-randr; do
-            have_pkg "$p" && ! installed "$p" && NEED="$NEED $p"
-        done
-        [ -n "$NEED" ] && { $SUDO apt-get install -y $NEED </dev/null || warn "couldn't install:$NEED"; }
-    else
-        echo "screen left as it is"
-    fi
-fi
 
 # ---------------------------------------------------------------- summary
 say "Radios Soapy can see now"

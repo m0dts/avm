@@ -111,6 +111,16 @@ class Segmented(QtWidgets.QWidget):
         if value is not None:
             self.set_value(value)
 
+    def showEvent(self, e):
+        # the selected button's label is bold: room for that on every button,
+        # so a short one ("Auto") isn't clipped when picked
+        super().showEvent(e)
+        for b in self._buttons.values():
+            b.ensurePolished()
+            f = QtGui.QFont(b.font())
+            f.setBold(True)
+            b.setMinimumWidth(QtGui.QFontMetrics(f).horizontalAdvance(b.text()) + round(20 * SCALE))
+
     def value(self):
         for v, b in self._buttons.items():
             if b.isChecked():
@@ -211,7 +221,7 @@ class NoticesDialog(QtWidgets.QDialog):
         QtWidgets.QScroller.grabGesture(self.list.viewport(), QtWidgets.QScroller.LeftMouseButtonGesture)
         lay.addWidget(self.list, 1)
         self._fill()
-        self.setGeometry(parent.window().geometry())
+        self.setGeometry(dialog_geometry(parent))
 
     def _fill(self):
         self.list.clear()
@@ -227,10 +237,22 @@ class NoticesDialog(QtWidgets.QDialog):
         self._fill()
 
 
-class TouchListDialog(QtWidgets.QDialog):
-    """Full-window list to pick one item by tapping it."""
+def dialog_geometry(widget):
+    """Where a full-window dialog goes: over the page area of the main
+    window (below its CONFIG / TX / RX tabs) if it has one, else the
+    whole window."""
+    win = widget.window()
+    pages = getattr(win, "pages", None)
+    if pages is not None and pages.isVisible():
+        return QtCore.QRect(pages.mapToGlobal(QtCore.QPoint(0, 0)), pages.size())
+    return win.geometry()
 
-    def __init__(self, title, items, current, parent):
+
+class TouchListDialog(QtWidgets.QDialog):
+    """Full-window list to pick one item by tapping it. refresh: a callable
+    returning a new list (e.g. a device search) -- adds a Refresh button."""
+
+    def __init__(self, title, items, current, parent, refresh=None):
         super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
         self.setModal(True)
         lay = QtWidgets.QVBoxLayout(self)
@@ -238,6 +260,12 @@ class TouchListDialog(QtWidgets.QDialog):
         t = QtWidgets.QLabel(title)
         t.setObjectName("big")
         top.addWidget(t, 1)
+        self._refresh = refresh
+        self._current = current
+        if refresh:
+            self.refresh_button = QtWidgets.QPushButton("Refresh")
+            self.refresh_button.clicked.connect(self._do_refresh)
+            top.addWidget(self.refresh_button)
         cancel = QtWidgets.QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
         top.addWidget(cancel)
@@ -245,14 +273,29 @@ class TouchListDialog(QtWidgets.QDialog):
         self.list = QtWidgets.QListWidget()
         self.list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         QtWidgets.QScroller.grabGesture(self.list.viewport(), QtWidgets.QScroller.LeftMouseButtonGesture)
-        for item in items:
-            self.list.addItem(item)
-            if item == current:
-                self.list.setCurrentRow(self.list.count() - 1)
+        self._fill(items)
         self.list.itemClicked.connect(lambda it: self.done_with(it.text()))
         lay.addWidget(self.list, 1)
         self.result_text = None
-        self.setGeometry(parent.window().geometry())
+        self.setGeometry(dialog_geometry(parent))
+
+    def _fill(self, items):
+        self.list.clear()
+        for item in items:
+            self.list.addItem(item)
+            if item == self._current:
+                self.list.setCurrentRow(self.list.count() - 1)
+
+    def _do_refresh(self):
+        """Search again (a second or so): say so first, as it blocks."""
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText("Searching...")
+        QtWidgets.QApplication.processEvents()
+        try:
+            self._fill(self._refresh())
+        finally:
+            self.refresh_button.setText("Refresh")
+            self.refresh_button.setEnabled(True)
 
     def done_with(self, text):
         self.result_text = text
@@ -293,7 +336,8 @@ class Picker(QtWidgets.QPushButton):
 
     def _pick(self):
         items = self._items() if callable(self._items) else self._items
-        d = TouchListDialog(self._title, items, self._value, self)
+        d = TouchListDialog(self._title, items, self._value, self,
+                            refresh=self._items if callable(self._items) else None)
         if d.exec_() and d.result_text is not None and d.result_text != self._value:
             self.set_value(d.result_text)
             self.changed.emit(d.result_text)
@@ -332,7 +376,7 @@ class KeypadDialog(QtWidgets.QDialog):
         row.addWidget(cancel)
         row.addWidget(ok)
         lay.addLayout(row)
-        self.setGeometry(parent.window().geometry())
+        self.setGeometry(dialog_geometry(parent))
 
     def _key(self, k):
         s = "" if self._fresh else self.display.text()
@@ -390,7 +434,7 @@ class KeyboardDialog(QtWidgets.QDialog):
             row.addWidget(b)
         lay.addLayout(row)
         self._set(text)
-        self.setGeometry(parent.window().geometry())
+        self.setGeometry(dialog_geometry(parent))
 
     def _set(self, text):
         self._text = text[:self._max]

@@ -3,6 +3,14 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.10 (2026-10-10)
+- Radio list: Refresh button to search again
+- pop-up lists and keypad sit below the tabs instead of over them
+- option buttons wide enough for their labels (Auto was cut off)
+
+## 1.0.9 (2026-10-10)
+- Screen rotation removed from AVM and the installer: set the display up in the system instead
+
 ## 1.0.8 (2026-10-10)
 - Installer: a package source's signing-key warning (e.g. Raspberry Pi's new key) shown as a plain note, not apt's error text
 

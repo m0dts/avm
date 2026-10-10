@@ -495,13 +495,6 @@ class TouchWindow(QtWidgets.QWidget):
 
 
 def main():
-    # screen mounted upside down (installer option): turn it before Qt
-    # measures the screen, and back when AVM quits
-    import screen_rotate
-    rotated = screen_rotate.wanted() and screen_rotate.apply(True)
-    if rotated:
-        import atexit
-        atexit.register(screen_rotate.apply, False)
     app = QtWidgets.QApplication(sys.argv)
     import avm_threads
     avm_threads.install(main_name="avm-gui")  # thread names visible in top -H
