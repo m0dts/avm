@@ -733,34 +733,38 @@ def main():
                         video_carry.extend(video_items[i + 1:])
                         break
                     continue
-                if len(au) + RECORD_HEADER_LEN > budget - FRESH_BLOCK_MAX_BYTES:
-                    append_video_packet(au)  # bigger than a whole fragment -- old split path
-                else:
-                    if is_keyframe or video_packets_since_config == 0:
-                        cfg = state["video_config_record"]
-                        if len(block) + len(cfg) > budget:
-                            video_carry.extend(video_items[i:])
-                            break
-                        block.extend(cfg)
-                    room = budget - len(block)
-                    if RECORD_HEADER_LEN + len(au) <= room:
-                        block.extend(struct.pack(">BH", VIDEO_PACKET_TYPE, len(au)) + au)
-                    elif room - RECORD_HEADER_LEN - 4 >= MIN_START_CHUNK:
-                        n = room - RECORD_HEADER_LEN - 4
-                        payload = struct.pack(">I", len(au)) + au[:n]
-                        block.extend(struct.pack(">BH", VIDEO_PACKET_START_TYPE, len(payload)) + payload)
-                        video_carry.append((au[n:], "cont"))
-                        video_carry.extend(video_items[i + 1:])
-                        video_packets_since_config = (video_packets_since_config + 1) % VIDEO_CONFIG_REPEAT_EVERY
-                        stats["video_packets"] += 1
-                        stats["video_bytes"] += len(au)
-                        break
-                    else:
-                        # Too little room left to bother splitting. (A config
-                        # record just added above is harmless: it's resent
-                        # with this packet next tick.)
+                # A packet bigger than a whole fragment goes this way too: its
+                # remainder is carried tick to tick (the "cont" branch above
+                # re-carries whatever still doesn't fit), one fragment per
+                # tick. The old all-at-once split (append_video_packet) sent
+                # every piece in one tick: with frames bigger than a fragment
+                # (16QAM at low fps) the framer then made ~2x the link rate
+                # and the transmitter dropped most of it as stale.
+                if is_keyframe or video_packets_since_config == 0:
+                    cfg = state["video_config_record"]
+                    if len(block) + len(cfg) > budget:
                         video_carry.extend(video_items[i:])
                         break
+                    block.extend(cfg)
+                room = budget - len(block)
+                if RECORD_HEADER_LEN + len(au) <= room:
+                    block.extend(struct.pack(">BH", VIDEO_PACKET_TYPE, len(au)) + au)
+                elif room - RECORD_HEADER_LEN - 4 >= MIN_START_CHUNK:
+                    n = room - RECORD_HEADER_LEN - 4
+                    payload = struct.pack(">I", len(au)) + au[:n]
+                    block.extend(struct.pack(">BH", VIDEO_PACKET_START_TYPE, len(payload)) + payload)
+                    video_carry.append((au[n:], "cont"))
+                    video_carry.extend(video_items[i + 1:])
+                    video_packets_since_config = (video_packets_since_config + 1) % VIDEO_CONFIG_REPEAT_EVERY
+                    stats["video_packets"] += 1
+                    stats["video_bytes"] += len(au)
+                    break
+                else:
+                    # Too little room left to bother splitting. (A config
+                    # record just added above is harmless: it's resent
+                    # with this packet next tick.)
+                    video_carry.extend(video_items[i:])
+                    break
                 video_packets_since_config = (video_packets_since_config + 1) % VIDEO_CONFIG_REPEAT_EVERY
                 stats["video_packets"] += 1
                 stats["video_bytes"] += len(au)
