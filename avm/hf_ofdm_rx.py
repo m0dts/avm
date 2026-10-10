@@ -1485,6 +1485,70 @@ def run_gui(cfg, args, reader):
     app.exec_()
 
 
+TDD_HEADER_FLAG = 0x8000  # FRAG_HEADER total_frags: slot position (see hf_ofdm_tx.py)
+TDD_MARGIN_S = 0.010      # start searching this long before an expected burst
+TDD_LOST_CYCLES = 3       # cycles with no decode before the phase is forgotten
+
+
+def _tdd_geometry(cfg, args):
+    """Native-rate (cfg.fs) sample counts of the far end's TDD pattern,
+    worked out the way hf_ofdm_tx.py's run_tdd does: whole fragments per
+    slot, each as long on air as the TX makes it (resample padding included,
+    at the radio's rate)."""
+    # the far end's frames: with --fec auto, LDPC (what AVM's TX sends) --
+    # cfg itself is built for Viterbi then, whose frames are shorter
+    tx_cfg = cfg if args.fec != "auto" else ofdm.build_config(
+        args.mode, args.occupancy, data_modulation=args.modulation, fec_scheme="ldpc")
+    n_frame = len(ofdm.build_frame(tx_cfg, bytes(FRAG_HEADER.size + (args.fragment_size or 0))))
+    # the radio's rate (make_reader clears args.sample_rate once its front
+    # end resamples, keeping the capture rate here)
+    radio_fs = getattr(args, "capture_sample_rate", None) or args.sample_rate or cfg.fs
+    if radio_fs != cfg.fs:
+        on_air = int(round((n_frame + ofdm.resample_pad(n_frame, cfg.fs, radio_fs)) * radio_fs / cfg.fs))
+    else:
+        on_air = n_frame
+    on_air += int(round(radio_fs * args.fragment_gap_ms / 1000)) if args.fragment_gap_ms > 0 else 0
+    per_slot = max(1, int(round(args.tdd_slot_s * radio_fs)) // on_air)
+    step = on_air * cfg.fs / radio_fs          # one fragment, native samples
+    return {"cycle": args.tdd_cycle_s * cfg.fs, "burst": per_slot * step, "step": step,
+            "n_frame": n_frame, "per_slot": per_slot, "phase": None, "last_ok": None,
+            "margin": TDD_MARGIN_S * cfg.fs}
+
+
+def _tdd_track(tdd, result, state, cfg):
+    """A good fragment's start, relative to the last one, says where the
+    burst it belongs to started: that sets the cycle's phase (re-learned
+    every cycle, so it follows clock drift between two radios)."""
+    if result.get("status") != "ok" or not result.get("crc_ok") or "next_native_search_start" not in result:
+        if tdd["phase"] is not None and state["native_search_start"] - tdd["phase"] > TDD_LOST_CYCLES * tdd["cycle"]:
+            print("[tdd] no burst for a few cycles -- searching everything again", file=sys.stderr)
+            tdd["phase"] = tdd["last_ok"] = None
+        return
+    start = result["next_native_search_start"] - tdd["n_frame"]
+    payload = result.get("payload") or b""
+    total = FRAG_HEADER.unpack(payload[:FRAG_HEADER.size])[1] if len(payload) >= FRAG_HEADER.size else 0
+    if total & TDD_HEADER_FLAG:
+        # the TX says where in its slot this fragment is: exact phase
+        tdd["phase"] = start - ((total >> 8) & 0x7F) * tdd["step"]
+    elif tdd["last_ok"] is None or start - tdd["last_ok"] > 1.5 * tdd["step"]:
+        tdd["phase"] = start               # (older TX) first fragment after a gap: assume a burst start
+    elif tdd["phase"] is not None:
+        k = round((start - tdd["phase"]) / tdd["step"])
+        tdd["phase"] = start - k * tdd["step"]
+    tdd["last_ok"] = start
+
+
+def _tdd_skip_gap(tdd, state, cfg):
+    """Past the end of the expected burst: jump to just before the next one."""
+    if tdd["phase"] is None:
+        return
+    pos = state["native_search_start"]
+    into = (pos - tdd["phase"]) % tdd["cycle"]
+    # (from the last fragment's end: no whole fragment can start after it)
+    if into > tdd["burst"] - 0.5 * tdd["step"] and into < tdd["cycle"] - tdd["margin"]:
+        state["native_search_start"] = int(pos + (tdd["cycle"] - into) - tdd["margin"])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=list(ofdm.DRM_MODES), default="B")
@@ -1595,6 +1659,13 @@ def main():
                           "unbounded) trades some jitter-absorption robustness for predictable "
                           "TX-to-RX latency -- see --tx-queue-depth on hf_ofdm_tx.py for the "
                           "matching bound on the other end of the link.")
+    ap.add_argument("--tdd-cycle-s", type=float, default=0.0, metavar="S",
+                     help="Time-division duplex: the far end transmits in a slot once every S "
+                          "seconds (hf_ofdm_tx.py --tdd-cycle-s). Once a burst is found, the rest "
+                          "of each cycle is skipped instead of searched: searching silence (or, in "
+                          "duplex, our own transmit slot) costs CPU and made RX fall behind.")
+    ap.add_argument("--tdd-slot-s", type=float, default=0.0, metavar="S",
+                     help="TDD: the far end's slot (its --tdd-slot-s). Default: half the cycle.")
     ap.add_argument("--drop-if-slow", action="store_true",
                      help="If a fragment's own decode (search+compute) took longer than its "
                           "real-time budget, discard it instead of still writing it out. Without "
@@ -1663,6 +1734,8 @@ def main():
                           "lands off to the side of the signal instead of in the middle of it. "
                           "Default 0 (no offset).")
     args = ap.parse_args()
+    if args.tdd_cycle_s and not args.tdd_slot_s:
+        args.tdd_slot_s = args.tdd_cycle_s / 2
     import avm_threads
     avm_threads.install(main_name="rx-decode")  # thread names visible in top -H
 
@@ -1780,6 +1853,10 @@ def run_decode_loop(cfg, args, reader):
     # written in the correct order: try_decode only ever searches forward
     # through the stream, so one fragment is always fully resolved before
     # the next is even attempted.
+    tdd = _tdd_geometry(cfg, args) if args.tdd_cycle_s else None
+    if tdd:
+        print(f"[tdd] far end sends {tdd['per_slot']} fragment(s) ({tdd['burst'] / cfg.fs * 1000:.1f} ms) "
+              f"every {args.tdd_cycle_s * 1000:.0f} ms; the rest of each cycle is skipped", file=sys.stderr)
     fragments_written = 0
     fragments_dropped = 0
     bytes_written = 0
@@ -1807,6 +1884,8 @@ def run_decode_loop(cfg, args, reader):
 
         if result["status"] == "eof":
             break
+        if tdd:
+            _tdd_track(tdd, result, state, cfg)
         # Low SNR: a fragment that fails CRC costs ~0.35-0.55 s of decode
         # (LDPC runs to its iteration limit, then a resync retry) against
         # 0.24 s of air time, so a bad patch built up seconds of lag --
@@ -1820,6 +1899,8 @@ def run_decode_loop(cfg, args, reader):
                 state["native_search_start"] = int(live - skip_keep_s * cfg.fs)
                 print(f"  -> SKIPPED {lag_s - skip_keep_s:.2f}s of backlog to catch up with live "
                       f"(decoding fell {lag_s:.2f}s behind)", file=sys.stderr)
+        if tdd:
+            _tdd_skip_gap(tdd, state, cfg)
         # state["last_cfo_hz"] only ever gets updated on a CRC-OK SUCCESS
         # (see below) and otherwise persists forever -- fine as long as
         # the transmitter keeps running, but if TX gets restarted (a real

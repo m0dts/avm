@@ -817,7 +817,18 @@ def fft_resample_rate(x, fs_in, fs_out):
     is a negligible extra gap after the frame, and measured out-of-band
     emission is slightly LOWER than without it (the zeros soften the
     wrap-around the Fourier method assumes at the fragment boundary)."""
-    n_in = len(x)
+    pad = resample_pad(len(x), fs_in, fs_out)
+    if pad:
+        x = np.concatenate([x, np.zeros(pad, dtype=x.dtype)])
+    # The pad stays on air (cutting it back off raised out-of-band emission
+    # 20-35 dB at the fragment joins): fragment timing that must match the
+    # radio uses resample_pad() / estimate_effective_bitrate(out_fs=...).
+    return fft_resample(x, int(round(len(x) * fs_out / fs_in)))
+
+
+def resample_pad(n_in, fs_in, fs_out):
+    """Zero samples fft_resample_rate appends to an n_in-sample input (see
+    there). Cached per (length, rates)."""
     key = (n_in, float(fs_in), float(fs_out))
     pad = _FAST_PAD_CACHE.get(key)
     if pad is None:
@@ -839,9 +850,7 @@ def fft_resample_rate(x, fs_in, fs_out):
                 break
         pad = pad or 0
         _FAST_PAD_CACHE[key] = pad
-    if pad:
-        x = np.concatenate([x, np.zeros(pad, dtype=x.dtype)])
-    return fft_resample(x, int(round(len(x) * fs_out / fs_in)))
+    return pad
 
 
 def fft_resample(x, n_out):
@@ -1591,7 +1600,16 @@ def schmidl_cox_sync(rx, cfg, search_start=0, search_len=None, prefer_earliest=F
             # its own hump (confirmed: gaps between genuinely separate
             # frames measure near-zero metric, not a partial ramp), so the
             # next below-threshold sample is a reliable hump boundary.
-            hard_cap = min(len(metric), d0 + cfg.symbol_len * 4)
+            # At least the metric's own rise time, though: with a long
+            # preamble (VU's 32 halves, W = 31 half-symbols) the metric ramps
+            # up over ~W samples, so the threshold is crossed ~0.7 W before
+            # the peak -- and a 4-symbol cap (276 samples at VU 160 kHz,
+            # against W = 992) ended the search on the ramp, hundreds of
+            # samples early: every fragment failed its first decode and
+            # needed a retry (double the decode CPU; 16QAM 160 couldn't
+            # keep up). The below-threshold cut-off just after still stops
+            # it at the end of this frame's hump.
+            hard_cap = min(len(metric), d0 + max(cfg.symbol_len * 4, W + 2 * L))
             below_after = np.where(metric[d0:hard_cap] <= SYNC_METRIC_MIN)[0]
             window_end = d0 + int(below_after[0]) if len(below_after) else hard_cap
             window_end = max(window_end, d0 + 1)
@@ -2534,7 +2552,7 @@ def estimate_payload_bitrate(cfg):
     return (avg_cap_bits / 2) / (cfg.symbol_len / cfg.fs)
 
 
-def estimate_effective_bitrate(cfg, fragment_size_bytes, fragment_gap_ms=0.0):
+def estimate_effective_bitrate(cfg, fragment_size_bytes, fragment_gap_ms=0.0, out_fs=None):
     """Real end-to-end payload bitrate for a given --fragment-size (and,
     if known, --fragment-gap-ms): fragment bytes divided by the ACTUAL
     on-air time one fragment costs, header symbols and FEC/interleaver
@@ -2563,7 +2581,14 @@ def estimate_effective_bitrate(cfg, fragment_size_bytes, fragment_gap_ms=0.0):
     jitter -- distinct from (and on top of) TIMING_MARGIN_FRAC's own
     real-world-jitter margin in media_tx_gui.py."""
     n_symbols = frame_symbol_count(cfg, fragment_size_bytes)
-    frame_time_s = (n_symbols * cfg.symbol_len + cfg.preamble_len) / cfg.fs  # preamble: one symbol_len for 2 halves
+    n_frame = n_symbols * cfg.symbol_len + cfg.preamble_len  # preamble: one symbol_len for 2 halves
+    frame_time_s = n_frame / cfg.fs
+    if out_fs and out_fs != cfg.fs:
+        # sent at the radio's rate: fft_resample_rate's speed padding goes
+        # out on air too (VU 160 kHz -> 550 kS/s: 51.2 ms, not 50.4 -- left
+        # out, the framer ran 1.6% fast and the transmitter dropped the excess)
+        pad = resample_pad(n_frame, cfg.fs, out_fs)
+        frame_time_s = int(round((n_frame + pad) * out_fs / cfg.fs)) / out_fs
     total_time_s = frame_time_s + fragment_gap_ms / 1000.0
     return (fragment_size_bytes * 8) / total_time_s
 

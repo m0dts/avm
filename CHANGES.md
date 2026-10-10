@@ -3,6 +3,11 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.16 (2026-10-10)
+- 16QAM and VU 80/160 kHz: receiver found each frame's start on the first try again (since 1.0.1 most fragments were decoded twice) -- about half the RX CPU, no more breaks at 16QAM 160
+- TX timing now matches each fragment's real air time (the framer ran 1.6% fast and the transmitter dropped the excess)
+- groundwork for same-channel duplex (TDD), off by default
+
 ## 1.0.15 (2026-10-10)
 - 16QAM video fixed: video frames bigger than a fragment are now spread over the following fragments instead of sent all at once, which made the transmitter drop most of the stream
 

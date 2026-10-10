@@ -114,9 +114,11 @@ def run_stream(cfg, args, sink, fixed_peak=None):
     # Started BEFORE warmup so input produced meanwhile is drained, not queued.
     backlog = _LiveInput(args.fragment_size, 1) if args.max_input_backlog else None
 
-    def transmit_fragment(data: bytes, tag: str = ""):
+    def transmit_fragment(data: bytes, tag: str = "", total_field: int = 0):
         nonlocal frag_idx, clipped_count
-        frag_payload = FRAG_HEADER.pack(frag_idx % 65536, 0, 0) + data
+        # total_field: FRAG_HEADER's total_frags, unused (0) in stream mode;
+        # TDD puts the fragment's slot position there (see TDD_HEADER_FLAG)
+        frag_payload = FRAG_HEADER.pack(frag_idx % 65536, total_field, 0) + data
         waveform = ofdm.build_frame(cfg, frag_payload)
 
         out_fs = cfg.fs
@@ -169,8 +171,12 @@ def run_stream(cfg, args, sink, fixed_peak=None):
         print(f"{tag}Streamed fragment seq={frag_idx % 65536} ({len(data)} bytes, "
               f"{len(waveform) / out_fs * 1000:.1f} ms)", file=sys.stderr)
         frag_idx += 1
+        return len(waveform)
 
-    if args.tx_warmup_s > 0:
+    # TDD: the warmup is slotted too (run_tdd), so the receiver can lock onto
+    # the slot timing before real data starts -- a continuous warmup threw
+    # its slot tracking off and cost the first few seconds.
+    if args.tx_warmup_s > 0 and not args.tdd_cycle_s:
         # Real RF output at full configured power, same as any other
         # fragment -- just carrying inert filler (a media_tx_framer.py
         # block with real_len=0, i.e. its first 2 bytes zero: parse_records
@@ -204,7 +210,9 @@ def run_stream(cfg, args, sink, fixed_peak=None):
         print(f"Warmup done ({n_warmup} filler fragment(s)) -- now sending real input.",
               file=sys.stderr)
 
-    if not args.max_input_backlog:
+    if args.tdd_cycle_s:
+        run_tdd(cfg, args, sink, transmit_fragment, backlog)
+    elif not args.max_input_backlog:
         while True:
             data = sys.stdin.buffer.read(args.fragment_size)
             if not data:
@@ -219,6 +227,82 @@ def run_stream(cfg, args, sink, fixed_peak=None):
                   file=sys.stderr)
 
     print(f"Stream ended: sent {frag_idx} fragment(s).", file=sys.stderr)
+
+
+# TDD: each fragment's position in its slot rides in FRAG_HEADER's total_frags
+# field (always 0 in stream mode, and ignored there by receivers): flag bit,
+# then position (7 bits), then fragments per slot (8 bits). One decoded
+# fragment then fixes the receiver's slot phase exactly.
+TDD_HEADER_FLAG = 0x8000
+
+
+def tdd_header_field(pos, per_slot):
+    return TDD_HEADER_FLAG | (min(pos, 0x7F) << 8) | min(per_slot, 0xFF)
+
+
+def run_tdd(cfg, args, sink, transmit_fragment, backlog):
+    """--tdd-cycle-s: time-division duplex, one station's side. Every cycle
+    is EXACTLY round(cycle_s * fs) samples on air: as many whole fragments
+    as fit in the slot (real input if waiting, else inert filler -- the
+    radio's sample timeline must never stall), then silence for the rest of
+    the cycle, when the other station transmits. Timing is the sample count
+    itself: a Pluto's TX and RX share one clock, measured to hold to the
+    sample (see the loopback test), so no timestamps are needed.
+    --tdd-offset-s delays the first slot (the second station's slot sits
+    after the first's)."""
+    out_fs = args.sample_rate if args.sample_rate else cfg.fs
+    cycle = int(round(args.tdd_cycle_s * out_fs))
+    slot = int(round(args.tdd_slot_s * out_fs))
+    filler = bytes(args.fragment_size)
+    # one fragment's length on air, measured: built the way transmit_fragment
+    # builds it (resample padding and any --fragment-gap-ms included)
+    w = ofdm.build_frame(cfg, FRAG_HEADER.pack(0, 0, 0) + filler)
+    n_frag = len(ofdm.fft_resample_rate(w.astype(np.complex64), cfg.fs, out_fs)) if out_fs != cfg.fs else len(w)
+    n_frag += int(round(out_fs * args.fragment_gap_ms / 1000)) if args.fragment_gap_ms > 0 else 0
+    per_slot = slot // n_frag
+    if per_slot < 1:
+        sys.exit(f"--tdd-slot-s {args.tdd_slot_s:g} is shorter than one fragment "
+                 f"({n_frag / out_fs * 1000:.1f} ms): use a longer slot or smaller fragments")
+    if per_slot * n_frag > cycle:
+        sys.exit("--tdd-slot-s must not be longer than --tdd-cycle-s")
+    print(f"[tdd] cycle {cycle / out_fs * 1000:.1f} ms: {per_slot} fragment(s) "
+          f"({per_slot * n_frag / out_fs * 1000:.1f} ms) then {(cycle - per_slot * n_frag) / out_fs * 1000:.1f} ms "
+          f"silent; framer period for this: --fragment-period-s {args.tdd_cycle_s / per_slot:.4f}",
+          file=sys.stderr)
+    if args.tdd_offset_s:
+        off = int(round(args.tdd_offset_s * out_fs)) % cycle
+        if off:
+            sink.write(np.zeros(off, np.complex64))
+    zeros = np.zeros(cycle, np.complex64)
+    n_cycles = n_real = n_filler = 0
+    # --tx-warmup-s, slotted: filler only (see run_stream), then real input
+    warmup_cycles = int(np.ceil(args.tx_warmup_s / args.tdd_cycle_s)) if args.tx_warmup_s > 0 else 0
+    if warmup_cycles:
+        print(f"[tdd] warmup: {warmup_cycles} cycle(s) of slotted filler before real input",
+              file=sys.stderr)
+    while True:
+        if n_cycles == warmup_cycles and backlog is not None:
+            backlog.end_warmup(args.max_input_backlog)  # input queued meanwhile is stale
+        written = 0
+        for pos in range(per_slot):
+            data = backlog.take_nowait() if backlog is not None and n_cycles >= warmup_cycles else None
+            if data is None:
+                if backlog is not None and backlog.eof and not backlog.buf:
+                    print(f"[tdd] input ended after {n_cycles} cycles", file=sys.stderr)
+                    return
+                data, tag = filler, "[filler] "
+                n_filler += 1
+            else:
+                tag = ""
+                n_real += 1
+            written += transmit_fragment(data, tag=tag, total_field=tdd_header_field(pos, per_slot))
+        if written > cycle:
+            print(f"[tdd] WARNING: slot overran the cycle by {written - cycle} samples", file=sys.stderr)
+        else:
+            sink.write(zeros[:cycle - written])
+        n_cycles += 1
+        if n_cycles % max(1, int(10 / args.tdd_cycle_s)) == 0:
+            print(f"[tdd] {n_cycles} cycles: {n_real} real, {n_filler} filler fragment(s)", file=sys.stderr)
 
 
 class _LiveInput:
@@ -257,6 +341,12 @@ class _LiveInput:
                         print(f"[latency cap] dropped a stale input fragment ({self.dropped} so far)",
                               file=sys.stderr)
                 self.cv.notify()
+
+    def take_nowait(self):
+        """The oldest waiting fragment, or None if there's none (slotted
+        mode never waits: an empty slot is filled with filler instead)."""
+        with self.cv:
+            return self.buf.popleft() if self.buf else None
 
     def end_warmup(self, cap, keep=0):
         """Drop what queued up during warmup except the newest `keep`
@@ -372,6 +462,15 @@ def main():
                           "chunk at a time as soon as it's available, looping until stdin closes. "
                           "Requires --fragment-size; incompatible with --amplitude-sweep (which "
                           "needs the whole waveform known upfront).")
+    ap.add_argument("--tdd-cycle-s", type=float, default=0.0, metavar="S",
+                     help="With --stream and --max-input-backlog: time-division duplex. Transmit "
+                          "in a slot once every S seconds, silent the rest of the cycle (the other "
+                          "station's turn). Exact by sample count. 0 (default): continuous.")
+    ap.add_argument("--tdd-slot-s", type=float, default=0.0, metavar="S",
+                     help="TDD: this station's transmit slot within each cycle (as many whole "
+                          "fragments as fit). Default: half the cycle.")
+    ap.add_argument("--tdd-offset-s", type=float, default=0.0, metavar="S",
+                     help="TDD: delay the first slot by S seconds (the second station's slot).")
     ap.add_argument("--tx-warmup-s", type=float, default=2.0, metavar="S",
                      help="With --stream: seconds of real, full-power on-air filler fragments "
                           "(inert -- see run_stream's own comment) transmitted BEFORE any real "
@@ -460,6 +559,11 @@ def main():
                           "sits mid-band -- matches pluto_loopback.py's old default of a 25kHz "
                           "offset, which this replaces).")
     args = ap.parse_args()
+    if args.tdd_cycle_s:
+        if not (args.stream and args.max_input_backlog):
+            ap.error("--tdd-cycle-s needs --stream and --max-input-backlog")
+        if not args.tdd_slot_s:
+            args.tdd_slot_s = args.tdd_cycle_s / 2
     import avm_threads
     avm_threads.install(main_name="tx-modulate")  # thread names visible in top -H
 

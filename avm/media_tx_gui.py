@@ -395,6 +395,10 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         self.lo_offset_hz.setValue(100000)
         self.lo_offset_hz.setToolTip("LO offset (Hz)")
         form.addPair("Rate Hz", self.pluto_sample_rate, "LO offs.", self.lo_offset_hz)
+        # the radio's rate changes each fragment's real air time (see _tx_out_fs)
+        for signal_name in ("currentTextChanged", "editTextChanged"):
+            getattr(self.pluto_sample_rate, signal_name).connect(self._recalculate_bitrates)
+            getattr(self.pluto_sample_rate, signal_name).connect(self._check_video_bitrate)
 
         self.pluto_uri = QtWidgets.QLineEdit("ip:192.168.2.1")
         self.pluto_uri.setPlaceholderText("(auto)")
@@ -486,7 +490,8 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                                      data_modulation=self.modulation.currentText(),
                                      fec_scheme=self.fec.currentText())
             total_bps = ofdm.estimate_effective_bitrate(cfg, self.fragment_size.value(),
-                                                          fragment_gap_ms=self.fragment_gap_ms.value())
+                                                          fragment_gap_ms=self.fragment_gap_ms.value(),
+                                                          out_fs=self._tx_out_fs())
         except Exception as e:
             self.link_capacity_label.setText(f"(couldn't compute: {e})")
             return
@@ -740,6 +745,17 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                 f"~{total_kbps:.1f}kbps effective -- {reason}, sending AUDIO ONLY at "
                 f"{audio_only_kbps:.1f}kbps")
 
+    def _tx_out_fs(self):
+        """The rate TX sends to the radio at (its --sample-rate), or None for
+        the modem's own rate. Fragment timing uses it: resampling adds a few
+        samples of padding per fragment (see estimate_effective_bitrate)."""
+        if self.output_mode.currentText() != "pluto":
+            return None
+        try:
+            return float(self.pluto_sample_rate.currentText())
+        except ValueError:
+            return None  # "(mode native rate)"
+
     def _wavelet_video_kbps(self, fragment_duration_s, audio_kbps):
         """Exact video rate for the wavelet codec: whatever one fragment
         per framer tick has left after its fixed contents. Per tick
@@ -791,7 +807,8 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                                      fec_scheme=self.fec.currentText())
             fragment_size_bytes = self.fragment_size.value()
             total_bps = ofdm.estimate_effective_bitrate(cfg, fragment_size_bytes,
-                                                          fragment_gap_ms=self.fragment_gap_ms.value())
+                                                          fragment_gap_ms=self.fragment_gap_ms.value(),
+                                                          out_fs=self._tx_out_fs())
             fragment_duration_s = fragment_size_bytes * 8 / total_bps if total_bps > 0 else 0
             link_fragment_rate = 1 / fragment_duration_s if fragment_duration_s > 0 else 0
         except Exception:
@@ -843,7 +860,8 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                                      fec_scheme=self.fec.currentText())
             fragment_size_bytes = self.fragment_size.value()
             total_bps = ofdm.estimate_effective_bitrate(cfg, fragment_size_bytes,
-                                                          fragment_gap_ms=self.fragment_gap_ms.value())
+                                                          fragment_gap_ms=self.fragment_gap_ms.value(),
+                                                          out_fs=self._tx_out_fs())
         except Exception:
             self.video_bitrate_warning.setText("")
             return
@@ -983,7 +1001,8 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                                          data_modulation=self.modulation.currentText(),
                                          fec_scheme=self.fec.currentText())
                 total_bps = ofdm.estimate_effective_bitrate(cfg, self.fragment_size.value(),
-                                                              fragment_gap_ms=self.fragment_gap_ms.value())
+                                                              fragment_gap_ms=self.fragment_gap_ms.value(),
+                                                          out_fs=self._tx_out_fs())
                 if total_bps > 0:
                     fragment_period_s = self.fragment_size.value() * 8 / total_bps
                     framer_cmd += ["--fragment-period-s", f"{fragment_period_s:.4f}"]
