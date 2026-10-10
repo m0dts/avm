@@ -158,7 +158,25 @@ if [ $CHECK_ONLY = 0 ]; then
         $SUDO apt-get install -y software-properties-common >/dev/null 2>&1
         $SUDO add-apt-repository -y universe
     fi
-    $SUDO apt-get update || die "apt-get update failed"
+    # apt's own output only when it fails: a warning about one repository
+    # (e.g. a signing key the Pi doesn't have yet) reads like a failure,
+    # though apt carries on with that repository's previous lists.
+    APT_LOG="$(mktemp)"
+    if ! $SUDO apt-get update >"$APT_LOG" 2>&1; then
+        cat "$APT_LOG"; rm -f "$APT_LOG"
+        die "apt-get update failed"
+    fi
+    echo "package lists updated"
+    if grep -qiE 'missing key|NO_PUBKEY|signature' "$APT_LOG"; then
+        BAD="$(grep -oE 'https?://[^ ]+' "$APT_LOG" | grep -iE 'InRelease|Release' \
+               | sed -E 's#/dists/.*##' | sort -u | tr '\n' ' ')"
+        BAD="${BAD:-a package source }"
+        echo "note: couldn't check the signature of ${BAD% } -- its"
+        echo "      signing key isn't on this system (usually the source has a new key"
+        echo "      that isn't released yet). Its previous package lists are used; AVM"
+        echo "      doesn't need it. Nothing to do: a later system update fixes it."
+    fi
+    rm -f "$APT_LOG"
 fi
 
 # offered = has an installable candidate (Ubuntu 24.04 lists python3-numba

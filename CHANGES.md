@@ -3,6 +3,9 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.8 (2026-10-10)
+- Installer: a package source's signing-key warning (e.g. Raspberry Pi's new key) shown as a plain note, not apt's error text
+
 ## 1.0.7 (2026-10-10)
 - Airspy R2/Mini and Airspy HF+ supported as RX radios
 
