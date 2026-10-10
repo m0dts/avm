@@ -95,7 +95,9 @@ def _open_sdr(driver, uri, what):
             found = [dict(k) for k in SoapySDR.Device.enumerate("driver=sdrplay")]
             st = next((k for k in found if k.get("mode", "ST") == "ST"), None)
             if st is not None:
-                return SoapySDR.Device(st)
+                # as a "key=value,..." string: this SoapySDR finds no match
+                # when the same arguments come as a dict
+                return SoapySDR.Device(f"driver=sdrplay,serial={st.get('serial', '')},mode=ST")
         return SoapySDR.Device(f"driver={driver}")
     if driver == "rtlsdr":
         print(f"Opening RTL-SDR {what}...", file=sys.stderr)

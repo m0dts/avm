@@ -170,39 +170,45 @@ mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync
 
 ## What you need
 
-- **A computer:** a Raspberry Pi 4, or any 64-bit PC running Ubuntu or
-  Debian Linux. A faster CPU allows bigger video.
-- **A radio (SDR):**
-  - **ADALM-Pluto:** TX and RX, both at once from one Pluto.
-  - **LibreSDR** (and other boards running Pluto firmware): works as a
-    Pluto. On USB it's the same as a Pluto; on Ethernet AVM looks at both
-    192.168.2.1 and 192.168.1.10 (LibreSDR's default) and uses whichever
-    answers.
-  - **LimeSDR (USB or Mini):** TX or RX, but not both at once from one
-    LimeSDR. AVM runs TX and RX as separate programs, and a Lime can only be
-    opened by one of them at a time. To transmit and receive together, pair
-    the Lime with a second radio for RX, such as a cheap RTL-SDR. AVM says
-    "LimeSDR busy" if you try to use one for both.
-  - **RTL-SDR dongle:** RX only.
-  - **Airspy R2 / Mini:** RX only, 24-1800 MHz. These sample at 2.5 MS/s
-    (R2) or 3 MS/s (Mini), which is more work for a Raspberry Pi than an
-    RTL-SDR.
-  - **Airspy HF+ (Discovery / Dual):** RX only, HF up to 31 MHz and
-    60-260 MHz, using its own AGC (AVM's RX gain setting doesn't apply).
-  - **SDRplay RSP (RSP1, RSP1A, RSP1B, RSP2, RSPduo, RSPdx):** RX only,
-    1 kHz-2 GHz, using its own AGC (AVM's RX gain setting doesn't apply).
-    It needs SDRplay's own API service, which you install yourself from
-    [sdrplay.com](https://www.sdrplay.com/api/) under SDRplay's licence. On
-    Linux, either install that first, or put the downloaded
-    `SDRplay_RSP_API-Linux-*.run` on a USB drive (plugged in) or in
-    `~/Downloads`: AVM's installer then offers to run it (once; again only
-    if you bring a newer one), and builds the SoapySDR driver for it. On Windows, AVM's installer doesn't set up
-    SDRplay.
-
-  Add filters and an amplifier as needed for your band.
+- **A computer:** see [Computers](#computers) below.
+- **A radio (SDR):** see [Radios](#radios) below. Add filters and an
+  amplifier as needed for your band.
 - **A camera and microphone:** any USB webcam works (e.g. a Logitech C920,
   whose focus AVM can control). The test pattern needs no camera.
 - **A licence to transmit:** see the note under [Use](#use).
+
+## Supported hardware
+
+AVM is an experimental release: "tested" below means it has been used with
+AVM, not that every setting has been tried on it.
+
+### Computers
+
+| Computer | Notes |
+|---|---|
+| **Raspberry Pi 4** (64-bit Raspberry Pi OS) | The main platform: what AVM is developed and tested on. Best with the 7" touch screen. |
+| **64-bit PC** (Ubuntu 22.04+, Debian 12+) | Works; a faster CPU allows bigger video. Expect to sort out the odd problem yourself (see [Which platform?](#which-platform)). |
+| **Minimal Debian on 8 GB** | Works, with care: see [Small machines](#small-machines-minimal-debian-on-8-gb). |
+
+### Radios
+
+| Radio | TX | RX | Tuning range | Status | Notes |
+|---|:-:|:-:|---|---|---|
+| **ADALM-Pluto** | ✓ | ✓ | 70-6000 MHz* | Tested | TX and RX at once from one Pluto. On USB, or on the network at 192.168.2.1 / pluto.local. |
+| **LibreSDR** (and other boards running Pluto firmware) | ✓ | ✓ | 70-6000 MHz | Untested | Works as a Pluto. On Ethernet, AVM checks both 192.168.2.1 and 192.168.1.10 (LibreSDR's default) and uses whichever answers. |
+| **LimeSDR-USB / LimeSDR Mini** | ✓ | ✓ | 0.1-3800 MHz | Tested | TX **or** RX, not both at once from one Lime (it can only be opened by one program). To do both, add a second radio for RX, e.g. an RTL-SDR. AVM says "LimeSDR busy" otherwise. Antenna port selectable. |
+| **RTL-SDR dongle** (RTL2832U + R820T) | | ✓ | 24-1766 MHz | Tested | Cheap RX. PPM setting to correct its crystal. |
+| **Airspy R2 / Mini** | | ✓ | 24-1800 MHz | Found by AVM, receive not yet tested | Samples at 2.5 MS/s (R2) or 3 MS/s (Mini): more CPU on a Pi than an RTL-SDR. |
+| **Airspy HF+ Discovery / Dual** | | ✓ | 0.01-31 and 60-260 MHz | Untested | Runs its own AGC: AVM's RX gain setting doesn't apply. |
+| **SDRplay RSP1, RSP1A, RSP1B, RSP2, RSPduo, RSPdx, RSPdx-R2** | | ✓ | 0.001-2000 MHz | RSPduo found and opened by AVM, receive not yet tested | Needs SDRplay's API, which you download yourself: see [SDRplay RSPs](#sdrplay-rsps). Runs its own AGC. RSPduo used as a single tuner. |
+
+\* 70-6000 MHz with the common Pluto firmware change; a stock Pluto covers
+325-3800 MHz.
+
+Radios are listed in AVM by what's plugged in now; a radio that isn't
+connected isn't offered. AVM checks the chosen radio is there before TX or RX
+starts, and pauses TX/RX if a USB radio disappears, carrying on when it's
+back.
 
 ## Install
 
@@ -245,6 +251,64 @@ The first transmit or receive after installing takes a minute or two while
 the modem and codec are compiled for your machine; on a slow CPU it can take
 several minutes. The TX preview shows "Preparing video codec..." meanwhile.
 After that, starts are quick.
+
+### SDRplay RSPs
+
+An SDRplay RSP needs SDRplay's own **API**: a background service that talks
+to the radio. It isn't part of any Linux distribution and AVM can't download
+it for you, because you have to accept SDRplay's licence. Get it yourself,
+then AVM's installer does the rest (Linux only).
+
+1. **Download the API for Linux** from
+   [sdrplay.com/api](https://www.sdrplay.com/api/). It's one file, e.g.
+   `SDRplay_RSP_API-Linux-3.15.2.run`, for PCs and for the Raspberry Pi
+   (64- and 32-bit) alike.
+2. **Put it where the installer looks:** on a USB drive plugged into the
+   machine, in `~/Downloads`, or in the `~/avm` folder.
+3. **Run AVM's installer at the machine itself**, not with `--yes`, so you
+   can answer the licence:
+
+   ```bash
+   bash ~/avm/install_avm.sh
+   ```
+
+   Answer **y** to "SDRplay API ... found: install it?". SDRplay's installer
+   then runs:
+   - press **RETURN** to show the licence;
+   - **space** to page through it, or **q** to skip to the end;
+   - **y** to accept;
+   - **y** to keep the default install locations.
+
+   AVM's installer then builds the SoapySDR driver for SDRplay
+   (SoapySDRPlay3, a minute or two on a Pi) and carries on.
+4. **Pick the RSP** as the RX radio, e.g. **SDRplay RSP1A 090A1B**.
+
+**If you install SDRplay's API another way**, e.g. by running the `.run`
+file yourself, just run AVM's installer afterwards: it sees the API and
+builds the driver.
+
+**Updates:** AVM's Update button and `--yes` never install or upgrade
+SDRplay's API, as its licence needs you there. To upgrade it, bring a newer
+`.run` file and run the installer as in step 3: it offers the upgrade only
+when the file is newer than what's installed, and rebuilds the driver.
+
+**Things to know:**
+- **RX gain:** the RSP runs its own AGC, so AVM's RX gain setting does
+  nothing with it.
+- **Sample rate:** AVM uses the lowest rate the RSP offers that fits, e.g.
+  768 kS/s at the 160 and 250 kHz widths, so it's light on a Pi.
+- **RSPduo:** it's used as a single tuner and listed once. Other programs
+  (and `SoapySDRUtil --find`) list it four times, once per mode; that's
+  normal.
+- **One program at a time:** close other SDR software using the RSP (SDR++,
+  CubicSDR...) before starting RX.
+- **Checking it:** `SoapySDRUtil --find="driver=sdrplay"` should list the
+  RSP. If not, check SDRplay's service is running with
+  `systemctl status sdrplay`, and restart it with
+  `sudo systemctl restart sdrplay`.
+- **Windows:** AVM's installer doesn't set up SDRplay there. Installing
+  SDRplay's Windows API and a SoapySDRPlay3 module by hand may work, but it
+  hasn't been tested.
 
 ## Small machines: minimal Debian on 8 GB
 

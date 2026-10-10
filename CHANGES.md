@@ -3,6 +3,10 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.14 (2026-10-10)
+- SDRplay: fixed RX not starting (RSPduo 'no match')
+- README: supported hardware tables and SDRplay install steps
+
 ## 1.0.13 (2026-10-10)
 - SDRplay RSPduo listed once (it showed once per mode) and used in single-tuner mode
 - CPU figure turns orange-red above 90%
