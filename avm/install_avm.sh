@@ -159,6 +159,7 @@ if [ $CHECK_ONLY = 0 ]; then
     # (e.g. a signing key the Pi doesn't have yet) reads like a failure,
     # though apt carries on with that repository's previous lists.
     APT_LOG="$(mktemp)"
+    echo "checking for package updates (apt-get update, up to a minute)..."
     if ! $SUDO apt-get update >"$APT_LOG" 2>&1; then
         cat "$APT_LOG"; rm -f "$APT_LOG"
         die "apt-get update failed"
@@ -185,6 +186,7 @@ have_pkg() {
 }
 installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
+echo "checking which packages are installed and offered (a minute or two on a Pi)..."
 # SoapySDR's module ABI (0.8 on current releases, 0.7 on Ubuntu 22.04)
 SOAPY_ABI=0.8
 have_pkg soapysdr0.8-module-lms7 || { have_pkg soapysdr0.7-module-lms7 && SOAPY_ABI=0.7; }
@@ -273,6 +275,76 @@ else
         && make -C "$SRC/build" -j"$(nproc)" \
         && $SUDO make -C "$SRC/build" install && $SUDO ldconfig || die "SoapyPlutoSDR build failed"
     pluto_ok && echo "built and installed" || warn "built, but SoapySDRUtil still doesn't list it"
+fi
+
+# SDRplay RSPs (receive only): SoapySDRPlay3 sits on SDRplay's own API
+# service, which isn't in any distro (sdrplay.com, under SDRplay's licence).
+# With that installed, the Soapy module is built here; without it, a note.
+#
+# SDRplay's API installer, if the user downloaded it (SDRplay_RSP_API-Linux-
+# 3.15.2.run) to a USB drive, ~/Downloads or the AVM folder: offered when the
+# API isn't installed, or that file is newer than the installed one. Never
+# with --yes (its licence needs a person to accept).
+sdrplay_api_ver() {  # installed API version, e.g. 3.15 ("" if none)
+    ls /usr/local/lib/libsdrplay_api.so.* 2>/dev/null | sed -E 's/.*\.so\.//' | sort -V | tail -1
+}
+SDRPLAY_RUN="$(ls -1 /media/"$USER"/*/SDRplay_RSP_API-Linux-*.run /media/*/SDRplay_RSP_API-Linux-*.run \
+    "$HOME"/Downloads/SDRplay_RSP_API-Linux-*.run "$AVM_DIR"/SDRplay_RSP_API-Linux-*.run 2>/dev/null \
+    | awk -F/ '{print $NF "\t" $0}' | sort -V | tail -1 | cut -f2)"
+if [ -n "$SDRPLAY_RUN" ]; then
+    RUN_VER="$(basename "$SDRPLAY_RUN" | sed -E 's/.*Linux-([0-9.]+)\.run/\1/')"
+    HAVE_VER="$(sdrplay_api_ver)"
+    # newer = its major.minor sorts above the installed one (the .so is major.minor)
+    RUN_MM="$(echo "$RUN_VER" | cut -d. -f1-2)"
+    if [ -z "$HAVE_VER" ] || [ "$(printf '%s\n%s\n' "$HAVE_VER" "$RUN_MM" | sort -V | tail -1)" != "$HAVE_VER" ]; then
+        what="install"; [ -n "$HAVE_VER" ] && what="upgrade (installed: $HAVE_VER)"
+        if [ $CHECK_ONLY = 1 ]; then
+            echo "SDRplay API $RUN_VER found ($SDRPLAY_RUN): will offer to $what"
+        elif [ $ASSUME_YES = 1 ]; then
+            echo "SDRplay API $RUN_VER found ($SDRPLAY_RUN) -- to $what it, run this"
+            echo "  installer without --yes (its licence needs you to accept it)"
+        else
+            printf '\033[1mSDRplay API %s found (%s): %s it? [y/N] \033[0m' "$RUN_VER" "$SDRPLAY_RUN" "$what"
+            ans=""
+            { read -r ans </dev/tty; } 2>/dev/null || true
+            case "$ans" in
+                y|Y|yes|YES)
+                    # its own installer: shows the licence, asks, uses sudo itself
+                    TMP_RUN="$(mktemp -d)"
+                    cp "$SDRPLAY_RUN" "$TMP_RUN/" && chmod +x "$TMP_RUN/$(basename "$SDRPLAY_RUN")"
+                    ( cd "$TMP_RUN" && "./$(basename "$SDRPLAY_RUN")" </dev/tty ) \
+                        || warn "SDRplay API installer didn't finish"
+                    rm -rf "$TMP_RUN"
+                    # a newer API needs the Soapy module rebuilt against it
+                    [ -n "$HAVE_VER" ] && rm -rf "$HOME/src/SoapySDRPlay3/build" \
+                        && SDRPLAY_REBUILD=1
+                    ;;
+                *) echo "SDRplay API left as it is" ;;
+            esac
+        fi
+    fi
+fi
+
+sdrplay_ok() { SoapySDRUtil --info 2>/dev/null | grep -qi 'sdrPlaySupport'; }
+if sdrplay_ok && [ -z "$SDRPLAY_REBUILD" ]; then
+    echo "SDRplay driver: present"
+elif [ ! -f /usr/local/include/sdrplay_api.h ]; then
+    echo "SDRplay driver: not set up (only needed for an SDRplay RSP: install SDRplay's"
+    echo "  API for Linux from sdrplay.com, then run this installer again)"
+elif [ $CHECK_ONLY = 1 ]; then
+    echo "SDRplay driver: missing (will be built from source)"
+else
+    SRC="$HOME/src/SoapySDRPlay3"
+    mkdir -p "$HOME/src"
+    [ -d "$SRC" ] || git clone --depth 1 https://github.com/pothosware/SoapySDRPlay3.git "$SRC" \
+        || warn "git clone SoapySDRPlay3 failed"
+    if [ -d "$SRC" ]; then
+        cmake -S "$SRC" -B "$SRC/build" -DCMAKE_BUILD_TYPE=Release >/dev/null \
+            && make -C "$SRC/build" -j"$(nproc)" >/dev/null \
+            && $SUDO make -C "$SRC/build" install >/dev/null && $SUDO ldconfig \
+            && sdrplay_ok && echo "SDRplay driver: built and installed" \
+            || warn "SoapySDRPlay3 build failed (SDRplay RSPs won't be found)"
+    fi
 fi
 
 # ---------------------------------------------------------------- 3. venv

@@ -65,7 +65,7 @@ def _station_text(engine_text):
 
 class _RxEngine(media_rx_gui.MediaRxWindow):
     """The full RX window, never shown; adds a wider spectrum span and the
-    radio choice (PlutoSDR, LimeSDR, RTL-SDR or Airspy)."""
+    radio choice (PlutoSDR, LimeSDR, RTL-SDR, Airspy or SDRplay)."""
     span_hz = 0.0
     sdr = "pluto"
     rtl_ppm = 0.0
@@ -443,10 +443,10 @@ class RxPage(QtWidgets.QWidget):
         self._set_scale(self.ref.value(), div)
 
     def set_radio(self, sdr, force=False):
-        """'pluto', 'lime', 'rtlsdr', 'airspy' or 'airspyhf' -- from the Radio
+        """'pluto', 'lime', 'rtlsdr', 'airspy', 'airspyhf' or 'sdrplay' -- from the Radio
         picker. RX gain tops out at 61 dB on a LimeSDR, ~49 on an RTL-SDR,
-        45 on an Airspy (LNA+mixer+VGA), 73 on the Pluto. The HF+ runs its
-        own AGC (its gain setting is ignored)."""
+        45 on an Airspy (LNA+mixer+VGA), 73 on the Pluto. The HF+ and SDRplay
+        run their own AGC (the gain setting is ignored)."""
         self.radio.set_sdr(sdr)
         self.freq.set_radio(sdr)
         if not self.freq.in_range():

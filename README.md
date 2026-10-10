@@ -73,7 +73,7 @@ The set-up choices, which rarely change once a station is running:
 2. **TX radio:** Pluto or LimeSDR. A LimeSDR also gets an antenna-port button
    (Auto, BAND1 or BAND2); on a LimeSDR Mini, try the other band if there's
    no RF output.
-3. **RX radio:** Pluto, LimeSDR, RTL-SDR or Airspy, from the radios connected now. A
+3. **RX radio:** Pluto, LimeSDR, RTL-SDR, Airspy or SDRplay, from the radios connected now. A
    Pluto shows how it's connected (**USB** or **IP**), and AVM uses the one
    you pick. An RTL-SDR also gets a **PPM** setting to correct its crystal,
    and a LimeSDR a port button (Auto, LNAL, LNAW or LNAH).
@@ -189,6 +189,15 @@ mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync
     RTL-SDR.
   - **Airspy HF+ (Discovery / Dual):** RX only, HF up to 31 MHz and
     60-260 MHz, using its own AGC (AVM's RX gain setting doesn't apply).
+  - **SDRplay RSP (RSP1, RSP1A, RSP1B, RSP2, RSPduo, RSPdx):** RX only,
+    1 kHz-2 GHz, using its own AGC (AVM's RX gain setting doesn't apply).
+    It needs SDRplay's own API service, which you install yourself from
+    [sdrplay.com](https://www.sdrplay.com/api/) under SDRplay's licence. On
+    Linux, either install that first, or put the downloaded
+    `SDRplay_RSP_API-Linux-*.run` on a USB drive (plugged in) or in
+    `~/Downloads`: AVM's installer then offers to run it (once; again only
+    if you bring a newer one), and builds the SoapySDR driver for it. On Windows, AVM's installer doesn't set up
+    SDRplay.
 
   Add filters and an amplifier as needed for your band.
 - **A camera and microphone:** any USB webcam works (e.g. a Logitech C920,

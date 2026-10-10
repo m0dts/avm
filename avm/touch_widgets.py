@@ -250,9 +250,13 @@ def dialog_geometry(widget):
 
 class TouchListDialog(QtWidgets.QDialog):
     """Full-window list to pick one item by tapping it. refresh: a callable
-    returning a new list (e.g. a device search) -- adds a Refresh button."""
+    returning a new list (e.g. a device search) -- adds a Refresh button.
+    background=True: refresh runs on a worker thread (it must not touch Qt),
+    so the window shows at once and the list fills in when it's done;
+    items=None then starts with that search."""
+    _found = QtCore.pyqtSignal(object, int)  # (items, search number)
 
-    def __init__(self, title, items, current, parent, refresh=None):
+    def __init__(self, title, items, current, parent, refresh=None, background=False):
         super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
         self.setModal(True)
         lay = QtWidgets.QVBoxLayout(self)
@@ -261,7 +265,10 @@ class TouchListDialog(QtWidgets.QDialog):
         t.setObjectName("big")
         top.addWidget(t, 1)
         self._refresh = refresh
+        self._background = background
+        self._search = 0  # only the latest search's result is shown
         self._current = current
+        self._found.connect(self._search_done)
         if refresh:
             self.refresh_button = QtWidgets.QPushButton("Refresh")
             self.refresh_button.clicked.connect(self._do_refresh)
@@ -273,7 +280,10 @@ class TouchListDialog(QtWidgets.QDialog):
         self.list = QtWidgets.QListWidget()
         self.list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         QtWidgets.QScroller.grabGesture(self.list.viewport(), QtWidgets.QScroller.LeftMouseButtonGesture)
-        self._fill(items)
+        if items is None and refresh:
+            QtCore.QTimer.singleShot(0, self._do_refresh)  # once the window is up
+        else:
+            self._fill(items or [])
         self.list.itemClicked.connect(lambda it: self.done_with(it.text()))
         lay.addWidget(self.list, 1)
         self.result_text = None
@@ -287,15 +297,41 @@ class TouchListDialog(QtWidgets.QDialog):
                 self.list.setCurrentRow(self.list.count() - 1)
 
     def _do_refresh(self):
-        """Search again (a second or so): say so first, as it blocks."""
+        """Search again (a second or so)."""
         self.refresh_button.setEnabled(False)
         self.refresh_button.setText("Searching...")
-        QtWidgets.QApplication.processEvents()
-        try:
-            self._fill(self._refresh())
-        finally:
-            self.refresh_button.setText("Refresh")
-            self.refresh_button.setEnabled(True)
+        if not self._background:
+            QtWidgets.QApplication.processEvents()  # show that first: this blocks
+            try:
+                self._fill(self._refresh())
+            finally:
+                self._search_done(None, -1)
+            return
+        if self.list.count() == 0:
+            self.list.addItem("Searching...")
+            self.list.item(0).setFlags(QtCore.Qt.NoItemFlags)
+        self._search += 1
+        n = self._search
+
+        def work():
+            try:
+                items = self._refresh()
+            except Exception as e:
+                items = [f"(search failed: {e})"]
+            try:
+                self._found.emit(items, n)
+            except RuntimeError:
+                pass  # the window was closed meanwhile
+
+        threading.Thread(target=work, daemon=True, name="picker-search").start()
+
+    def _search_done(self, items, n):
+        if items is not None:
+            if n != self._search:
+                return  # an older search
+            self._fill(items)
+        self.refresh_button.setText("Refresh")
+        self.refresh_button.setEnabled(True)
 
     def done_with(self, text):
         self.result_text = text
@@ -307,6 +343,7 @@ class Picker(QtWidgets.QPushButton):
     list. items: list of strings, or a callable returning one (refreshed on
     every tap, e.g. device lists). Emits changed(text)."""
     changed = QtCore.pyqtSignal(str)
+    search_in_background = False  # True: items() is slow and Qt-free (radio search)
 
     def __init__(self, title, items, current="", parent=None):
         super().__init__(parent)
@@ -335,9 +372,14 @@ class Picker(QtWidgets.QPushButton):
         self.setText(self.fontMetrics().elidedText(full, QtCore.Qt.ElideMiddle, room) + "  ▾")
 
     def _pick(self):
-        items = self._items() if callable(self._items) else self._items
+        if callable(self._items):
+            # a slow search runs after the window is up, not before
+            items = None if self.search_in_background else self._items()
+        else:
+            items = self._items
         d = TouchListDialog(self._title, items, self._value, self,
-                            refresh=self._items if callable(self._items) else None)
+                            refresh=self._items if callable(self._items) else None,
+                            background=self.search_in_background)
         if d.exec_() and d.result_text is not None and d.result_text != self._value:
             self.set_value(d.result_text)
             self.changed.emit(d.result_text)
@@ -478,8 +520,10 @@ class TextButton(QtWidgets.QPushButton):
 # 0.1 MHz (below ~30 MHz by NCO offset; the Mini is specified from 10 MHz).
 # RTL-SDR: R820T tuner range (no HF direct sampling here). Airspy R2/Mini:
 # R820T2, 24-1800. Airspy HF+: 0.5 kHz-31 MHz and 60-260 MHz (gap between).
+# SDRplay RSP: 1 kHz-2 GHz.
 FREQ_RANGE_MHZ = {"pluto": (70.0, 6000.0), "lime": (0.1, 3800.0), "rtlsdr": (24.0, 1766.0),
-                  "airspy": (24.0, 1800.0), "airspyhf": (0.01, 260.0)}
+                  "airspy": (24.0, 1800.0), "airspyhf": (0.01, 260.0),
+                  "sdrplay": (0.001, 2000.0)}
 
 
 class FreqButton(QtWidgets.QPushButton):
@@ -724,7 +768,7 @@ def saved_bandwidth(value):
 
 
 RADIO_NAMES = {"pluto": "PlutoSDR", "lime": "LimeSDR", "rtlsdr": "RTL-SDR",
-               "airspy": "Airspy", "airspyhf": "Airspy HF+"}
+               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay"}
 # USB vendor:product IDs per radio, for the USB watchdog (touch_gui). A radio
 # that isn't on USB at all (e.g. a Pluto on the network) simply isn't watched.
 USB_IDS = {
@@ -733,6 +777,8 @@ USB_IDS = {
     "rtlsdr": {("0bda", "2838"), ("0bda", "2832")},   # RTL2832U dongles
     "airspy": {("1d50", "60a1")},                     # Airspy R2 / Mini
     "airspyhf": {("03eb", "800c")},                   # Airspy HF+ Discovery / Dual
+    # SDRplay RSP1, RSP1A, RSP2, RSPduo, RSPdx, RSP1B, RSPdx-R2
+    "sdrplay": {("1df7", p) for p in ("2500", "3000", "3010", "3020", "3030", "3050", "3060")},
 }
 
 
@@ -783,9 +829,9 @@ def default_pluto_uri():
     return f"ip:{_pluto_probe['host']}" if _pluto_probe["host"] else ""
 
 
-RX_ONLY_RADIOS = ("rtlsdr", "airspy", "airspyhf")
+RX_ONLY_RADIOS = ("rtlsdr", "airspy", "airspyhf", "sdrplay")
 # radios whose live gain goes via a file the RX process watches (no iio_attr)
-GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf")
+GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf", "sdrplay")
 RTL_SAMPLE_RATE = 1024000  # an RTL-SDR rate (0.9-3.2 MS/s) that fits every bandwidth + LO offset
 
 
@@ -823,7 +869,7 @@ def radio_present(sdr, uri=None):
 
 
 def detect_rx_radios():
-    """detect_radios() plus receive-only radios (RTL-SDR, Airspy)."""
+    """detect_radios() plus receive-only radios (RTL-SDR, Airspy, SDRplay)."""
     found = [r for r in detect_radios() if not r.startswith("(no radios")]
     try:
         import SoapySDR
@@ -841,6 +887,16 @@ def detect_rx_radios():
                 found.append(f"{name} {kw.get('serial', '').lstrip('0')[-8:]}".strip())
         except Exception:
             pass  # module not installed
+    # SDRplay RSPs (SoapySDRPlay3, needs SDRplay's API service running)
+    try:
+        import SoapySDR
+        for kw in SoapySDR.Device.enumerate("driver=sdrplay"):
+            kw = dict(kw)
+            # label e.g. "SDRplay Dev0 RSP1A 2105090A1B"
+            model = next((w for w in kw.get("label", "").split() if w.startswith("RSP")), "RSP")
+            found.append(f"SDRplay {model} {kw.get('serial', '')[-6:]}".strip())
+    except Exception:
+        pass
     return found or ["(no radios found -- check USB / power)"]
 
 
@@ -863,7 +919,9 @@ def detect_radios():
     one entry per LimeSDR (its model, e.g. LimeSDR-USB or LimeSDR Mini, and
     serial). Takes ~1.7 s on a Pi 4 (mostly looking for Plutos on USB and
     the network)."""
-    QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+    gui_thread = threading.current_thread() is threading.main_thread()
+    if gui_thread:
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
     found = []
     try:
         import SoapySDR
@@ -900,7 +958,8 @@ def detect_radios():
     except Exception as e:
         found.append(f"(search failed: {e})")
     finally:
-        QtWidgets.QApplication.restoreOverrideCursor()
+        if gui_thread:
+            QtWidgets.QApplication.restoreOverrideCursor()
     return found or ["(no radios found -- check USB / power)"]
 
 
@@ -910,8 +969,10 @@ class RadioPicker(Picker):
     radios found)' pick keeps the previous choice. rx=True also offers
     receive-only radios (RTL-SDR)."""
     radio_changed = QtCore.pyqtSignal(str)
+    search_in_background = True  # the radio search takes ~1.7 s on a Pi 4
 
-    SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL", "airspy": "Airspy", "airspyhf": "HF+"}  # fits beside the frequency
+    SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL", "airspy": "Airspy", "airspyhf": "HF+",
+             "sdrplay": "SDRplay"}  # fits beside the frequency
 
     def __init__(self, title, sdr, rx=False, pluto_uri=""):
         allowed = RADIO_NAMES if rx else {k: v for k, v in RADIO_NAMES.items() if k not in RX_ONLY_RADIOS}
@@ -937,7 +998,8 @@ class RadioPicker(Picker):
         sdr = ("lime" if label.startswith("Lime") else "pluto" if label.startswith("Pluto")
                else "rtlsdr" if label.startswith("RTL-SDR")
                else "airspyhf" if label.startswith("Airspy HF+")
-               else "airspy" if label.startswith("Airspy") else None)
+               else "airspy" if label.startswith("Airspy")
+               else "sdrplay" if label.startswith("SDRplay") else None)
         if sdr == "pluto":
             self.pluto_uri = PLUTO_URIS.get(label, "")
         self.set_sdr(sdr or self.sdr)  # "(no radios found)" keeps the previous choice

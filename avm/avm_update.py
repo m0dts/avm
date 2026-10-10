@@ -28,6 +28,17 @@ UPDATE_CMD = "bash ~/avm/install_avm.sh --update"
 INSTALLER_FILES = ("install_avm.sh", "install_avm_windows.ps1", "install_avm.bat")
 
 
+def sudo_without_password():
+    """Can the installer's sudo run without asking (a Pi's default)? Then
+    AVM runs it itself, with no terminal (and so no on-screen keyboard)."""
+    import subprocess
+    try:
+        return subprocess.run(["sudo", "-n", "true"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+    except Exception:
+        return False
+
+
 def run_installer_then_restart(avm_dir=None):
     """After a GUI update that changed an installer: start that installer in
     a window of its own, which restarts AVM when done. Returns False if it
@@ -52,7 +63,8 @@ def run_installer_then_restart(avm_dir=None):
         f.write("\n".join([
             "#!/bin/bash",
             f'bash "{avm_dir}/install_avm.sh" --yes',
-            'echo; read -r -p "Press Enter to restart AVM " _',
+            # restart by itself: nothing to type (Enter needs a keyboard)
+            'echo; echo "AVM restarts in 10 s..."; sleep 10',
             restart,
             ""]))
     os.chmod(script, 0o755)

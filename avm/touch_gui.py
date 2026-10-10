@@ -17,6 +17,7 @@ start/stop button into RESTART TO APPLY. Settings are remembered in
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -39,7 +40,7 @@ if os.environ.get("QT_QPA_PLATFORMTHEME") == "qt5ct":
 if os.environ.get("WAYLAND_DISPLAY") and "QT_QPA_PLATFORM" not in os.environ:
     os.environ["QT_QPA_PLATFORM"] = "wayland"
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 import touch_widgets as tw
 from touch_config_page import ConfigPage
@@ -87,6 +88,7 @@ class _UpdateResult(QtCore.QObject):
 
 SETTINGS_AUTOSAVE_MS = 2000  # settings written to disk this soon after a change
 USB_WATCH_MS = 2000   # USB watchdog poll (sysfs only: microseconds)
+RESTART_AFTER_INSTALL_S = 10  # after an update's installer run: restart AVM by itself
 USB_RESUME_S = 4.0    # a device must be back this long before TX/RX restarts
 
 
@@ -363,16 +365,44 @@ class TouchWindow(QtWidgets.QWidget):
             self.update_btn.setText(f"⬆ v{self._update_version}")
         self.update_btn.setVisible(bool(self._update_version))
 
+    def _ask_update(self, notes):
+        """Full-window question with the change notes in a scrolling box
+        (several releases' notes don't fit a message box). True = update."""
+        d = QtWidgets.QDialog(self, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        d.setModal(True)
+        lay = QtWidgets.QVBoxLayout(d)
+        title = QtWidgets.QLabel(f"AVM v{self._update_version} is available "
+                                 f"(you have v{avm_update.local_version()})")
+        title.setObjectName("big")
+        title.setWordWrap(True)
+        lay.addWidget(title)
+        lay.addWidget(QtWidgets.QLabel("What's new:"))
+        # CHANGES.md's "## 1.0.11 (date)" headings, as plain "v1.0.11 (date)"
+        notes = "\n".join("v" + l[3:] if l.startswith("## ") else l for l in notes.strip().splitlines())
+        text = QtWidgets.QPlainTextEdit(notes)
+        text.setReadOnly(True)
+        text.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)  # drag scrolls, never selects
+        QtWidgets.QScroller.grabGesture(text.viewport(), QtWidgets.QScroller.LeftMouseButtonGesture)
+        lay.addWidget(text, 1)
+        lay.addWidget(QtWidgets.QLabel("Updating stops TX/RX, downloads the new version and restarts AVM."))
+        row = QtWidgets.QHBoxLayout()
+        no = QtWidgets.QPushButton("Not now")
+        no.setObjectName("run")
+        no.clicked.connect(d.reject)
+        yes = QtWidgets.QPushButton("Update now")
+        yes.setObjectName("run")
+        yes.clicked.connect(d.accept)
+        row.addWidget(no)
+        row.addWidget(yes)
+        lay.addLayout(row)
+        d.setGeometry(tw.dialog_geometry(self.update_btn))
+        # again once up: right after start-up the window may still be resizing
+        QtCore.QTimer.singleShot(200, lambda: d.setGeometry(tw.dialog_geometry(self.update_btn)))
+        return d.exec_() == QtWidgets.QDialog.Accepted
+
     def _show_update(self):
         """Ask, then: stop TX/RX, fetch the new files from GitHub, restart."""
-        notes = self._update_notes or "(no change notes)"
-        box = QtWidgets.QMessageBox(
-            QtWidgets.QMessageBox.Question, "Update available",
-            f"AVM v{self._update_version} is available -- you have v{avm_update.local_version()}.\n\n"
-            f"What's new:\n{notes}\n\n"
-            "Update now? TX/RX stop, AVM downloads the new version and restarts.",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, self)
-        if box.exec_() != QtWidgets.QMessageBox.Yes:
+        if not self._ask_update(self._update_notes or "(no change notes)"):
             return
         self.tx.shutdown()
         self.rx.shutdown()
@@ -392,6 +422,12 @@ class TouchWindow(QtWidgets.QWidget):
         # The installer itself changed: run it (it may have new steps, e.g.
         # an ffmpeg with Codec2) -- in its own window, which restarts AVM.
         if any(f in avm_update.INSTALLER_FILES for f in updated):
+            # Linux with sudo needing no password (a Pi, normally): run it here,
+            # shown in AVM's own window -- a terminal would bring up the
+            # on-screen keyboard over it, with nothing to type
+            if sys.platform.startswith("linux") and avm_update.sudo_without_password():
+                self._run_installer_here()
+                os.execv(sys.executable, [sys.executable] + sys.argv)
             if avm_update.run_installer_then_restart():
                 self.app.quit()
                 return
@@ -399,6 +435,70 @@ class TouchWindow(QtWidgets.QWidget):
                                        f"(bash {os.path.dirname(os.path.abspath(__file__))}/install_avm.sh)")
         # restart: the same program, arguments and environment, now updated
         os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    def _run_installer_here(self):
+        """The installer (--yes) with its output in a full-window log; returns
+        once it has finished and Restart is tapped (or after a short wait)."""
+        d = QtWidgets.QDialog(self, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        d.setModal(True)
+        lay = QtWidgets.QVBoxLayout(d)
+        title = QtWidgets.QLabel("Updating AVM: running the installer...")
+        title.setObjectName("big")
+        lay.addWidget(title)
+        log = QtWidgets.QPlainTextEdit()
+        log.setReadOnly(True)
+        log.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+        log.setMaximumBlockCount(5000)
+        QtWidgets.QScroller.grabGesture(log.viewport(), QtWidgets.QScroller.LeftMouseButtonGesture)
+        lay.addWidget(log, 1)
+        restart = QtWidgets.QPushButton("Please wait...")
+        restart.setObjectName("run")
+        restart.setEnabled(False)
+        restart.clicked.connect(d.accept)
+        lay.addWidget(restart)
+        # the whole window, tabs too: nothing else is usable while it runs
+        d.setGeometry(self.geometry())
+        # again once up: right after start-up the window may still be resizing
+        QtCore.QTimer.singleShot(200, lambda: d.setGeometry(self.geometry()))
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        proc = QtCore.QProcess(d)
+        proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        proc.setWorkingDirectory(here)
+        ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+        def output():
+            text = ansi.sub("", bytes(proc.readAll()).decode("utf-8", "replace")).replace("\r", "")
+            log.moveCursor(QtGui.QTextCursor.End)
+            log.insertPlainText(text)
+            log.moveCursor(QtGui.QTextCursor.End)
+
+        left = [RESTART_AFTER_INSTALL_S]
+
+        def tick():
+            left[0] -= 1
+            restart.setText(f"Restart AVM ({left[0]})")
+            if left[0] <= 0:
+                d.accept()
+
+        timer = QtCore.QTimer(d)
+        timer.timeout.connect(tick)
+
+        def finished(code, _status):
+            ok = code == 0
+            title.setText("Installer finished" if ok else
+                          f"Installer stopped (code {code}) -- see above; AVM restarts anyway")
+            restart.setEnabled(True)
+            left[0] = RESTART_AFTER_INSTALL_S + 1
+            tick()
+            timer.start(1000)
+
+        proc.readyRead.connect(output)
+        proc.finished.connect(finished)
+        proc.start("bash", [os.path.join(here, "install_avm.sh"), "--yes"])
+        d.exec_()
+        if proc.state() != QtCore.QProcess.NotRunning:
+            proc.waitForFinished(-1)
 
     def _update_notice_btn(self):
         n = tw.notices().count()

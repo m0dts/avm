@@ -3,6 +3,13 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.12 (2026-10-10)
+- Radio list opens at once and searches in the background
+- SDRplay RSPs supported as RX radios (installer offers SDRplay's API from a USB drive or Downloads)
+- update notes in a scrolling full-width window
+- on a Pi the update's installer runs inside AVM (full screen, no terminal or on-screen keyboard) and AVM restarts by itself
+- installer says when it's checking for updates
+
 ## 1.0.11 (2026-10-10)
 - Radio list: a Pluto found at a numeric address (e.g. 192.168.2.1) is listed once, without its duplicate USB and pluto.local entries
 

@@ -59,11 +59,15 @@ def _tx_gain_for_driver(sdr, direction, tx_gain_db):
 
 
 AIRSPY_DRIVERS = {"airspy": "Airspy", "airspyhf": "Airspy HF+"}
+# receive-only radios opened plainly by driver name, at a rate they offer
+FIXED_RATE_DRIVERS = {**AIRSPY_DRIVERS, "sdrplay": "SDRplay"}
+# radios left on their own AGC (AVM's RX gain setting does nothing)
+OWN_AGC_DRIVERS = ("airspyhf", "sdrplay")
 
 
 def _nearest_supported_rate(sdr, direction, want):
-    """An Airspy only samples at a few fixed rates (R2 2.5/10 MS/s, Mini 3/6,
-    HF+ 192-912 kS/s): the lowest one at or above want (else the highest).
+    """An Airspy or SDRplay only samples at listed rates (Airspy R2 2.5/10
+    MS/s, Mini 3/6, HF+ 192-912 kS/s; SDRplay 62.5 kS/s-10 MS/s in steps): the lowest one at or above want (else the highest).
     Less to resample is less CPU."""
     try:
         rates = sorted(float(r) for r in sdr.listSampleRates(direction, 0))
@@ -79,10 +83,11 @@ def _open_sdr(driver, uri, what):
     'lime' (LimeSDR-USB or LimeSDR Mini, via the LMS7 SoapySDR module) or
     'rtlsdr' (an RTL2832U dongle, receive only, via SoapyRTLSDR), 'airspy'
     (Airspy R2 / Mini, SoapyAirspy) or 'airspyhf' (Airspy HF+, SoapyAirspyHF),
-    both receive only."""
+    both receive only, or 'sdrplay' (SDRplay RSP, SoapySDRPlay3 over
+    SDRplay's API service), receive only."""
     import SoapySDR
-    if driver in AIRSPY_DRIVERS:
-        name = AIRSPY_DRIVERS[driver]
+    if driver in FIXED_RATE_DRIVERS:
+        name = FIXED_RATE_DRIVERS[driver]
         print(f"Opening {name} {what}...", file=sys.stderr)
         return SoapySDR.Device(f"driver={driver}")
     if driver == "rtlsdr":
@@ -517,10 +522,10 @@ class PlutoRxSource:
         if driver == "rtlsdr" and not (225001 <= sample_rate_hz <= 300000 or 900001 <= sample_rate_hz <= 3200000):
             raise ValueError(f"RTL-SDR can't sample at {sample_rate_hz:g} S/s: use 225-300 kS/s or "
                              f"0.9-3.2 MS/s (e.g. --sample-rate 1024000)")
-        if driver in AIRSPY_DRIVERS:
+        if driver in FIXED_RATE_DRIVERS:
             got = _nearest_supported_rate(self.sdr, SOAPY_SDR_RX, sample_rate_hz)
             if got != sample_rate_hz:
-                print(f"[rx] {AIRSPY_DRIVERS[driver]}: {sample_rate_hz/1e3:g} kS/s not offered, "
+                print(f"[rx] {FIXED_RATE_DRIVERS[driver]}: {sample_rate_hz/1e3:g} kS/s not offered, "
                       f"using {got/1e3:g} kS/s", file=sys.stderr)
             sample_rate_hz = got  # callers read .sample_rate_hz for the real rate
         self.sdr.setSampleRate(SOAPY_SDR_RX, 0, sample_rate_hz)
@@ -560,8 +565,9 @@ class PlutoRxSource:
             self.sdr.setGainMode(SOAPY_SDR_RX, 0, True)
         elif driver == "lime":
             self.sdr.setGain(SOAPY_SDR_RX, 0, rx_gain_db)
-        elif driver == "airspyhf":
-            # the HF+ has its own AGC and attenuator; leave them in charge
+        elif driver in OWN_AGC_DRIVERS:
+            # the HF+ (AGC + attenuator) and SDRplay (IF AGC) run their own
+            # gain control; leave it in charge
             try:
                 self.sdr.setGainMode(SOAPY_SDR_RX, 0, True)
             except Exception:
@@ -580,8 +586,8 @@ class PlutoRxSource:
             # gain slider look like it's doing nothing.
             self.sdr.setGainMode(SOAPY_SDR_RX, 0, False)
             self.sdr.setGain(SOAPY_SDR_RX, 0, rx_gain_db)
-        if bandwidth_hz and driver not in ("rtlsdr",) + tuple(AIRSPY_DRIVERS):
-            # the RTL's and Airspys' filters follow the sample rate
+        if bandwidth_hz and driver not in ("rtlsdr",) + tuple(FIXED_RATE_DRIVERS):
+            # the RTL's, Airspys' and SDRplay's filters follow the sample rate
             self.sdr.setBandwidth(SOAPY_SDR_RX, 0, bandwidth_hz)
 
         import hf_ofdm_common
@@ -626,7 +632,7 @@ class PlutoRxSource:
             # set-up re-tune it from the base frequency, which silently undid
             # an offset applied earlier (the stepper showed it, unused).
             GainFileWatcher(freq_offset_file, self.set_freq_offset)
-        name = {"lime": "LimeSDR", "rtlsdr": "RTL-SDR", **AIRSPY_DRIVERS}.get(driver, "PlutoSDR")
+        name = {"lime": "LimeSDR", "rtlsdr": "RTL-SDR", **FIXED_RATE_DRIVERS}.get(driver, "PlutoSDR")
         print(f"{name} RX active: freq={freq_hz/1e6:.4f}MHz "
               f"(LO tuned to {(freq_hz + tune_offset_hz)/1e6:.4f}MHz, {tune_offset_hz/1e3:+.1f}kHz "
               f"offset) rate={sample_rate_hz/1e3:.1f}kHz "
@@ -736,7 +742,7 @@ class PlutoRxSource:
             print("WARNING: set_gain() ignored -- AGC is active (--rx-agc), there's no "
                   "manual gain to adjust.", file=sys.stderr)
             return
-        if self.driver == "airspyhf":
+        if self.driver in OWN_AGC_DRIVERS:
             return  # runs its own AGC
         if self.driver in ("lime", "rtlsdr", "airspy"):
             # no AGC to fight and no tracking loops to re-settle: just set it
