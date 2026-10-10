@@ -883,6 +883,15 @@ def detect_radios():
             if label not in found and iiod_answers(host, 0.3):
                 found.append(label)
                 PLUTO_URIS[label] = f"ip:{host}"
+        # one entry per Pluto: its numeric address is the clearest. A USB
+        # Pluto's own network link is 192.168.2.1, so with that listed the
+        # USB entry is the same radio; a name (pluto.local) is too. A USB
+        # entry stays when only another address answers (a separate radio).
+        numeric = [l for l in found if re.fullmatch(r"PlutoSDR \(IP [\d.]+\)", l)]
+        if numeric:
+            found = [l for l in found if not (
+                (l.startswith("PlutoSDR (IP ") and l not in numeric)
+                or (l == "PlutoSDR (USB)" and pluto_label("ip:192.168.2.1") in numeric))]
         for kw in SoapySDR.Device.enumerate("driver=lime"):
             kw = dict(kw)
             name = kw.get("name") or kw.get("label", "LimeSDR").split(" [")[0]

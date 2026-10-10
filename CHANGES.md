@@ -3,6 +3,9 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.11 (2026-10-10)
+- Radio list: a Pluto found at a numeric address (e.g. 192.168.2.1) is listed once, without its duplicate USB and pluto.local entries
+
 ## 1.0.10 (2026-10-10)
 - Radio list: Refresh button to search again
 - pop-up lists and keypad sit below the tabs instead of over them
