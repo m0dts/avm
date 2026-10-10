@@ -890,8 +890,14 @@ def detect_rx_radios():
     # SDRplay RSPs (SoapySDRPlay3, needs SDRplay's API service running)
     try:
         import SoapySDR
+        seen = set()
         for kw in SoapySDR.Device.enumerate("driver=sdrplay"):
             kw = dict(kw)
+            # an RSPduo is listed once per mode (single/dual tuner, master...):
+            # one entry per radio, used in single-tuner mode
+            if kw.get("mode", "ST") != "ST" or kw.get("serial") in seen:
+                continue
+            seen.add(kw.get("serial"))
             # label e.g. "SDRplay Dev0 RSP1A 2105090A1B"
             model = next((w for w in kw.get("label", "").split() if w.startswith("RSP")), "RSP")
             found.append(f"SDRplay {model} {kw.get('serial', '')[-6:]}".strip())

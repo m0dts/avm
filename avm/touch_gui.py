@@ -88,6 +88,9 @@ class _UpdateResult(QtCore.QObject):
 
 SETTINGS_AUTOSAVE_MS = 2000  # settings written to disk this soon after a change
 USB_WATCH_MS = 2000   # USB watchdog poll (sysfs only: microseconds)
+NOTICE_BTN_W = 52           # warning button width (px at 480 tall)
+CPU_HOT_PCT = 90            # above this, the title bar CPU figure turns orange-red
+CPU_HOT_COLOUR = "#ff5a1f"
 RESTART_AFTER_INSTALL_S = 10  # after an update's installer run: restart AVM by itself
 USB_RESUME_S = 4.0    # a device must be back this long before TX/RX restarts
 
@@ -173,7 +176,7 @@ class TouchWindow(QtWidgets.QWidget):
         self.notice_btn = QtWidgets.QPushButton("⚠")
         self.notice_btn.setObjectName("toggle")
         self.notice_btn.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.notice_btn.setFixedWidth(round(72 * scale))  # room for "⚠ 99"
+        self.notice_btn.setFixedWidth(round(NOTICE_BTN_W * scale))  # room for "⚠ 99"
         self.notice_btn.clicked.connect(lambda: tw.NoticesDialog(self).exec_())
         tw.notices().changed.connect(self._update_notice_btn)
         bar.addWidget(self.notice_btn)
@@ -258,7 +261,11 @@ class TouchWindow(QtWidgets.QWidget):
         if now and self._cpu_last:
             busy, total = now[0] - self._cpu_last[0], now[1] - self._cpu_last[1]
             if total > 0:
-                self.cpu.setText(f"CPU {100 * busy / total:.0f}%")
+                pct = 100 * busy / total
+                self.cpu.setText(f"CPU {pct:.0f}%")
+                # bright orange-red and bold when the CPU is nearly flat out
+                self.cpu.setStyleSheet(f"color: {CPU_HOT_COLOUR}; font-weight: bold;"
+                                       if pct > CPU_HOT_PCT else "")
         self._cpu_last = now
 
     def _build_splash(self):
@@ -320,7 +327,8 @@ class TouchWindow(QtWidgets.QWidget):
             return
         self.scale = tw.SCALE = scale
         self.app.setStyleSheet(tw.stylesheet(scale, tw.RX_ACCENT))
-        self.notice_btn.setFixedWidth(round(72 * scale))
+        self.notice_btn.setFixedWidth(round(NOTICE_BTN_W * scale))
+        self._update_notice_btn()  # its min-width follows the scale
         self.quit_btn.setFixedWidth(round(56 * scale))
         self.rx.station.setFixedHeight(round(28 * scale))
         self.tx.fit_left_labels()
@@ -504,7 +512,9 @@ class TouchWindow(QtWidgets.QWidget):
         n = tw.notices().count()
         self.notice_btn.setText(f"⚠ {n}" if n else "⚠")
         # red while there's something to read, dim otherwise
-        self.notice_btn.setStyleSheet(f"color: {tw.STOP if n else tw.TEXT_DIM};")
+        # (min-width here too: the tab buttons' style would make it 90 px)
+        self.notice_btn.setStyleSheet(f"color: {tw.STOP if n else tw.TEXT_DIM}; "
+                                      f"min-width: {round(NOTICE_BTN_W * self.scale)}px; padding: 0px;")
 
     def _usb_needs(self, page, devs):
         """[(name, attached now)] for the USB devices this page uses."""

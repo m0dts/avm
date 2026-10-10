@@ -89,6 +89,13 @@ def _open_sdr(driver, uri, what):
     if driver in FIXED_RATE_DRIVERS:
         name = FIXED_RATE_DRIVERS[driver]
         print(f"Opening {name} {what}...", file=sys.stderr)
+        if driver == "sdrplay":
+            # an RSPduo offers several modes as separate devices: single tuner
+            # (other RSPs only have that one, and ignore a mode they don't list)
+            found = [dict(k) for k in SoapySDR.Device.enumerate("driver=sdrplay")]
+            st = next((k for k in found if k.get("mode", "ST") == "ST"), None)
+            if st is not None:
+                return SoapySDR.Device(st)
         return SoapySDR.Device(f"driver={driver}")
     if driver == "rtlsdr":
         print(f"Opening RTL-SDR {what}...", file=sys.stderr)
