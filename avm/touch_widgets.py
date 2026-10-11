@@ -248,6 +248,54 @@ def dialog_geometry(widget):
     return win.geometry()
 
 
+def ask_yes_no(parent, title, text, yes="Yes", no="No"):
+    """Full-window touch question with two big buttons; True for yes."""
+    d = QtWidgets.QDialog(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+    d.setModal(True)
+    lay = QtWidgets.QVBoxLayout(d)
+    t = QtWidgets.QLabel(title)
+    t.setObjectName("big")
+    t.setWordWrap(True)
+    lay.addWidget(t)
+    body = QtWidgets.QLabel(text)
+    body.setWordWrap(True)
+    lay.addWidget(body)
+    lay.addStretch(1)
+    row = QtWidgets.QHBoxLayout()
+    for label, slot in ((no, d.reject), (yes, d.accept)):
+        b = QtWidgets.QPushButton(label)
+        b.setObjectName("run")
+        b.clicked.connect(slot)
+        row.addWidget(b)
+    lay.addLayout(row)
+    d.setGeometry(dialog_geometry(parent))
+    return d.exec_() == QtWidgets.QDialog.Accepted
+
+
+def offer_duplex_match(page, peer, page_name, peer_name):
+    """Duplex set and TX/RX settings differ: ask to make `peer` (the other
+    page) match `page` (the one whose START was pressed) -- mode, width
+    and modulation. Starting goes ahead either way. True if `peer` was
+    changed: if it's running, the caller restarts it (applies it now)."""
+    if page.s.get("duplex", "off") == "off" or page.mode.value() != "VU":
+        return False
+    mine = (page.mode.value(), page.bw.value(), page.mod.value())
+    theirs = (peer.mode.value(), peer.bw.value(), peer.mod.value())
+    if mine == theirs:
+        return False
+    show = lambda m: f"{m[0]} {m[1]} kHz {m[2].upper()}"
+    if ask_yes_no(page, f"Duplex: match {peer_name} to {page_name}?",
+                  f"{page_name} is {show(mine)}, {peer_name} is {show(theirs)}.\n\n"
+                  f"Duplex needs TX and RX the same (and the same at the other station).",
+                  yes="Yes, match", no="No, start anyway"):
+        peer.mode.set_value(mine[0])
+        peer.bw.set_value(mine[1])
+        peer.mod.set_value(mine[2])
+        peer._changed()
+        return True
+    return False
+
+
 class TouchListDialog(QtWidgets.QDialog):
     """Full-window list to pick one item by tapping it. refresh: a callable
     returning a new list (e.g. a device search) -- adds a Refresh button.
@@ -627,6 +675,12 @@ class RunButton(QtWidgets.QPushButton):
         self._what = what
         self.set_state("stopped")
 
+    def set_what(self, what):
+        """What it starts and stops ("TX", "RX", "TX+RX")."""
+        if what != self._what:
+            self._what = what
+            self.set_state(self.state)
+
     def set_state(self, state):
         self.state = state
         text, colour = {"stopped": (f"START {self._what}", GO),
@@ -634,6 +688,72 @@ class RunButton(QtWidgets.QPushButton):
                         "pending": ("RESTART TO APPLY", WARN)}[state]
         self.setText(text)
         self.setStyleSheet(f"QPushButton#run {{ background: {colour}; color: #111; }}")
+
+
+# Same-channel duplex (TDD, Config tab, very experimental): this station
+# transmits in a slot once every cycle and listens the rest of the time; the
+# master keeps its timing, the slave puts its slot half a cycle later. Tested
+# at VU 160 kHz 16QAM between two Pi 4 + Pluto stations (0 lost over 2 min).
+TDD_CYCLE_S = 1.0
+TDD_SLOT_S = 0.47   # VU 160 kHz 16QAM: 9 fragments (461 ms), ~39 ms gap each side
+TDD_PLAYER_LATENCY_S = 1.0     # audio/video arrive in bursts a cycle apart
+DUPLEX_ROLES = [("off", "Off"), ("master", "Master"), ("slave", "Slave")]
+
+
+def duplex_why_not(tx_mode, rx_mode, tx_sdr, rx_sdr):
+    """Why duplex can't run with these settings ("" if it can): it runs
+    where it was built and tested -- VU modes on both pages, one Pluto doing
+    TX and RX (the receiver drives both), Linux (a FIFO joins the modulator
+    to the receiver)."""
+    import os
+    import sys
+    # Not in releases yet: enabled only where a duplex.enable file sits next
+    # to the code (the development machines; make_release doesn't ship it)
+    if not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "duplex.enable")):
+        return "coming in a later version"
+    if not sys.platform.startswith("linux"):
+        return "Linux only"
+    if tx_mode != "VU" or rx_mode != "VU":
+        return "needs mode VU on TX and RX"
+    if tx_sdr != "pluto" or rx_sdr != "pluto":
+        return "needs a PlutoSDR for TX and RX"
+    return ""
+
+
+def refresh_duplex_buttons(tx, rx):
+    """Duplex: one button for both, on the RX page (TX+RX); TX's is hidden
+    -- TX can't run without the duplex receiver, which drives the radio.
+    Otherwise separate TX and RX buttons as usual."""
+    duplex = rx.duplex() is not None
+    rx.run.set_what("TX+RX" if duplex else "RX")
+    tx.run.setVisible(not duplex)
+    if duplex and not tx.is_running():
+        tx.status.setText("Duplex: start and stop on the RX tab (START TX+RX)")
+    elif not duplex and tx.status.text().startswith("Duplex:"):
+        tx.status.setText("")
+
+
+def duplex_active(role, tx_mode, rx_mode, tx_sdr, rx_sdr):
+    return role in ("master", "slave") and not duplex_why_not(tx_mode, rx_mode, tx_sdr, rx_sdr)
+
+
+def tdd_paths():
+    """(FIFO the modulator writes to and the receiver transmits from,
+    the slave's slot-adjust file)."""
+    import os
+    import tempfile
+    base = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
+    return (os.path.join(base, "avm_tdd_tx.fifo"), os.path.join(base, "avm_tdd_adjust"),
+            os.path.join(base, "avm_tdd_report"))
+
+
+def tdd_config(role):
+    """The TDD settings both engines need, for this station's role."""
+    fifo, adjust, report = tdd_paths()
+    return {"role": role, "station": 1 if role == "slave" else 0, "cycle": TDD_CYCLE_S,
+            "slot": TDD_SLOT_S, "fifo": fifo, "adjust": adjust if role == "slave" else None,
+            # the master reports where it hears the slave, sent in its fragments
+            "report": report if role == "master" else None}
 
 
 def gain_file_path(direction):

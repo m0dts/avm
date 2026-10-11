@@ -19,6 +19,7 @@ Usage:
     python media_tx_gui.py
 """
 import math
+import os
 import shlex
 import subprocess
 import sys
@@ -93,13 +94,23 @@ def pump_stderr(proc, tag, log_stream):
     freeze waiting for the next line exactly like a live decode loop
     would freeze the UI if run there directly (see hf_ofdm_rx.py's own
     background-thread decode loop for the same reasoning)."""
-    for raw in iter(proc.stderr.readline, b""):
-        try:
-            text = raw.decode(errors="replace").rstrip()
-        except Exception:
-            continue
-        if text:
-            log_stream.line_received.emit(f"[{tag}] {text}")
+    import traceback
+    reported = False
+    try:
+        for raw in iter(proc.stderr.readline, b""):
+            # never let one line end this loop: an undrained stderr pipe fills
+            # and blocks the process (see media_rx_gui.py's pump_stderr)
+            try:
+                text = raw.decode(errors="replace").rstrip()
+                if text:
+                    log_stream.line_received.emit(f"[{tag}] {text}")
+            except Exception:
+                if not reported:
+                    reported = True
+                    print(f"[{tag}] stderr reader: a line failed, still reading:\n"
+                          f"{traceback.format_exc()}", file=sys.stderr, flush=True)
+    except (ValueError, OSError):
+        pass  # the pipe was closed: the process has been stopped
 
 
 class MediaTxWindow(QtWidgets.QMainWindow):
@@ -489,9 +500,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
             cfg = ofdm.build_config(self.mode.currentText(), occupancy,
                                      data_modulation=self.modulation.currentText(),
                                      fec_scheme=self.fec.currentText())
-            total_bps = ofdm.estimate_effective_bitrate(cfg, self.fragment_size.value(),
-                                                          fragment_gap_ms=self.fragment_gap_ms.value(),
-                                                          out_fs=self._tx_out_fs())
+            total_bps = self._effective_bps(cfg, self.fragment_size.value())
         except Exception as e:
             self.link_capacity_label.setText(f"(couldn't compute: {e})")
             return
@@ -745,11 +754,27 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                 f"~{total_kbps:.1f}kbps effective -- {reason}, sending AUDIO ONLY at "
                 f"{audio_only_kbps:.1f}kbps")
 
+    # Same-channel duplex (see touch_widgets.tdd_config): None = continuous.
+    # Then: output to the receiver's FIFO (it transmits on its own radio),
+    # and only one slot of fragments per cycle.
+    tdd = None
+
+    def _effective_bps(self, cfg, fragment_size):
+        """Payload rate the link carries: continuous, or in duplex only the
+        whole fragments that fit this station's slot, once a cycle (as
+        hf_ofdm_tx.py's run_tdd sends them)."""
+        bps = ofdm.estimate_effective_bitrate(cfg, fragment_size, fragment_gap_ms=self.fragment_gap_ms.value(),
+                                              out_fs=self._tx_out_fs())
+        if not self.tdd or bps <= 0:
+            return bps
+        per_slot = max(1, int(self.tdd["slot"] / (fragment_size * 8 / bps)))
+        return fragment_size * 8 * per_slot / self.tdd["cycle"]
+
     def _tx_out_fs(self):
         """The rate TX sends to the radio at (its --sample-rate), or None for
         the modem's own rate. Fragment timing uses it: resampling adds a few
         samples of padding per fragment (see estimate_effective_bitrate)."""
-        if self.output_mode.currentText() != "pluto":
+        if self.output_mode.currentText() != "pluto" and not self.tdd:
             return None
         try:
             return float(self.pluto_sample_rate.currentText())
@@ -806,9 +831,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                                      data_modulation=self.modulation.currentText(),
                                      fec_scheme=self.fec.currentText())
             fragment_size_bytes = self.fragment_size.value()
-            total_bps = ofdm.estimate_effective_bitrate(cfg, fragment_size_bytes,
-                                                          fragment_gap_ms=self.fragment_gap_ms.value(),
-                                                          out_fs=self._tx_out_fs())
+            total_bps = self._effective_bps(cfg, fragment_size_bytes)
             fragment_duration_s = fragment_size_bytes * 8 / total_bps if total_bps > 0 else 0
             link_fragment_rate = 1 / fragment_duration_s if fragment_duration_s > 0 else 0
         except Exception:
@@ -859,9 +882,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                                      data_modulation=self.modulation.currentText(),
                                      fec_scheme=self.fec.currentText())
             fragment_size_bytes = self.fragment_size.value()
-            total_bps = ofdm.estimate_effective_bitrate(cfg, fragment_size_bytes,
-                                                          fragment_gap_ms=self.fragment_gap_ms.value(),
-                                                          out_fs=self._tx_out_fs())
+            total_bps = self._effective_bps(cfg, fragment_size_bytes)
         except Exception:
             self.video_bitrate_warning.setText("")
             return
@@ -1000,9 +1021,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                 cfg = ofdm.build_config(self.mode.currentText(), occupancy,
                                          data_modulation=self.modulation.currentText(),
                                          fec_scheme=self.fec.currentText())
-                total_bps = ofdm.estimate_effective_bitrate(cfg, self.fragment_size.value(),
-                                                              fragment_gap_ms=self.fragment_gap_ms.value(),
-                                                          out_fs=self._tx_out_fs())
+                total_bps = self._effective_bps(cfg, self.fragment_size.value())
                 if total_bps > 0:
                     fragment_period_s = self.fragment_size.value() * 8 / total_bps
                     framer_cmd += ["--fragment-period-s", f"{fragment_period_s:.4f}"]
@@ -1044,7 +1063,18 @@ class MediaTxWindow(QtWidgets.QMainWindow):
 
         tx_stdout = subprocess.DEVNULL
         self._tx_out_file = None
-        if self.output_mode.currentText() == "pipe" and self.output_file.text().strip():
+        tdd_fd = None
+        if self.tdd:
+            # the receiver must already have the FIFO open (it transmits from
+            # it): non-blocking open fails at once instead of hanging the GUI
+            try:
+                tdd_fd = os.open(self.tdd["fifo"], os.O_WRONLY | os.O_NONBLOCK)
+                os.set_blocking(tdd_fd, True)
+            except OSError as e:
+                self._append_log(f"[error] duplex: the receiver isn't ready for TX samples ({e})")
+                return
+            tx_stdout = tdd_fd
+        elif self.output_mode.currentText() == "pipe" and self.output_file.text().strip():
             self._tx_out_file = open(self.output_file.text().strip(), "wb")
             tx_stdout = self._tx_out_file
         elif self.output_mode.currentText() == "pipe":
@@ -1078,6 +1108,8 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         p_tx = subprocess.Popen(tx_cmd, stdin=p_framer.stdout, stdout=tx_stdout,
                                  stderr=subprocess.PIPE, **tx_priority, **avm_threads.die_with_parent())
         p_framer.stdout.close()
+        if tdd_fd is not None:
+            os.close(tdd_fd)  # the modulator has its own copy
 
         self.procs = [p_framer, p_tx]
         for proc, tag in zip(self.procs, ("framer", "tx")):
@@ -1222,13 +1254,25 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                "--fragment-gap-ms", str(self.fragment_gap_ms.value()),
                "--amplitude", str(self.amplitude.value()),
                "--stream",
-               "--output", self.output_mode.currentText()]
+               "--output", "pipe" if self.tdd else self.output_mode.currentText()]
         if self.trim_warmup_backlog.isChecked():
             # Live media: the framer makes one fragment per on-air fragment
             # time, so the 2s TX-warmup backlog would otherwise be permanent
             # delay -- see hf_ofdm_tx.py's _LiveInput. 8 (~2s) is only a
             # safety net; a tight cap dropped fragments on ordinary jitter.
             cmd += ["--max-input-backlog", "8"]
+        if self.tdd:
+            # duplex: samples at the radio's rate into the receiver's FIFO; it
+            # transmits them on its own radio (tune, gain: the RX process)
+            t = self.tdd
+            cmd += ["--sample-rate", self.pluto_sample_rate.currentText().strip(),
+                    "--tdd-cycle-s", f"{t['cycle']:g}", "--tdd-slot-s", f"{t['slot']:g}",
+                    "--tdd-station", str(t["station"])]
+            if t["adjust"]:
+                cmd += ["--tdd-adjust-file", t["adjust"]]
+            if t.get("report"):
+                cmd += ["--tdd-report-file", t["report"]]
+            return cmd
         if self.output_mode.currentText() == "pluto":
             if not self.rf_freq.text().strip():
                 raise ValueError("RF freq is required for --output pluto.")

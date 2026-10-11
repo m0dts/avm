@@ -114,11 +114,13 @@ def run_stream(cfg, args, sink, fixed_peak=None):
     # Started BEFORE warmup so input produced meanwhile is drained, not queued.
     backlog = _LiveInput(args.fragment_size, 1) if args.max_input_backlog else None
 
-    def transmit_fragment(data: bytes, tag: str = "", total_field: int = 0):
+    def transmit_fragment(data: bytes, tag: str = "", total_field: int = 0, len_field: int = 0):
         nonlocal frag_idx, clipped_count
         # total_field: FRAG_HEADER's total_frags, unused (0) in stream mode;
         # TDD puts the fragment's slot position there (see TDD_HEADER_FLAG)
-        frag_payload = FRAG_HEADER.pack(frag_idx % 65536, total_field, 0) + data
+        # len_field: FRAG_HEADER's total_len, unused (0) in stream mode; TDD's
+        # master puts its report of where it hears the slave there
+        frag_payload = FRAG_HEADER.pack(frag_idx % 65536, total_field, len_field) + data
         waveform = ofdm.build_frame(cfg, frag_payload)
 
         out_fs = cfg.fs
@@ -231,13 +233,45 @@ def run_stream(cfg, args, sink, fixed_peak=None):
 
 # TDD: each fragment's position in its slot rides in FRAG_HEADER's total_frags
 # field (always 0 in stream mode, and ignored there by receivers): flag bit,
-# then position (7 bits), then fragments per slot (8 bits). One decoded
-# fragment then fixes the receiver's slot phase exactly.
+# station bit (0 master, 1 slave), position (6 bits), fragments per slot
+# (8 bits). One decoded fragment then fixes the receiver's slot phase
+# exactly, and a station can tell its own fragments (heard through its
+# radio's TX->RX leakage) from the other station's.
 TDD_HEADER_FLAG = 0x8000
+TDD_STATION_BIT = 0x4000
 
 
-def tdd_header_field(pos, per_slot):
-    return TDD_HEADER_FLAG | (min(pos, 0x7F) << 8) | min(per_slot, 0xFF)
+def tdd_header_field(pos, per_slot, station=0):
+    return (TDD_HEADER_FLAG | (TDD_STATION_BIT if station else 0)
+            | (min(pos, 0x3F) << 8) | min(per_slot, 0xFF))
+
+
+# TDD closed loop: the master's report of where it hears the slave's slot,
+# carried in FRAG_HEADER's total_len (unused in stream mode): flag bit 31,
+# an 8-bit counter (bits 16-23, new report = new value) and the slave's
+# error in 0.1 ms units, signed 16-bit (bits 0-15; + = slave late).
+TDD_REPORT_FLAG = 0x80000000
+
+
+def _read_tdd_report(path):
+    """The master receiver's latest report as the header field, 0 if none."""
+    try:
+        with open(path) as f:
+            counter, err_01ms = (int(v) for v in f.read().split())
+    except (OSError, ValueError):
+        return 0
+    err = max(-32768, min(32767, err_01ms)) & 0xFFFF
+    return TDD_REPORT_FLAG | ((counter & 0xFF) << 16) | err
+
+
+def _read_tdd_adjust(path):
+    """The total slot shift (seconds) the receiver has asked for so far, or
+    None if the file isn't there (yet) or is mid-write."""
+    try:
+        with open(path) as f:
+            return float(f.read().strip())
+    except (OSError, ValueError):
+        return None
 
 
 def run_tdd(cfg, args, sink, transmit_fragment, backlog):
@@ -249,7 +283,10 @@ def run_tdd(cfg, args, sink, transmit_fragment, backlog):
     itself: a Pluto's TX and RX share one clock, measured to hold to the
     sample (see the loopback test), so no timestamps are needed.
     --tdd-offset-s delays the first slot (the second station's slot sits
-    after the first's)."""
+    after the first's). --tdd-adjust-file (the slave): the receiver writes
+    the total shift (seconds) that keeps this slot in the gap between the
+    master's; each cycle applies whatever of it isn't applied yet, as a
+    longer or shorter silence."""
     out_fs = args.sample_rate if args.sample_rate else cfg.fs
     cycle = int(round(args.tdd_cycle_s * out_fs))
     slot = int(round(args.tdd_slot_s * out_fs))
@@ -273,7 +310,8 @@ def run_tdd(cfg, args, sink, transmit_fragment, backlog):
         off = int(round(args.tdd_offset_s * out_fs)) % cycle
         if off:
             sink.write(np.zeros(off, np.complex64))
-    zeros = np.zeros(cycle, np.complex64)
+    zeros = np.zeros(2 * cycle, np.complex64)
+    applied = 0                      # samples of --tdd-adjust-file shift applied so far
     n_cycles = n_real = n_filler = 0
     # --tx-warmup-s, slotted: filler only (see run_stream), then real input
     warmup_cycles = int(np.ceil(args.tx_warmup_s / args.tdd_cycle_s)) if args.tx_warmup_s > 0 else 0
@@ -284,6 +322,7 @@ def run_tdd(cfg, args, sink, transmit_fragment, backlog):
         if n_cycles == warmup_cycles and backlog is not None:
             backlog.end_warmup(args.max_input_backlog)  # input queued meanwhile is stale
         written = 0
+        report = _read_tdd_report(args.tdd_report_file) if args.tdd_report_file else 0
         for pos in range(per_slot):
             data = backlog.take_nowait() if backlog is not None and n_cycles >= warmup_cycles else None
             if data is None:
@@ -295,11 +334,26 @@ def run_tdd(cfg, args, sink, transmit_fragment, backlog):
             else:
                 tag = ""
                 n_real += 1
-            written += transmit_fragment(data, tag=tag, total_field=tdd_header_field(pos, per_slot))
-        if written > cycle:
-            print(f"[tdd] WARNING: slot overran the cycle by {written - cycle} samples", file=sys.stderr)
+            written += transmit_fragment(data, tag=tag,
+                                         total_field=tdd_header_field(pos, per_slot, args.tdd_station),
+                                         len_field=report)
+        silence = cycle - written
+        if args.tdd_adjust_file:
+            want = _read_tdd_adjust(args.tdd_adjust_file)
+            if want is not None:
+                delta = int(round(want * out_fs)) - applied
+                # a longer silence delays the next slot, a shorter one brings
+                # it forward (never below zero, never more than a cycle at once)
+                delta = max(-silence, min(cycle, delta))
+                if delta:
+                    silence += delta
+                    applied += delta
+                    print(f"[tdd] slot moved {delta / out_fs * 1e3:+.2f} ms "
+                          f"(total {applied / out_fs * 1e3:+.2f} ms)", file=sys.stderr)
+        if silence < 0:
+            print(f"[tdd] WARNING: slot overran the cycle by {-silence} samples", file=sys.stderr)
         else:
-            sink.write(zeros[:cycle - written])
+            sink.write(zeros[:silence])
         n_cycles += 1
         if n_cycles % max(1, int(10 / args.tdd_cycle_s)) == 0:
             print(f"[tdd] {n_cycles} cycles: {n_real} real, {n_filler} filler fragment(s)", file=sys.stderr)
@@ -471,6 +525,15 @@ def main():
                           "fragments as fit). Default: half the cycle.")
     ap.add_argument("--tdd-offset-s", type=float, default=0.0, metavar="S",
                      help="TDD: delay the first slot by S seconds (the second station's slot).")
+    ap.add_argument("--tdd-station", type=int, choices=[0, 1], default=0,
+                     help="TDD: this station's number, marked on its fragments: 0 = master (keeps "
+                          "its own timing), 1 = slave (times its slot from the master's).")
+    ap.add_argument("--tdd-report-file", default=None, metavar="PATH",
+                     help="TDD master: the receiver's report of where it hears the slave (this file); "
+                          "sent in every fragment's header, so the slave can steer by it.")
+    ap.add_argument("--tdd-adjust-file", default=None, metavar="PATH",
+                     help="TDD slave: the receiver writes the slot shift (seconds, cumulative) here; "
+                          "it is applied a cycle at a time as a longer/shorter silence.")
     ap.add_argument("--tx-warmup-s", type=float, default=2.0, metavar="S",
                      help="With --stream: seconds of real, full-power on-air filler fragments "
                           "(inert -- see run_stream's own comment) transmitted BEFORE any real "

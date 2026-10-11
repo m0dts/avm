@@ -6,6 +6,8 @@ and display are exactly those of the full GUI. Input is always the PlutoSDR.
 """
 import collections
 import math
+import os
+import stat
 
 import numpy as np
 import re
@@ -36,6 +38,8 @@ MER_AVERAGE = 8
 MER_STALE_S = 2.0
 # good/bad fragment counts on the status line cover the last this-many seconds
 STATUS_WINDOW_S = 5
+LAMP_MAX_LOST = 200  # lost fragments counted for the lamps per reported gap
+DUPLEX_RESTART_DELAY_MS = 2000  # duplex RX died: TX+RX restart after this
 # Header / Frame lock lamps under the video: over the last LOCK_WINDOW_S
 # (longer if fragments come further apart), all / some / none decoded
 LOCK_WINDOW_S = 2.0
@@ -70,6 +74,8 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
     sdr = "pluto"
     rtl_ppm = 0.0
     lime_port = "Auto"
+    tdd = None          # duplex (touch_widgets.tdd_config): this receiver also transmits
+    tdd_tx_gain = -10.0
 
     def _build_rx_cmd(self):
         cmd = super()._build_rx_cmd()
@@ -87,6 +93,17 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
             cmd += ["--sdr-ppm", f"{self.rtl_ppm:g}"]
         if self.sdr == "lime" and self.lime_port != "Auto":
             cmd += ["--sdr-antenna", self.lime_port]
+        if self.tdd:
+            # same-channel duplex: listen between our own slots, and transmit
+            # (on this radio) what the TX page's modulator writes to the FIFO
+            t = self.tdd
+            cmd += ["--tdd-cycle-s", f"{t['cycle']:g}", "--tdd-slot-s", f"{t['slot']:g}",
+                    "--tdd-station", str(t["station"]), "--tdd-tx-fifo", t["fifo"],
+                    "--tdd-tx-gain", f"{self.tdd_tx_gain:g}"]
+            if t["adjust"]:
+                cmd += ["--tdd-adjust-file", t["adjust"]]
+            if t["report"]:
+                cmd += ["--tdd-report-file", t["report"]]
         return cmd
 
     def _flush_log_buffer(self):
@@ -308,10 +325,26 @@ class RxPage(QtWidgets.QWidget):
             pass
         e.modulation.setCurrentText(self.mod.value())
         e.rx_gain.setValue(self.gain.value())
+        e.tdd = self.duplex()
+        if e.tdd and tw.USB_IDS["pluto"] & (tw.usb_devices() or set()):
+            # duplex drives RX and TX through one connection: over the Pluto's
+            # network link (ip:) that is one socket, one request at a time,
+            # and a waiting RX read held up TX writes -- the transmitter ran
+            # ~20% short and its bursts went out late and broken. The USB
+            # data connection has separate channels for each direction.
+            e.pluto_uri.setText("usb:")
+        if e.tdd:
+            # bursts arrive a cycle apart: the player must ride over the gaps
+            e.audio_latency.setValue(max(e.audio_latency.value(), tw.TDD_PLAYER_LATENCY_S))
+            peer = getattr(self, "peer", None)
+            if peer is not None:
+                e.tdd_tx_gain = peer.gain.value()
         idx = e.audio_device.findText(self.audio_out.value())
         if idx >= 0:
             e.audio_device.setCurrentIndex(idx)
         self._save()
+        if getattr(self, "peer", None) is not None:
+            tw.refresh_duplex_buttons(self.peer, self)
 
     def _save(self):
         self.s.update(rx_freq=self.freq.hz(),
@@ -482,15 +515,58 @@ class RxPage(QtWidgets.QWidget):
                 self.run.set_state("pending")
 
     # ------------------------------------------------------------------
+    running_tdd = None   # duplex settings the running receiver was started with
+
+    def duplex(self):
+        """This station's duplex settings (touch_widgets.tdd_config), or None."""
+        peer = getattr(self, "peer", None)
+        role = self.s.get("duplex", "off")
+        if peer is None or not tw.duplex_active(role, peer.mode.value(), self.mode.value(),
+                                                peer.engine.sdr, self.engine.sdr):
+            return None
+        return tw.tdd_config(role)
+
     def is_running(self):
         return bool(self.engine.procs)
 
     def _run_clicked(self):
+        tx = self.peer
+        if self.duplex():
+            # duplex: this button is TX+RX (TX's own is hidden). (Asked
+            # fresh, not the engine's copy: at start-up the engine's was set
+            # before the pages were linked -- "no duplex" -- so the first
+            # press started RX only, and TX never.)
+            if self.run.state == "stopped":
+                tw.offer_duplex_match(self, tx, "RX", "TX")
+                if tx.is_running():
+                    tx.stop()
+                self.start()
+                if self.is_running():
+                    tx.start()     # waits for this receiver, which transmits for it
+            elif self.run.state == "pending":
+                self.stop()        # (stops TX too)
+                self.start()
+                if self.is_running():
+                    tx.start()
+            else:
+                self.stop()        # (stops TX too)
+            return
         if self.run.state == "stopped":
+            restart_tx = tw.offer_duplex_match(self, tx, "RX", "TX") and tx.is_running()
+            if restart_tx:
+                tx.stop()      # apply the match now: TX restarts with RX's settings ...
             self.start()
+            if restart_tx and self.is_running():
+                tx.start()     # ... once this receiver (its radio, in duplex) is up
         elif self.run.state == "pending":
+            # restart to apply: in duplex stopping RX also stops TX (this
+            # receiver is its radio) -- bring TX back too if it was on
+            tx = self.peer
+            tx_was_on = bool(self.engine.tdd) and tx.is_running()
             self.stop()
             self.start()
+            if tx_was_on and self.is_running():
+                tx.start()
         else:
             self.stop()
 
@@ -520,14 +596,37 @@ class RxPage(QtWidgets.QWidget):
         tw.write_gain_file("rx", self.gain.value())  # so a stale value can't apply at start
         tw.write_freq_offset_file(self.offset.value() * 1000)
         tw.write_spectrum_averages_file(self.engine.spectrum_averages.value())
+        if self.engine.tdd:
+            # the FIFO the TX page's modulator writes into; a slave starts
+            # from no slot shift
+            fifo, adjust, report = self.engine.tdd["fifo"], self.engine.tdd["adjust"], self.engine.tdd["report"]
+            try:
+                if os.path.exists(fifo) and not stat.S_ISFIFO(os.stat(fifo).st_mode):
+                    os.remove(fifo)
+                if not os.path.exists(fifo):
+                    os.mkfifo(fifo)
+                for stale in (adjust, report):   # (never a previous run's)
+                    if stale and os.path.exists(stale):
+                        os.remove(stale)
+            except OSError as e:
+                self.status.setText(f"Not started: duplex FIFO: {e}")
+                return
         self.engine.start()
+        # how the running receiver was started: the engine's settings follow
+        # the page (e.g. Duplex switched off) before it is restarted
+        self.running_tdd = self.engine.tdd if self.is_running() else None
         if self.is_running():
             self.run.set_state("running")
             self.status.setText("Searching...")
             self.running_changed.emit(True)
 
     def stop(self):
+        # duplex: this receiver is also the transmitter's radio
+        peer = getattr(self, "peer", None)
+        if self.running_tdd and peer is not None and peer.is_running():
+            peer.stop()
         self.engine.stop()
+        self.running_tdd = None
         self._set_lamps(None)
         self.run.set_state("stopped")
         self.status.setText(f"Stopped  ·  {self._ok} OK, {self._lost} lost, {self._bad} bad"
@@ -558,10 +657,19 @@ class RxPage(QtWidgets.QWidget):
         elif "CRC MISMATCH" in line:
             self._bad += 1
             self._events.append((now, True, False))  # header decoded, payload didn't
+        elif "FAILED (garbage header" in line:
+            self._events.append((now, False, False))  # header itself failed
         m = re.search(r"\((\d+) fragment\(s\) lost", line)
         if m:
             self._lost += int(m.group(1))
-            self._events.extend([(now, False, False)] * int(m.group(1)))
+            # the lamps only judge the last few seconds: a few hundred is
+            # "all red" already (63604 at once froze the GUI for good).
+            # Frame lamp only (header None: not judged): a gap shows only
+            # once good fragments arrive, and may be decoder backlog skipped
+            # -- counted against the header it turned that lamp orange as
+            # the signal got BETTER, while at MER 3 (no gaps seen) it stayed
+            # green. Header failures are counted as they happen, above.
+            self._events.extend([(now, None, False)] * min(int(m.group(1)), LAMP_MAX_LOST))
 
     def _tick(self):
         e = self.engine
@@ -569,7 +677,21 @@ class RxPage(QtWidgets.QWidget):
         self.station.setText(_station_text(sid))
         if self.is_running():
             if e.procs[0].poll() is not None:
+                duplex = bool(self.running_tdd)
+                tx_was_on = duplex and self.peer.is_running()
                 self.stop()
+                if duplex:
+                    # (e.g. its stream stalled and it exited): duplex restarts
+                    # itself -- a station must not stay off, or worse, half on
+                    tw.notices().add("RX", "Duplex RX stopped unexpectedly -- restarting TX+RX")
+                    self.status.setText("RX stopped unexpectedly -- restarting...")
+                    def restart():
+                        if self.run.state == "stopped":
+                            self.start()
+                            if tx_was_on and self.is_running():
+                                self.peer.start()
+                    QtCore.QTimer.singleShot(DUPLEX_RESTART_DELAY_MS, restart)
+                    return
                 self.status.setText("RX stopped unexpectedly")
                 tw.notices().add("RX", "RX stopped unexpectedly")
                 return
@@ -604,7 +726,8 @@ class RxPage(QtWidgets.QWidget):
         cutoff = time.monotonic() - max(STATUS_WINDOW_S, self._lock_window())
         while self._events and self._events[0][0] < cutoff:
             self._events.popleft()
-        recent = [e for e in self._events if e[0] >= time.monotonic() - self._lock_window()]
+        since = time.monotonic() - self._lock_window()   # once, not per event
+        recent = [e for e in self._events if e[0] >= since]
         self._set_lamps(recent)
 
     def _set_lamps(self, events):
@@ -613,8 +736,10 @@ class RxPage(QtWidgets.QWidget):
             if events is None:
                 colour = LAMP_OFF
             else:
-                good = sum(1 for e in events if e[i])
-                colour = (LAMP_NONE if not good else LAMP_ALL if good == len(events) else LAMP_SOME)
+                judged = [e[i] for e in events if e[i] is not None]
+                good = sum(judged)
+                colour = (LAMP_OFF if not judged else LAMP_NONE if not good
+                          else LAMP_ALL if good == len(judged) else LAMP_SOME)
             r = self._lamps[name].width() // 4
             self._lamps[name].setStyleSheet(f"background: {colour}; border-radius: {r}px;")
 

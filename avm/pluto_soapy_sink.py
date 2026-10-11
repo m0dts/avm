@@ -411,7 +411,10 @@ class PlutoTxSink:
         # idle more often, which is exactly when this bites. Filling
         # those gaps with explicit zero-valued chunks keeps the hardware
         # continuously fed no matter how sparse the real content is.
-        SILENCE_CHUNK_S = 0.02
+        # Short: the next fragment usually arrives a moment later (the
+        # framer paces at exactly the airtime), and a 20 ms chunk turned a
+        # 1 ms late fragment into a 20 ms hole between fragments
+        SILENCE_CHUNK_S = 0.002
         silence_chunk = np.zeros(max(1, int(self.sample_rate_hz * SILENCE_CHUNK_S)), dtype=np.complex64)
         # Tracks what fraction of recent airtime was silence-filled rather
         # than real content, purely for visibility -- this path used to be
@@ -494,6 +497,290 @@ class PlutoTxSink:
         self.sdr.closeStream(self.stream)
 
 
+# TX sample -> on air, in RX samples, same radio and process. Loopback (one
+# radio hearing itself) measured 6.2-7.8 ms; two stations showed the slave
+# 23 ms later than intended as heard by the master -- 11.35 ms short at each
+# end (same radios both ends) -- so 7 + 11.35 ms.
+TDD_TXRX_LATENCY_S = 0.0184
+TDD_BURST_GAP_S = 0.010       # silence before a burst start, in the TX stream
+TDD_GAP_REPORT_S = 0.02       # log every TX gap (modulator late) at least this long
+TDD_RX_STALL_MUTE_S = 1.0     # RX count stopped this long: TX goes silent
+RX_STALL_EXIT_S = 5.0         # ... and this long: the receiver exits (the GUI restarts it)
+
+
+class TddTxFeeder:
+    """Time-division duplex in ONE process: transmits on the receiver's own
+    radio, from a FIFO of raw complex64 samples (hf_ofdm_tx.py --output
+    pipe --tdd-cycle-s ... > FIFO). Because TX and RX now share a process
+    and a clock, TX sample n is heard at RX sample n + a constant (the
+    radio's buffering, ~7 ms, constant to the sample once running), so a
+    station knows where its OWN slot is without hearing itself -- over a
+    cable, or with a T/R switch, it can't. Records each burst's start as
+    the RX sample it lines up with (own_starts).
+
+    The radio is never starved: if the modulator is late, zeros go out and
+    are counted, so the timeline stays exact."""
+
+    CHUNK = 4096
+
+    def __init__(self, sdr, freq_hz, sample_rate_hz, fifo, tx_gain_db=-10.0, latency_s=TDD_TXRX_LATENCY_S,
+                 start_muted=False, rx_count=None, uri=None):
+        import collections
+        import SoapySDR
+        from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
+        # The RX's own connection. (A second one was tried twice: opened late
+        # it put the slot timing out by an unknown offset; opened before RX
+        # started, the transmitter was starved continuously -- "TX ran dry"
+        # growing ~250 ms every second -- and bursts went out broken.)
+        self.sdr = sdr
+        self.fs = sample_rate_hz
+        self.fifo = fifo
+        self.latency = int(round(latency_s * sample_rate_hz))
+        self.gap = int(round(TDD_BURST_GAP_S * sample_rate_hz))
+        self.n_tx = 0                  # schedule position (samples handed to the radio + dropped)
+        self.n_written = 0             # samples actually handed to the radio
+        self.n_dropped = 0             # silence dropped to repay hardware underruns (see _track_lead)
+        self.n_padded = 0              # ... of which zeros because the modulator was late
+        self.own_starts = collections.deque(maxlen=64)   # RX sample index of each own burst
+        self.rx_count = rx_count       # () -> samples read by RX so far (for _track_lead)
+        self.slip = 0                  # samples on air later than counted (TX underruns)
+        self._lead0 = None
+        self._win_start = self._win_min = None
+        self._win_mins = collections.deque(maxlen=64)
+        # Silence on air (the modulator's bursts still counted, so the slot
+        # timing stays known): a slave until it has heard the master and put
+        # its slot in the gap -- transmitting before then lands on the master
+        self.muted = start_muted
+        self.mute_request = start_muted   # applied only between bursts (request_mute)
+        self._rx_stalled = False
+        self._rc_last, self._rc_t = None, time.monotonic()
+        self._in_burst = False            # the last chunk ended inside a burst
+        self.n_bursts = 0              # own bursts so far
+        self._last_nz = -10 ** 12
+        sdr.setSampleRate(SOAPY_SDR_TX, 0, sample_rate_hz)
+        sdr.setFrequency(SOAPY_SDR_TX, 0, freq_hz)
+        sdr.setGain(SOAPY_SDR_TX, 0, _tx_gain_for_driver(sdr, SOAPY_SDR_TX, tx_gain_db))
+        # The radio's default TX buffering: latency_s (TX sample -> on air,
+        # as heard by RX) was measured with it. A deep buffer (tried: 2^17
+        # samples, against TX gaps) added hundreds of ms the slot timing
+        # didn't know about, and the slave parked its slot over the
+        # master's. The gaps came from the receiver searching all the time;
+        # it no longer does (see hf_ofdm_rx.py _tdd_skip_gap).
+        self.stream = sdr.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CF32, [0])
+        self._desc = (f"freq={freq_hz/1e6:.4f}MHz rate={sample_rate_hz/1e3:.1f}kHz "
+                      f"gain={tx_gain_db}dB, from {fifo}")
+
+    def start(self):
+        """Start transmitting: called right after the RX stream is activated,
+        with everything above set up BEFORE it -- the conditions latency_s
+        was measured in (loopback test: both streams configured, then
+        started back to back). Setting the TX rate/frequency while RX was
+        already streaming could disturb RX's sample count, and the slave
+        then misplaced its own slot (it overlapped the master's)."""
+        self.sdr.activateStream(self.stream)
+        print(f"PlutoSDR TDD TX active on the RX radio: {self._desc}", file=sys.stderr)
+        threading.Thread(target=self._run, daemon=True, name="tdd-tx-write").start()
+
+    LEAD_WINDOW_S = 1.0      # lead (TX written - RX read) minimum per window
+    LEAD_SETTLE = 3          # windows before the baseline is taken
+    LEAD_MEDIAN_OF = 5       # current lead: median of the last few window minimums
+    SLIP_REPORT_S = 0.002
+    SLOT_IDLE_S = 0.10       # silence this long = between slots (not between a slot's fragments)
+    LEAD_STEADY_S = 0.003    # baseline only when the recent window minimums agree this closely
+
+    def _track_lead(self):
+        """Hardware TX underruns, measured. The radio clocks RX and TX alike,
+        so how far TX is written ahead of RX read -- the lead -- is constant
+        while the transmitter is fed; if it ever runs dry, everything after
+        goes on air later by the time lost, and the lead drops by exactly
+        that, for good. Nothing reports such an underrun: unmeasured, a
+        station's idea of where its own slot is drifted, and the slave crept
+        towards the master's next slot. (Per-window minimum: the RX count
+        moves in whole buffers, so the lead jitters upward between them.)"""
+        if self.rx_count is None:
+            return
+        lead = self.n_written - self.rx_count()
+        now = time.monotonic()
+        if self._win_start is None:
+            self._win_start, self._win_min = now, lead
+            return
+        self._win_min = min(self._win_min, lead)
+        if now - self._win_start < self.LEAD_WINDOW_S:
+            return
+        self._win_mins.append(self._win_min)
+        self._win_start, self._win_min = now, lead
+        if len(self._win_mins) < self.LEAD_SETTLE + self.LEAD_MEDIAN_OF:
+            return
+        recent = list(self._win_mins)[-self.LEAD_MEDIAN_OF:]
+        current = float(np.median(recent))
+        if self._lead0 is None:
+            # only once steady: a receiver still catching up after start-up
+            # makes the lead look high, and a baseline taken then read as
+            # hundreds of ms of underrun later
+            if max(recent) - min(recent) > self.LEAD_STEADY_S * self.fs:
+                return
+            self._lead0 = current
+            print(f"[tdd] TX lead over RX: {current / self.fs * 1e3:.1f} ms (baseline)", file=sys.stderr)
+            return
+        # dropped silence lowers the lead too (written, not scheduled): that
+        # part is repaid already
+        slip = max(0, int(round(self._lead0 - current)))
+        if abs(slip - self.slip) >= self.SLIP_REPORT_S * self.fs:
+            # Report only: this rises AND falls (the receiver reading in
+            # bursts), so it is no measure to move the slot by -- skipping
+            # silence on it moved the master's slot and threw the slave about
+            print(f"[tdd] TX lead {slip / self.fs * 1e3:.1f} ms below its baseline "
+                  f"(possible TX underrun; slot timing NOT changed)", file=sys.stderr)
+        self.slip = slip
+
+    def _note_bursts(self, chunk):
+        nz = np.flatnonzero(chunk)
+        if not len(nz):
+            return
+        g = nz + self.n_tx
+        d = np.diff(np.concatenate(([self._last_nz], g)))
+        for start in g[d > self.gap]:
+            # (not + self.slip: see _track_lead -- the measurement isn't
+            # trustworthy enough to steer by)
+            self.own_starts.append(int(start) + self.latency)
+            self.n_bursts += 1
+        self._last_nz = int(g[-1])
+
+    MAX_AHEAD_S = 0.5   # samples buffered from the modulator, at most
+
+    def _reader(self):
+        """Drains the FIFO into self._q (bounded: the modulator blocks on a
+        full FIFO). The FIFO alone holds ~15 ms, less than the modulator
+        takes to build one fragment (10-30 ms on a Pi): fed straight from
+        it, the radio ran dry mid-burst, and the zeros sent instead broke
+        fragments and made silences inside bursts (false burst starts)."""
+        max_ahead = int(self.MAX_AHEAD_S * self.fs) * 8
+        while True:
+            # (re)opened for each writer: TX can stop and start again while
+            # RX keeps running -- and the TX page's readiness check opens and
+            # closes the FIFO once before the modulator does
+            pending = b""
+            with open(self.fifo, "rb", buffering=0) as f:
+                self._writer = True
+                self._writer_data = False   # nothing from this writer yet (starting up)
+                while True:
+                    while self._q_bytes >= max_ahead:
+                        time.sleep(0.005)
+                    data = f.read(1 << 16)
+                    if not data:
+                        self._writer = False
+                        break  # this writer has gone: wait for the next
+                    pending += data
+                    usable = len(pending) // 8 * 8
+                    if usable:
+                        arr = np.frombuffer(pending[:usable], np.complex64).copy()
+                        pending = pending[usable:]
+                        with self._q_lock:
+                            self._q.append(arr)
+                            self._q_bytes += arr.nbytes
+
+    def _take(self, n):
+        """Up to n samples from the buffer (fewer only if it runs dry)."""
+        out = []
+        got = 0
+        with self._q_lock:
+            while self._q and got < n:
+                arr = self._q[0]
+                need = n - got
+                if len(arr) <= need:
+                    out.append(self._q.popleft())
+                    got += len(arr)
+                else:
+                    out.append(arr[:need])
+                    self._q[0] = arr[need:]
+                    got += need
+            self._q_bytes -= got * 8
+        return np.concatenate(out) if out else None
+
+    def _run(self):
+        import collections
+        self._q = collections.deque()
+        self._q_bytes = 0
+        self._q_lock = threading.Lock()
+        self._writer = False     # a modulator is connected to the FIFO
+        self._writer_data = False
+        threading.Thread(target=self._reader, daemon=True, name="tdd-tx-fifo").start()
+        zeros = np.zeros(self.CHUNK, np.complex64)
+        gap_run = 0              # samples of the current unplanned silence
+        started = False
+        while True:
+            chunk = self._take(self.CHUNK)
+            padded = 0
+            if chunk is not None:
+                started = True
+                self._writer_data = True
+                if len(chunk) < self.CHUNK:        # ran dry: pad the rest (counted)
+                    padded = self.CHUNK - len(chunk)
+                    chunk = np.concatenate([chunk, zeros[:padded]])
+            else:
+                chunk = zeros
+                # (no modulator connected, or it is still starting: expected)
+                if started and self._writer and self._writer_data:
+                    padded = self.CHUNK
+            if padded:
+                self.n_padded += padded
+                gap_run += padded
+            elif gap_run:
+                if gap_run >= TDD_GAP_REPORT_S * self.fs:
+                    print(f"[tdd] TX gap: {gap_run / self.fs * 1e3:.0f} ms of unplanned silence "
+                          f"(modulator samples late; {self.n_padded / self.fs:.1f} s in all)", file=sys.stderr)
+                gap_run = 0
+            if padded:
+                # padding is not the gap between bursts: a burst start must
+                # follow real silence from the modulator, or a late chunk
+                # mid-slot reads as a new burst (seen for real: the slave
+                # then steered its slot back and forth by 80-280 ms)
+                if padded < self.CHUNK:
+                    self._note_bursts(chunk[:self.CHUNK - padded])
+                self._last_nz = self.n_tx + self.CHUNK - 1
+            else:
+                self._note_bursts(chunk)
+            # RX stalled (its count stopped): our slot timing is unknown --
+            # never transmit blind over the other station
+            if self.rx_count is not None:
+                rc = self.rx_count()
+                now_t = time.monotonic()
+                if rc != self._rc_last:
+                    self._rc_last, self._rc_t = rc, now_t
+                    if self._rx_stalled:
+                        self._rx_stalled = False
+                        print("[tdd] RX samples flowing again", file=sys.stderr)
+                elif now_t - self._rc_t > TDD_RX_STALL_MUTE_S and not self._rx_stalled:
+                    self._rx_stalled = True
+                    print(f"[tdd] RX stalled ({TDD_RX_STALL_MUTE_S:g} s without samples): TX silent",
+                          file=sys.stderr)
+            # a mute/unmute only takes effect between bursts: a burst already
+            # under way finishes as it began, on air or silent -- never a
+            # partial burst (a fragment cut off part-way)
+            # "between slots": silence longer than any gap between one slot's
+            # fragments (~40 ms) -- a gap inside a slot isn't, and muting or
+            # skipping time there broke the slot in two
+            idle = (not padded and not chunk.any()
+                    and self.n_tx - self._last_nz > self.SLOT_IDLE_S * self.fs)
+            if self.mute_request != self.muted and idle:
+                self.muted = self.mute_request
+            self._in_burst = bool(chunk[-1] != 0) if not padded else self._in_burst
+            if self.muted or self._rx_stalled:
+                chunk = zeros
+            n_sched = len(chunk)
+            sent = 0
+            while sent < len(chunk):
+                sr = self.sdr.writeStream(self.stream, [chunk[sent:]], len(chunk) - sent, timeoutUs=1_000_000)
+                if sr.ret > 0:
+                    sent += sr.ret
+                elif sr.ret != -1:      # not a plain timeout
+                    print(f"[tdd] TX write error {sr.ret}", file=sys.stderr)
+                    break
+            self.n_tx += n_sched
+            self.n_written += len(chunk)
+            self._track_lead()
+
+
 class PlutoRxSource:
     """Duck-types hf_ofdm_rx.py's StdinReader public interface (chunks,
     total_len, _lock, eof, wait_for_more) so it drops straight into the
@@ -512,7 +799,8 @@ class PlutoRxSource:
     def __init__(self, freq_hz, sample_rate_hz, rx_gain_db=30.0, agc=False,
                  uri=None, bandwidth_hz=None, buffer_size=1 << 15, stream_bufflen=None,
                  lo_offset_hz=0.0, warmup_discard_s=0.75, tune_offset_hz=None,
-                 driver="pluto", antenna=None, gain_file=None, ppm=0.0, freq_offset_file=None):
+                 driver="pluto", antenna=None, gain_file=None, ppm=0.0, freq_offset_file=None,
+                 tdd_tx=None):
         """lo_offset_hz: shift received samples back by this much (see _run).
         ppm: RTL-SDR crystal correction (ignored by the other radios).
         tune_offset_hz: tune the actual LO this far from freq_hz (default:
@@ -634,7 +922,20 @@ class PlutoRxSource:
         self.stream = self.sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0], stream_args)
         if gain_file:
             GainFileWatcher(gain_file, self.set_gain)
+        self.radio_count = 0       # samples read from the radio
+        self.discarded_total = 0   # ... of which dropped (warmup / after a gain change)
+        # TDD (tdd_tx): this process also transmits, on the same radio, so
+        # its own slot timing is known from the sample counts -- see
+        # TddTxFeeder. Set up before RX starts, then both started together.
+        self.tdd_tx = TddTxFeeder(self.sdr, freq_hz, sample_rate_hz, rx_count=lambda: self.radio_count,
+                                  **tdd_tx) if tdd_tx else None
         self.sdr.activateStream(self.stream)
+        if self.tdd_tx:
+            self.tdd_tx.start()
+            # A stalled stream (readStream waiting forever, no error, no
+            # timeout -- seen in duplex) hangs this process for good: exit
+            # instead, so the GUI shows it and restarts it.
+            threading.Thread(target=self._stall_watchdog, daemon=True, name="rx-stall-watch").start()
         if freq_offset_file:
             # Live receive offset from the GUI (Hz): re-tunes the radio. Only
             # now, after set-up: the RTL's ppm correction and the Lime's port
@@ -657,6 +958,7 @@ class PlutoRxSource:
         while True:
             sr = self.sdr.readStream(self.stream, [buf], len(buf), timeoutUs=1_000_000)
             if sr.ret > 0:
+                self.radio_count += sr.ret
                 if consecutive_timeouts >= 5:
                     print(f"PlutoSDR RX: samples resumed after "
                           f"{consecutive_timeouts} second(s) of nothing.", file=sys.stderr)
@@ -682,6 +984,7 @@ class PlutoRxSource:
                     drop = min(self._warmup_samples, len(samples))
                     samples = samples[drop:]
                     self._warmup_samples -= drop
+                    self.discarded_total += drop
                     if len(samples) == 0:
                         continue
                 chunk = samples.tobytes()
@@ -741,6 +1044,18 @@ class PlutoRxSource:
         self._freq_offset_hz = hz
         self.sdr.setFrequency(SOAPY_SDR_RX, 0, self._tune_hz + hz)
         print(f"RX frequency offset {hz / 1e3:+.0f} kHz", file=sys.stderr)
+
+    def _stall_watchdog(self):
+        import os
+        last, t_last = self.radio_count, time.monotonic()
+        while True:
+            time.sleep(0.5)
+            if self.radio_count != last:
+                last, t_last = self.radio_count, time.monotonic()
+            elif time.monotonic() - t_last > RX_STALL_EXIT_S:
+                print(f"PlutoSDR RX stream stalled ({RX_STALL_EXIT_S:g} s without samples) -- exiting "
+                      f"so it can be restarted", file=sys.stderr, flush=True)
+                os._exit(3)
 
     def set_gain(self, db):
         """Adjusts real RX gain live, e.g. from a GUI slider -- safe to

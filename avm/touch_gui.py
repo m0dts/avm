@@ -58,14 +58,8 @@ SPLASH_HOLD_MS = 1000   # start screen stays this long after the codec is ready
 
 # Compiles (first run) or loads (cached) the wavelet codec's encoder and
 # decoder: the kernels are shape-generic, so one small size covers them all.
-_WARMUP_CODE = "; ".join([
-    "import numpy as np",
-    "from wavelet_codec import WaveletCodec",
-    "w, h = 192, 112",
-    "z = lambda a, b: np.zeros((b, a), np.uint8)",
-    "enc, dec = WaveletCodec(w, h, 200), WaveletCodec(w, h, 200)",
-    "dec.decode(enc.encode(z(w, h), z(w // 2, h // 2), z(w // 2, h // 2)))",
-])
+# the warm-up (video codec + modem): see avm_warmup.py
+WARMUP_SCRIPT = "avm_warmup.py"
 
 
 def _start_codec_warmup():
@@ -73,7 +67,7 @@ def _start_codec_warmup():
     import subprocess
     here = os.path.dirname(os.path.abspath(__file__))
     try:
-        return subprocess.Popen([sys.executable, "-c", _WARMUP_CODE], cwd=here,
+        return subprocess.Popen([sys.executable, os.path.join(here, WARMUP_SCRIPT)], cwd=here,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, **avm_threads.die_with_parent())
     except OSError:
@@ -205,6 +199,10 @@ class TouchWindow(QtWidgets.QWidget):
         # each page checks the other before starting: one LimeSDR can't be
         # opened by TX and RX at once (separate processes; a Pluto can)
         self.tx.peer, self.rx.peer = self.rx, self.tx
+        # the engines' settings again, now that each page can see the other
+        # (a saved Duplex setting needs both; this also sets the buttons)
+        self.rx._apply_to_engine()
+        self.tx._apply_to_engine()
         # Video codec warm-up, in the background from launch: the first run on
         # a machine compiles it (minutes on a slow CPU; seconds once cached).
         # TX waits for it rather than going on air without a picture.
@@ -604,7 +602,28 @@ class TouchWindow(QtWidgets.QWidget):
         event.accept()
 
 
+ERROR_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_logs", "errors.log")
+
+
+def _log_uncaught(kind, exc_type, exc, tb):
+    """Full traceback of an uncaught exception, timestamped, to ERROR_LOG
+    (and stderr): a thread dying mid-session left only its first line in
+    the output, so the cause couldn't be found."""
+    import traceback
+    text = "".join(traceback.format_exception(exc_type, exc, tb))
+    try:
+        os.makedirs(os.path.dirname(ERROR_LOG), exist_ok=True)
+        with open(ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {kind}\n{text}\n")
+    except OSError:
+        pass
+    print(f"{kind}\n{text}", file=sys.stderr, flush=True)
+
+
 def main():
+    threading.excepthook = lambda a: _log_uncaught(
+        f"uncaught in thread {a.thread.name if a.thread else '?'}", a.exc_type, a.exc_value, a.exc_traceback)
+    sys.excepthook = lambda t, v, tb: _log_uncaught("uncaught", t, v, tb)
     app = QtWidgets.QApplication(sys.argv)
     import avm_threads
     avm_threads.install(main_name="avm-gui")  # thread names visible in top -H

@@ -296,12 +296,19 @@ class TxPage(QtWidgets.QWidget):
         e.tx_queue_depth.setValue(TX_QUEUE_DEPTH)
         e.modulation.setCurrentText(self.mod.value())
         e.tx_gain.setValue(self.gain.value())
+        # duplex: link rate = one slot a cycle (the engine re-sizes video)
+        tdd = self.duplex()
+        if (tdd or None) != (e.tdd or None):
+            e.tdd = tdd
+            e._recalculate_bitrates()
         device = self._source_key() == "device"
         self.camera.setEnabled(device)
         self.mic.setEnabled(device)
         self._update_focus_row()
         self._refresh_info()
         self._save()
+        if getattr(self, "peer", None) is not None:
+            tw.refresh_duplex_buttons(self, self.peer)
 
     def _source_key(self):
         return next((k for k, v in SOURCES.items() if v == self.source.value()), "test")
@@ -435,6 +442,68 @@ class TxPage(QtWidgets.QWidget):
                 self.run.set_state("pending")
 
     # ------------------------------------------------------------------
+    def duplex(self):
+        """This station's duplex settings (touch_widgets.tdd_config), or None."""
+        peer = getattr(self, "peer", None)
+        role = self.s.get("duplex", "off")
+        if peer is None or not tw.duplex_active(role, self.mode.value(), peer.mode.value(),
+                                                self.engine.sdr, peer.engine.sdr):
+            return None
+        return tw.tdd_config(role)
+
+    DUPLEX_WAIT_S = 30       # for the receiver to open the TX FIFO (it opens the radio first)
+    _duplex_wait = None
+
+    def _say(self, text):
+        """TX status -- in duplex also on the RX tab (TX's tab has no button
+        then, so its status was easy to miss) and in the TX log."""
+        self.status.setText(text)
+        self.engine._append_log(f"[gui] {text}")
+        peer = getattr(self, "peer", None)
+        if self.engine.tdd and peer is not None:
+            peer.status.setText(f"TX: {text}")
+
+    def _start_duplex_when_ready(self):
+        """Duplex: the receiver transmits, so it starts first (if it isn't
+        running) and this TX starts once it has the FIFO open -- polled, so
+        the GUI never blocks on the FIFO."""
+        import errno
+        peer = self.peer
+        if not peer.is_running():
+            peer.start()
+            if not peer.is_running():
+                self._say("Not started: duplex needs RX, which didn't start")
+                self.run.set_state("stopped")
+                return
+        elif peer.engine.tdd != self.engine.tdd or peer.run.state == "pending":
+            # running, but not as this duplex receiver, or with settings
+            # waiting to apply (e.g. just matched to TX's mode/width): restart
+            peer.stop()
+            peer.start()
+        self._duplex_wait = self._duplex_wait_t0 = time.monotonic()
+        self.run.set_state("pending")
+        self._say("waiting for RX to open the radio...")
+
+        def poll():
+            if self._duplex_wait is None:
+                return  # cancelled
+            try:
+                fd = os.open(self.engine.tdd["fifo"], os.O_WRONLY | os.O_NONBLOCK)
+                os.close(fd)
+            except OSError as e:
+                waited = time.monotonic() - self._duplex_wait
+                if e.errno == errno.ENXIO and waited < self.DUPLEX_WAIT_S and peer.is_running():
+                    QtCore.QTimer.singleShot(300, poll)
+                    return
+                self._duplex_wait = None
+                self.run.set_state("stopped")
+                self._say(f"Not started: RX not ready after {waited:.0f} s ({e}; RX running: {peer.is_running()})")
+                return
+            self._duplex_wait = None
+            self._say(f"RX ready after {time.monotonic() - self._duplex_wait_t0:.1f} s -- starting TX")
+            self._start_engine()
+        QtCore.QTimer.singleShot(300, poll)
+
     def is_running(self):
         return bool(self.engine.procs)
 
@@ -446,6 +515,7 @@ class TxPage(QtWidgets.QWidget):
     def codec_ready(self):
         """The window's codec warm-up finished: start a TX that was waiting."""
         if self._waiting_codec:
+            self.engine._append_log("[gui] codec warm-up finished -- starting the waiting TX")
             self._waiting_codec = False
             self.start()
 
@@ -456,7 +526,17 @@ class TxPage(QtWidgets.QWidget):
             self.status.setText("Cancelled")
             self.preview.clear_image(self._preview_idle_text())
             return
+        if self._duplex_wait is not None:  # tapped while waiting for duplex RX: cancel
+            self._duplex_wait = None
+            self.run.set_state("stopped")
+            self.status.setText("Cancelled")
+            return
         if self.run.state == "stopped":
+            if tw.offer_duplex_match(self, self.peer, "TX", "RX") and self.peer.is_running():
+                # apply the match now: RX restarts with TX's settings (the
+                # duplex start below then waits for it)
+                self.peer.stop()
+                self.peer.start()
             self.start()
         elif self.run.state == "pending":
             self.stop()
@@ -476,6 +556,8 @@ class TxPage(QtWidgets.QWidget):
         return False
 
     def start(self):
+        self.engine._append_log(f"[gui] TX start requested (duplex: {bool(self.duplex())}, "
+                                f"codec busy: {self.codec_busy()})")
         if self._lime_busy():
             return
         found, why = tw.radio_present(self.engine.sdr, self.engine.pluto_uri.text().strip() or None)
@@ -488,10 +570,25 @@ class TxPage(QtWidgets.QWidget):
         if getattr(self.engine, "_video_enabled", True) and self.codec_busy():
             self._waiting_codec = True
             self.run.set_state("pending")
+            if self.engine.tdd:
+                self._say("waiting for the codec warm-up (after an update) -- starts when ready")
             self.status.setText("Preparing video codec (first start on this machine)...\n"
                                 "TX starts when it's ready -- tap again to cancel")
             self.preview.clear_image("Preparing video codec...\nTX starts when it's ready")
             return
+        if self.engine.tdd:
+            self._start_duplex_when_ready()
+            return
+        peer = getattr(self, "peer", None)
+        if peer is not None and peer.is_running() and peer.running_tdd:
+            # RX is still a duplex receiver -- it has a TX stream of its own
+            # on the radio: two transmitters (breaks between frames, a TX
+            # that can't keep up). Restart it in normal mode first.
+            peer.stop()
+            peer.start()
+        self._start_engine()
+
+    def _start_engine(self):
         self._sent = 0
         self._last_error = ""
         tw.write_gain_file("tx", self.gain.value())  # so a stale value can't apply at start

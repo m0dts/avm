@@ -153,25 +153,37 @@ def pump_stderr(proc, tag, log_stream, spectrum_signal=None, spectrum_re=None):
     routed there instead of the log, so the log doesn't get spammed with
     a multi-KB base64 blob ~7x/second."""
     import base64
-    for raw in iter(proc.stderr.readline, b""):
-        try:
-            text = raw.decode(errors="replace").rstrip()
-        except Exception:
-            continue
-        if not text:
-            continue
-        if spectrum_signal is not None:
-            m = spectrum_re.match(text)
-            if m:
-                try:
-                    freq0, freq_step, n, b64 = m.groups()
-                    mag_db = np.frombuffer(base64.b64decode(b64), dtype="<f4")
-                    freqs = float(freq0) + np.arange(int(n)) * float(freq_step)
-                    spectrum_signal.data_ready.emit(freqs, mag_db)
-                except Exception:
-                    pass  # a torn/partial line from a mid-write read -- just skip it, next one's fine
-                continue
-        log_stream.line_received.emit(f"[{tag}] {text}")
+    import traceback
+    reported = False
+    try:
+        for raw in iter(proc.stderr.readline, b""):
+            # Never let one line end this loop: if nothing reads the process's
+            # stderr, its pipe fills and the process BLOCKS on its next log
+            # line -- a frozen receiver (seen for real: the status line froze
+            # and RX stopped logging mid-session after this thread died).
+            try:
+                text = raw.decode(errors="replace").rstrip()
+                if not text:
+                    continue
+                if spectrum_signal is not None:
+                    m = spectrum_re.match(text)
+                    if m:
+                        try:
+                            freq0, freq_step, n, b64 = m.groups()
+                            mag_db = np.frombuffer(base64.b64decode(b64), dtype="<f4")
+                            freqs = float(freq0) + np.arange(int(n)) * float(freq_step)
+                            spectrum_signal.data_ready.emit(freqs, mag_db)
+                        except Exception:
+                            pass  # a torn/partial line from a mid-write read -- just skip it, next one's fine
+                        continue
+                log_stream.line_received.emit(f"[{tag}] {text}")
+            except Exception:
+                if not reported:  # once: the cause, without flooding the log
+                    reported = True
+                    print(f"[{tag}] stderr reader: a line failed, still reading:\n"
+                          f"{traceback.format_exc()}", file=sys.stderr, flush=True)
+    except (ValueError, OSError):
+        pass  # the pipe was closed: the process has been stopped
 
 
 class MediaRxWindow(QtWidgets.QMainWindow):

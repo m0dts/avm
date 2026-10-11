@@ -274,6 +274,7 @@ _KMAX_TABLE = {
 
 PILOT_SEQ_SEED = 12345         # deterministic scattered/training pilot values
 PREAMBLE_SEED = 999            # deterministic Schmidl & Cox preamble sequence
+HEADER_SCRAMBLE_SEED = 4242   # header scrambling (see _header_scramble_bits)
 HEADER_LEN_BITS = 32
 HEADER_CRC_BITS = 32
 # A checksum over the header's OWN fields (payload_len + expected_crc),
@@ -370,7 +371,7 @@ def _build_fec_predecessors():
 _FEC_PREV_STATE, _FEC_PREV_BIT, _FEC_PREV_OUTPUT = _build_fec_predecessors()
 
 if _HAVE_NUMBA:
-    @numba.njit(cache=True)
+    @numba.njit(cache=True, nogil=True)
     def _viterbi_hard_numba(recv, prev_state, prev_bit, dist_from_prev):
         n_steps = recv.shape[0]
         n_states = prev_state.shape[0]
@@ -397,7 +398,7 @@ if _HAVE_NUMBA:
             path_metric = new_metric
         return backptr, prevstate_arr
 
-    @numba.njit(cache=True)
+    @numba.njit(cache=True, nogil=True)
     def _viterbi_soft_numba(r1_arr, r2_arr, prev_state, prev_bit, ideal_from_prev):
         n_steps = r1_arr.shape[0]
         n_states = prev_state.shape[0]
@@ -427,7 +428,7 @@ if _HAVE_NUMBA:
             path_metric = new_metric
         return backptr, prevstate_arr, path_metric[0]
 
-    @numba.njit(cache=True)
+    @numba.njit(cache=True, nogil=True)
     def _traceback_numba(backptr, prevstate_arr, msg_len_bits):
         n_steps = backptr.shape[0]
         state = 0
@@ -450,7 +451,7 @@ if _HAVE_NUMBA:
                                         np.zeros((FEC_N_STATES, 2, 2)))
     _traceback_numba(_soft_warmup[0], _soft_warmup[1], 1)
 
-    @numba.njit(cache=True)
+    @numba.njit(cache=True, nogil=True)
     def _fec_encode_numba(bits, g1, g2, n_mem):
         n_steps = len(bits) + n_mem
         out = np.empty(2 * n_steps, dtype=np.uint8)
@@ -707,7 +708,7 @@ class OFDMConfig:
     n_fft: int
     n_cp: int
     carrier_spacing: float
-    data_bins: np.ndarray    # exact DRM carrier indices (Kmin..Kmax, DC excluded)
+    data_bins: np.ndarray    # exact DRM carrier indices (Kmin..Kmax; DC excluded except VU)
     fft_bins: np.ndarray     # data_bins recentered to actual IFFT bin indices (see build_config)
     freq_int: int            # scattered pilot frequency spacing (carriers)
     time_int: int            # scattered pilot time period (symbols)
@@ -897,7 +898,7 @@ def linear_resample(x, fs_in, fs_out):
 MIN_SAMPLES_FOR_STABLE_IQ_ESTIMATE = 50_000
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _iq_apply(vals, mean_I, mean_Q, slope, scale):
     """correct_iq_imbalance's frozen-coefficient transform in one compiled
     pass (it runs on every native-rate sample -- 550 kS/s from a Pluto);
@@ -1235,7 +1236,13 @@ def build_config_scaled(mode, target_bandwidth_hz, edge_guard_frac=0.03, data_mo
     spec = DRM_MODES[mode]
     n_carriers = int(round(target_bandwidth_hz * (1 - 2 * edge_guard_frac) / spec["spacing_hz"]))
     half = n_carriers // 2
-    data_bins = np.concatenate([np.arange(-half, 0), np.arange(1, n_carriers - half + 1)])
+    if mode == "VU":
+        # the centre carrier used too (one more, same band edges): the LO is
+        # tuned away from the band (lo_offset_hz), so nothing lands on it.
+        # Changes VU's on-air format: both ends must agree.
+        data_bins = np.arange(-half, n_carriers - half + 1)
+    else:
+        data_bins = np.concatenate([np.arange(-half, 0), np.arange(1, n_carriers - half + 1)])
     data_bins, fft_bins = _fft_bins_for(data_bins)
     span = data_bins.max() - data_bins.min()
     n_fft = int(np.ceil(span / (1 - 2 * edge_guard_frac)))
@@ -1262,7 +1269,7 @@ def print_config(cfg, file=None, fragment_size_bytes=None, fragment_gap_ms=0.0):
     print(f"  OFDM symbol             : {cfg.symbol_len / cfg.fs * 1000:.2f} ms", file=file)
     print(f"  Carrier spacing         : {cfg.carrier_spacing:.3f} Hz", file=file)
     print(f"  Carrier range           : K = {cfg.data_bins.min()} .. {cfg.data_bins.max()} "
-          f"({cfg.n_data} carriers, DC excluded)", file=file)
+          f"({cfg.n_data} carriers, DC {'used' if 0 in cfg.data_bins else 'excluded'})", file=file)
     if cfg.uses_full_training:
         print(f"  Pilot scheme            : full training symbol every {cfg.time_int} symbols "
               f"(freq_int=1 -- DRM's own spec can't decimate this mode in frequency)", file=file)
@@ -1477,7 +1484,7 @@ def quick_sc_scan(x, L):
 SYNC_METRIC_MIN = 0.3
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _sc_metric(w, L, n_out, W=-1):
     """Schmidl & Cox over offsets d = 0..n_out-1 of w (needs n_out + L + W
     samples), lag L, window W (default L -- the classic two-half form):
@@ -1628,7 +1635,7 @@ def schmidl_cox_sync(rx, cfg, search_start=0, search_len=None, prefer_earliest=F
     return start_index, cfo_hz, best_metric
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _rotate(x, step):
     """x[n] * exp(-1j * step * n) by a rotating phasor (one complex multiply
     per sample instead of a complex exp), recomputed exactly at the start
@@ -1845,7 +1852,7 @@ def ofdm_demodulate(cfg, rx, n_symbols):
 USE_COMPILED_EQUALIZER = _HAVE_NUMBA
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _unwrap(p):
     """np.unwrap (period 2*pi), same algorithm, for a 1-D float array."""
     out = np.empty_like(p)
@@ -1864,7 +1871,7 @@ def _unwrap(p):
     return out
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _interp_clamped(n, xp, fp, out):
     """np.interp(arange(n), xp, fp) for increasing integer xp (clamped ends)."""
     j = 0
@@ -1881,7 +1888,7 @@ def _interp_clamped(n, xp, fp, out):
             out[i] = fp[j] + t * (fp[j + 1] - fp[j])
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _equalize_comb(rx_freq, pilots, freq_int, half_window, use_dd, dd_ref):
     """Comb-pilot branch of estimate_and_equalize (see there for the why of
     each step), compiled: it's called ~60 times per fragment (mostly by
@@ -1938,7 +1945,7 @@ def _equalize_comb(rx_freq, pilots, freq_int, half_window, use_dd, dd_ref):
     return eq, eq_soft
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _equalize_comb_batch(rx3, pilots, freq_int, half_window):
     """_equalize_comb for each of rx3's leading-axis slices (e.g. every
     integer-CFO candidate at once): one call instead of ~61."""
@@ -1954,9 +1961,9 @@ def _equalize_comb_batch(rx3, pilots, freq_int, half_window):
     return eq, eq_soft
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _score_candidates(full_fft, cands, fft_bins, starts, n_fft, pilots, freq_int, half_window,
-                      sym_idx, data_bins, data_off, coded_len):
+                      sym_idx, data_bins, data_off, coded_len, pn):
     """resolve_integer_cfo's batch_arrays, compiled: for each integer-CFO
     candidate, shift the header FFT bins, apply the per-symbol window phase,
     equalize, then repetition-combine the soft bits and score the hard-bit
@@ -1964,7 +1971,8 @@ def _score_candidates(full_fft, cands, fft_bins, starts, n_fft, pilots, freq_int
     (identical results), without its ~2.8 ms per fragment of temporaries on
     a Raspberry Pi 4. sym_idx[i] is the i-th header symbol's row in
     full_fft, and data_bins[data_off[i]:data_off[i+1]] its data carriers
-    (pilots excluded). Returns (coded_all, conf_all)."""
+    (pilots excluded); pn the header scrambling bits (_header_scramble_bits),
+    undone before combining. Returns (coded_all, conf_all)."""
     n_c = cands.shape[0]
     n_sym = full_fft.shape[0]
     n = fft_bins.shape[0]
@@ -1998,6 +2006,10 @@ def _score_candidates(full_fft, cands, fft_bins, starts, n_fft, pilots, freq_int
                 hard[p] = 1 if eq[row, c].real < 0 else 0
                 hard[p + 1] = 1 if eq[row, c].imag < 0 else 0
                 p += 2
+        for b in range(n_soft):          # descramble
+            if pn[b]:
+                soft[b] = -soft[b]
+                hard[b] ^= 1
         # repetition-combine: plain sequential sums, as numpy's axis-1 sum
         for r in range(n_full):
             for b in range(coded_len):
@@ -2166,6 +2178,38 @@ def estimate_and_equalize(cfg, rx_freq, n_symbols, dd_ref=None, time_half_window
 # Framing: preamble + a stream of OFDM symbols, each carrying a mix of
 # pilots (auto-inserted) and data (header first, then payload).
 # ---------------------------------------------------------------------------
+_HEADER_PN_CACHE = {}
+
+
+def _header_scramble_bits(cfg, n):
+    """A fixed pseudo-random bit pattern XORed onto the header's repeated
+    coded bits, every mode. The header is ~80 coded
+    bits repeated to fill whole symbols -- at mode A's 250 kHz, ~75 copies
+    across 6000 carriers. A pattern that repeats along the carriers is a
+    train of spikes in time: the header symbol peaked 24 dB over the mean
+    (18 dB at 80 kHz; data symbols ~9) and overdrove the radio -- spectral
+    leakage either side, and garbage-header decode failures. Scrambled, it
+    is as noise-like as the data. (Changes the on-air format of every
+    mode: both ends need it.)"""
+    pn = _HEADER_PN_CACHE.get(n)
+    if pn is None:
+        pn = np.random.default_rng(HEADER_SCRAMBLE_SEED).integers(0, 2, size=n).astype(np.uint8)
+        _HEADER_PN_CACHE[n] = pn
+    return pn
+
+
+def _header_descramble_soft(cfg, soft):
+    """Undo _header_scramble_bits on soft values: a flipped bit is a
+    flipped sign, whichever sign convention the demapper uses."""
+    pn = _header_scramble_bits(cfg, len(soft))
+    return soft if pn is None else np.where(pn.astype(bool), -soft, soft)
+
+
+def _header_descramble_hard(cfg, bits):
+    pn = _header_scramble_bits(cfg, len(bits))
+    return bits if pn is None else bits ^ pn
+
+
 def _repetition_encode(bits, n_slots):
     reps = int(np.ceil(n_slots / len(bits)))
     return np.tile(bits, reps)[:n_slots]
@@ -2299,7 +2343,8 @@ def resolve_integer_cfo(cfg, rx_after_preamble, search_range=30, prior_k=None):
         # same results as _batch_arrays_numpy below.
         return _score_candidates(full_fft_c, np.asarray(cand_arr, np.int64), fft_bins_arr, starts_arr,
                                  cfg.n_fft, pilots_arr, cfg.freq_int, TIME_SMOOTHING_HALF_WINDOW,
-                                 sym_idx_arr, data_bins_arr, data_off_arr, header_coded_len)
+                                 sym_idx_arr, data_bins_arr, data_off_arr, header_coded_len,
+                                 _header_scramble_bits(cfg, 2 * int(data_off_arr[-1])))
 
     def _batch_arrays_numpy(cand_arr):
         # Batched path (comb-pilot modes): equalize, soft-extract, repetition-
@@ -2315,6 +2360,8 @@ def resolve_integer_cfo(cfg, rx_after_preamble, search_range=30, prior_k=None):
         soft_all = np.concatenate([
             np.stack([eqs3[:, idx, ~m].real, eqs3[:, idx, ~m].imag], axis=2).reshape(n_c, -1)
             for idx, m in zip(header_symbol_indices, masks)], axis=1)
+        pn = _header_scramble_bits(cfg, soft_all.shape[1]).astype(bool)
+        soft_all = np.where(pn[None, :], -soft_all, soft_all)
         n_full = soft_all.shape[1] // header_coded_len
         coded_all = soft_all[:, :n_full * header_coded_len].reshape(n_c, n_full, header_coded_len).sum(axis=1)
         counts = np.full(header_coded_len, max(n_full, 1), dtype=float)
@@ -2326,6 +2373,7 @@ def resolve_integer_cfo(cfg, rx_after_preamble, search_range=30, prior_k=None):
         hard_all = np.concatenate([
             np.stack([eq3[:, idx, ~m].real < 0, eq3[:, idx, ~m].imag < 0], axis=2).reshape(n_c, -1).astype(np.uint8)
             for idx, m in zip(header_symbol_indices, masks)], axis=1)
+        hard_all = hard_all ^ pn[None, :].astype(np.uint8)
         n_rep = (hard_all.shape[1] // header_coded_len) * header_coded_len
         if n_rep == 0:
             conf_all = np.zeros(n_c)
@@ -2359,6 +2407,7 @@ def resolve_integer_cfo(cfg, rx_after_preamble, search_range=30, prior_k=None):
                 header_symbol_soft = np.concatenate([
                     qpsk_soft(header_eq_soft[idx][~m]) for idx, m in zip(header_symbol_indices, masks)
                 ])
+                header_symbol_soft = _header_descramble_soft(cfg, header_symbol_soft)
                 header_coded_soft = _repetition_soft_combine(header_symbol_soft, header_coded_len)
                 # Callers (e.g. hf_ofdm_rx.py's CFO-continuity gate, verbose
                 # logging) expect a familiar 0-1 "confidence" score, which the raw
@@ -2369,6 +2418,7 @@ def resolve_integer_cfo(cfg, rx_after_preamble, search_range=30, prior_k=None):
                 header_demap = np.concatenate([
                     qpsk_demap(header_eq[idx][~m]) for idx, m in zip(header_symbol_indices, masks)
                 ])
+                header_demap = _header_descramble_hard(cfg, header_demap)
                 conf = _repetition_confidence(header_demap, header_coded_len)
             header_bits, metric = fec_decode_soft(header_coded_soft, HEADER_BITS, return_metric=True)
             biased_metric = metric
@@ -2468,6 +2518,7 @@ def resolve_timing_offset(cfg, rx, start_index, total_cfo_hz, max_needed_len, ca
         header_symbol_soft = np.concatenate([
             qpsk_soft(header_eq_soft[idx][~m]) for idx, m in zip(header_symbol_indices, masks)
         ])
+        header_symbol_soft = _header_descramble_soft(cfg, header_symbol_soft)
         header_coded_soft = _repetition_soft_combine(header_symbol_soft, header_coded_len)
         header_bits, metric = fec_decode_soft(header_coded_soft, HEADER_BITS, return_metric=True)
         if metric < best_metric:
@@ -2703,6 +2754,9 @@ def build_frame(cfg, payload: bytes):
     # repetition alone.
     header_coded_bits = fec_encode(header_bits)
     header_all_bits = _repetition_encode(header_coded_bits, header_total_capacity)
+    pn = _header_scramble_bits(cfg, len(header_all_bits))
+    if pn is not None:
+        header_all_bits = header_all_bits ^ pn
     offset = 0
     for cap in header_capacities:
         symbol_bits_list.append(header_all_bits[offset:offset + cap])
@@ -2819,7 +2873,7 @@ def _true_err2(measured, modulation):
     return float(np.interp(measured, meas, true_err2))
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _nearest_err2(points, levels):
     """|point - nearest ideal point|^2 per point, nearest per axis like
     _nearest_ideal_point (first level wins a tie, as argmin) -- one pass
@@ -2921,6 +2975,7 @@ def decode_frame(cfg, rx_after_preamble, verbose=False, max_wait_samples=None):
     header_symbol_soft = np.concatenate([
         qpsk_soft(header_eq_soft[idx][~pilot_mask(cfg, idx)]) for idx in header_symbol_indices
     ])
+    header_symbol_soft = _header_descramble_soft(cfg, header_symbol_soft)
     header_coded_soft = _repetition_soft_combine(header_symbol_soft, header_coded_len)
     header_bits = fec_decode_soft(header_coded_soft, HEADER_BITS)
     header_fields_bits = header_bits[:HEADER_LEN_BITS + HEADER_CRC_BITS]

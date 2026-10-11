@@ -127,7 +127,15 @@ def make_reader(args, cfg):
                                tune_offset_hz=args.lo_offset_hz,
                                warmup_discard_s=args.rx_warmup_s,
                                driver=args.sdr, antenna=args.sdr_antenna, gain_file=args.gain_file,
-                               ppm=args.sdr_ppm, freq_offset_file=args.freq_offset_file)
+                               ppm=args.sdr_ppm, freq_offset_file=args.freq_offset_file,
+                               tdd_tx=({"fifo": args.tdd_tx_fifo, "tx_gain_db": args.tdd_tx_gain,
+                                        "start_muted": bool(args.tdd_adjust_file)}  # a slave: see _tdd_set_muted
+                                       if args.tdd_tx_fifo else None))
+        args.radio_source = reader  # TDD reads its own-slot timing from here
+        if args.tdd_tx_fifo:
+            # the TX feeder thread must get the radio its samples within its
+            # ~15 ms buffer: let it in sooner than Python's default 5 ms
+            sys.setswitchinterval(0.001)
         fe_lo = args.lo_offset_hz
         if reader.sample_rate_hz != capture_fs:
             # the radio only offers listed rates (Airspy, SDRplay) and picked another
@@ -1318,7 +1326,31 @@ def _build_spectrum_computer(cfg, args, reader):
     display_offset_db = SPECTRUM_OFFSET_DB.get(getattr(args, "sdr", "pluto"), 0.0) \
         if getattr(args, "input", "pipe") == "pluto" else 0.0
 
+    to_native = cfg.fs / fs   # this view's samples -> the decoder's (TDD slot timing)
+
+    def in_far_slot():
+        """Duplex: never our own transmission (heard through the radio) --
+        its slot is known exactly from our TX count. Other station heard:
+        only its slot (not the gaps either). Not heard yet: everything but
+        our own slot, so the band still shows. Not duplex: everything."""
+        tdd = getattr(args, "tdd_state", None)
+        if not tdd:
+            return True
+        end = source.total_len / 8 * to_native
+        start = end - raw_needed * to_native
+        if tdd.get("heard") and tdd.get("phase") is not None:
+            into = (start - tdd["phase"]) % tdd["cycle"]
+            return into + (end - start) <= tdd["burst"]
+        _tdd_own_refresh(tdd)
+        if tdd.get("own_phase") is None:
+            return True
+        m = tdd["margin"]
+        into = (start - (tdd["own_phase"] - m)) % tdd["cycle"]
+        return into >= tdd["burst"] + 2 * m and into + (end - start) <= tdd["cycle"]
+
     def compute():
+        if not in_far_slot():
+            return None   # (the display keeps its last picture)
         samples = _peek_latest_samples(source, raw_needed)
         if len(samples) < raw_needed:
             return None
@@ -1485,7 +1517,17 @@ def run_gui(cfg, args, reader):
     app.exec_()
 
 
+SEQ_MIN_FRAGMENT_S = 0.03  # no mode sends a fragment faster: a bigger "gap" is a TX restart
+SEQ_GAP_SLACK = 20
 TDD_HEADER_FLAG = 0x8000  # FRAG_HEADER total_frags: slot position (see hf_ofdm_tx.py)
+TDD_STATION_BIT = 0x4000  # ... and which station sent it
+TDD_ADJUST_MIN_S = 50e-6  # slave: move its slot once it is this far off the target
+TDD_UNMUTE_S = 0.005      # slave: transmit only once its slot is this close to the target
+TDD_PROBE_S = 0.10        # far end not heard yet: search only this much of its expected slot
+TDD_REPORT_FLAG = 0x80000000  # FRAG_HEADER total_len: the master's report (see hf_ofdm_tx.py)
+TDD_CLOSED_S = 5.0        # slave: steering by the master's reports while one came this recently
+TDD_CLOSED_HOLD_S = 3.5   # ... and after a move, wait this long for reports showing it
+TDD_CLOSED_MIN_S = 0.0005 # ... and leave errors smaller than this
 TDD_MARGIN_S = 0.010      # start searching this long before an expected burst
 TDD_LOST_CYCLES = 3       # cycles with no decode before the phase is forgotten
 
@@ -1512,40 +1554,223 @@ def _tdd_geometry(cfg, args):
     step = on_air * cfg.fs / radio_fs          # one fragment, native samples
     return {"cycle": args.tdd_cycle_s * cfg.fs, "burst": per_slot * step, "step": step,
             "n_frame": n_frame, "per_slot": per_slot, "phase": None, "last_ok": None,
-            "margin": TDD_MARGIN_S * cfg.fs}
+            "margin": TDD_MARGIN_S * cfg.fs, "fs": cfg.fs,
+            # this station (--tdd-station), and the slave's own-slot control
+            "station": args.tdd_station, "adjust_file": args.tdd_adjust_file,
+            "own_phase": None, "shift_s": 0.0, "heard": False,
+            # closed loop: the master reports where it hears the slave
+            "report_file": args.tdd_report_file, "rep_ctr": 0, "rep_burst": None,
+            "closed_t": 0.0, "closed_hold_t": 0.0, "last_ctr": None,
+            # combined TX/RX (--tdd-tx-fifo): own slot from the TX sample count
+            "source": getattr(args, "radio_source", None) if args.tdd_tx_fifo else None,
+            "radio_fs": radio_fs, "own_seen": 0, "hold": 0,
+            "target": (args.tdd_offset_s or args.tdd_cycle_s / 2) * cfg.fs}
 
 
 def _tdd_track(tdd, result, state, cfg):
-    """A good fragment's start, relative to the last one, says where the
-    burst it belongs to started: that sets the cycle's phase (re-learned
-    every cycle, so it follows clock drift between two radios)."""
+    """Learn slot timing from a good fragment. Returns True if it is this
+    station's OWN fragment (heard through the radio's TX->RX leakage): not
+    for output, and only used by a slave, once, to find where its own slot
+    lands. The other station's fragments set the phase this receiver
+    listens at (re-learned every cycle, so it follows clock drift)."""
     if result.get("status") != "ok" or not result.get("crc_ok") or "next_native_search_start" not in result:
         if tdd["phase"] is not None and state["native_search_start"] - tdd["phase"] > TDD_LOST_CYCLES * tdd["cycle"]:
+            if not tdd["heard"]:
+                tdd["phase"] = None    # just a guess (the master's): guess again, quietly
+                return False
             print("[tdd] no burst for a few cycles -- searching everything again", file=sys.stderr)
             tdd["phase"] = tdd["last_ok"] = None
-        return
+            tdd["heard"] = False
+            if tdd["adjust_file"]:
+                _tdd_set_muted(tdd, True, "lost the master")
+        return False
     start = result["next_native_search_start"] - tdd["n_frame"]
     payload = result.get("payload") or b""
     total = FRAG_HEADER.unpack(payload[:FRAG_HEADER.size])[1] if len(payload) >= FRAG_HEADER.size else 0
     if total & TDD_HEADER_FLAG:
-        # the TX says where in its slot this fragment is: exact phase
-        tdd["phase"] = start - ((total >> 8) & 0x7F) * tdd["step"]
+        burst_start = start - ((total >> 8) & 0x3F) * tdd["step"]
+        if tdd["station"] is not None and bool(total & TDD_STATION_BIT) == bool(tdd["station"]):
+            if tdd["own_phase"] is None and tdd.get("source") is None:  # (combined: from the TX count)
+                tdd["own_phase"] = burst_start
+                print(f"[tdd] own slot found (station {tdd['station']})", file=sys.stderr)
+                _tdd_steer(tdd)
+            return True
+        tdd["phase"] = burst_start         # the TX says where in its slot this is: exact
+        tdd["heard"] = True
+        _tdd_report_far(tdd)
+        if tdd["report_file"]:
+            _tdd_master_report(tdd, burst_start)
+        elif tdd["adjust_file"]:
+            _tdd_follow_report(tdd, FRAG_HEADER.unpack(payload[:FRAG_HEADER.size])[2])
     elif tdd["last_ok"] is None or start - tdd["last_ok"] > 1.5 * tdd["step"]:
         tdd["phase"] = start               # (older TX) first fragment after a gap: assume a burst start
+        tdd["heard"] = True
     elif tdd["phase"] is not None:
         k = round((start - tdd["phase"]) / tdd["step"])
         tdd["phase"] = start - k * tdd["step"]
     tdd["last_ok"] = start
+    _tdd_steer(tdd)
+    return False
+
+
+def _tdd_set_muted(tdd, muted, why):
+    """Slave, combined TX/RX: transmit only while placed in the master's gap."""
+    src = tdd.get("source")
+    feeder = src.tdd_tx if src is not None else None
+    if feeder is None or feeder.mute_request == muted:
+        return
+    feeder.mute_request = muted     # (takes effect at the next gap between bursts)
+    print(f"[tdd] slave TX {'silent' if muted else 'on air'}: {why}", file=sys.stderr)
+
+
+TDD_REPORT_EVERY_S = 10.0
+
+
+def _tdd_report_far(tdd):
+    """Combined TX/RX: where the other station's slot is really heard,
+    relative to our own slot (should be +target for a master, -target for a
+    slave), every TDD_REPORT_EVERY_S -- the check on the slave's placement."""
+    _tdd_own_refresh(tdd)
+    now = time.monotonic()
+    if tdd["own_phase"] is None or now - tdd.get("reported", 0.0) < TDD_REPORT_EVERY_S:
+        return
+    tdd["reported"] = now
+    c = tdd["cycle"]
+    rel = (tdd["phase"] - tdd["own_phase"]) % c
+    want = (-tdd["target"] if tdd["adjust_file"] else tdd["target"]) % c
+    err = (rel - want + c / 2) % c - c / 2
+    print(f"[tdd] other station's slot heard {rel / tdd['fs'] * 1e3:.1f} ms after ours "
+          f"(wanted {want / tdd['fs'] * 1e3:.1f} ms: {err / tdd['fs'] * 1e3:+.1f} ms off)", file=sys.stderr)
+
+
+def _tdd_master_report(tdd, burst_start):
+    """Master: where the slave's slot is heard, relative to where it should
+    be (+ = late), for the modulator to send in our fragments' headers
+    (--tdd-report-file); a new counter value per slave burst heard."""
+    _tdd_own_refresh(tdd)
+    if tdd["own_phase"] is None:
+        return
+    c = tdd["cycle"]
+    if tdd["rep_burst"] is not None and abs(burst_start - tdd["rep_burst"]) < c / 2:
+        return  # already reported this burst
+    tdd["rep_burst"] = burst_start
+    rel = (burst_start - tdd["own_phase"]) % c
+    err = (rel - tdd["target"] + c / 2) % c - c / 2
+    tdd["rep_ctr"] = (tdd["rep_ctr"] + 1) % 256
+    try:
+        tmp = tdd["report_file"] + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{tdd['rep_ctr']} {int(round(err / tdd['fs'] * 1e4))}")
+        os.replace(tmp, tdd["report_file"])
+    except OSError as e:
+        print(f"[tdd] couldn't write {tdd['report_file']}: {e}", file=sys.stderr)
+
+
+def _tdd_follow_report(tdd, field):
+    """Slave: steer by the master's report of where it hears our slot -- the
+    slot as actually on air, whatever our own estimate (start-up stalls,
+    underruns, connection latency) gets wrong."""
+    if not field & TDD_REPORT_FLAG:
+        return
+    ctr = (field >> 16) & 0xFF
+    err01 = field & 0xFFFF
+    err01 = err01 - 0x10000 if err01 & 0x8000 else err01
+    if ctr == tdd["last_ctr"]:
+        return
+    tdd["last_ctr"] = ctr
+    now = time.monotonic()
+    tdd["closed_t"] = now
+    err_s = err01 * 1e-4
+    if now < tdd["closed_hold_t"] or abs(err_s) < TDD_CLOSED_MIN_S:
+        return
+    tdd["shift_s"] -= err_s
+    tdd["closed_hold_t"] = now + TDD_CLOSED_HOLD_S
+    try:
+        tmp = tdd["adjust_file"] + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{tdd['shift_s']:.9f}")
+        os.replace(tmp, tdd["adjust_file"])
+    except OSError as e:
+        print(f"[tdd] couldn't write {tdd['adjust_file']}: {e}", file=sys.stderr)
+        return
+    print(f"[tdd] master hears our slot {err_s * 1e3:+.1f} ms off: moving it "
+          f"(total {tdd['shift_s'] * 1e3:+.1f} ms)", file=sys.stderr)
+
+
+def _tdd_own_refresh(tdd):
+    """Combined TX/RX: our own slot, from this process's TX sample count."""
+    src = tdd.get("source")
+    feeder = src.tdd_tx if src is not None else None
+    if feeder is not None and feeder.n_bursts > tdd["own_seen"]:
+        tdd["hold"] = max(0, tdd["hold"] - (feeder.n_bursts - tdd["own_seen"]))
+        tdd["own_seen"] = feeder.n_bursts
+        tdd["own_phase"] = (feeder.own_starts[-1] - src.discarded_total) * tdd["fs"] / tdd["radio_fs"]
+
+
+def _tdd_steer(tdd):
+    """Slave (--tdd-adjust-file): keep its own slot `target` after the
+    master's. Both phases are in this receiver's sample count, which the
+    radio's TX shares (same clock), so the error is exact; the TX applies
+    the shift as a longer/shorter silence and the own phase moves with it."""
+    _tdd_own_refresh(tdd)
+    if not tdd["adjust_file"] or tdd["own_phase"] is None or tdd["phase"] is None or not tdd["heard"]:
+        return  # (steer only from the master's slot as actually heard, never a guess)
+    if tdd["hold"]:
+        return  # a move is on its way through the modulator: wait for its bursts
+    c = tdd["cycle"]
+    err = (tdd["own_phase"] - (tdd["phase"] + tdd["target"])) % c
+    err = err - c if err > c / 2 else err          # -c/2 .. c/2: + = own slot late
+    if abs(err) < TDD_UNMUTE_S * tdd["fs"]:
+        _tdd_set_muted(tdd, False, "slot in place")
+    if time.monotonic() - tdd["closed_t"] < TDD_CLOSED_S:
+        return  # the master's reports steer now (they see the slot on air; this is an estimate)
+    if abs(err) < TDD_ADJUST_MIN_S * tdd["fs"]:
+        return
+    tdd["shift_s"] -= err / tdd["fs"]
+    tdd["own_phase"] -= err
+    if tdd.get("source") is not None:
+        tdd["hold"] = 3   # own bursts already queued still show the old timing
+    try:
+        tmp = tdd["adjust_file"] + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{tdd['shift_s']:.9f}")
+        os.replace(tmp, tdd["adjust_file"])
+    except OSError as e:
+        print(f"[tdd] couldn't write {tdd['adjust_file']}: {e}", file=sys.stderr)
+        return
+    print(f"[tdd] own slot {err / tdd['fs'] * 1e3:+.3f} ms off target: moving it "
+          f"(total {tdd['shift_s'] * 1e3:+.3f} ms)", file=sys.stderr)
 
 
 def _tdd_skip_gap(tdd, state, cfg):
     """Past the end of the expected burst: jump to just before the next one."""
+    _tdd_own_refresh(tdd)
+    if (not tdd["heard"] and tdd.get("source") is not None and tdd["own_phase"] is not None
+            and not tdd["adjust_file"]):
+        # master (combined TX/RX), slave not heard yet: search everywhere
+        # except our own slot -- the slave may be anywhere until it has been
+        # heard (its own estimate can be well out), and the closed loop needs
+        # the master to find it to report where it is
+        pos = state["native_search_start"]
+        m = tdd["margin"]
+        into = (pos - (tdd["own_phase"] - m)) % tdd["cycle"]
+        if into < tdd["burst"] + 2 * m:
+            state["native_search_start"] = int(pos + (tdd["burst"] + 2 * m - into))
+        return
     if tdd["phase"] is None:
         return
+    if tdd["adjust_file"] and tdd["own_phase"] is None and tdd.get("source") is None:
+        return  # a slave still has to find its own slot: search everything until then
     pos = state["native_search_start"]
     into = (pos - tdd["phase"]) % tdd["cycle"]
-    # (from the last fragment's end: no whole fragment can start after it)
-    if into > tdd["burst"] - 0.5 * tdd["step"] and into < tdd["cycle"] - tdd["margin"]:
+    # (from the last fragment's end: no whole fragment can start after it).
+    # Far end not heard yet (the master guessing where the slave will be):
+    # just the start of the slot, where a burst's first preamble would be --
+    # searching all of it, all the time, loaded the CPU the transmitter
+    # shares in this process, and the master's own bursts broke up on air.
+    window = tdd["burst"] - 0.5 * tdd["step"] if tdd["heard"] else min(
+        tdd["burst"] - 0.5 * tdd["step"], TDD_PROBE_S * tdd["fs"])
+    if into > window and into < tdd["cycle"] - tdd["margin"]:
         state["native_search_start"] = int(pos + (tdd["cycle"] - into) - tdd["margin"])
 
 
@@ -1666,6 +1891,25 @@ def main():
                           "duplex, our own transmit slot) costs CPU and made RX fall behind.")
     ap.add_argument("--tdd-slot-s", type=float, default=0.0, metavar="S",
                      help="TDD: the far end's slot (its --tdd-slot-s). Default: half the cycle.")
+    ap.add_argument("--tdd-station", type=int, choices=[0, 1], default=None,
+                     help="TDD: this station's number (as given to its TX): its own fragments, "
+                          "heard through the radio's leakage, are recognised and not output. "
+                          "Not given: every fragment counts as the far end's (a receive-only "
+                          "station, whatever number the far end uses).")
+    ap.add_argument("--tdd-adjust-file", default=None, metavar="PATH",
+                     help="TDD slave: steer this station's slot to --tdd-offset-s after the "
+                          "master's (default half a cycle), writing the shift for its TX here.")
+    ap.add_argument("--tdd-offset-s", type=float, default=0.0, metavar="S",
+                     help="TDD slave: where its slot should start, after the master's.")
+    ap.add_argument("--tdd-report-file", default=None, metavar="PATH",
+                     help="TDD master: write where the slave's slot is heard here, for its modulator "
+                          "(hf_ofdm_tx.py --tdd-report-file) to send to the slave.")
+    ap.add_argument("--tdd-tx-fifo", default=None, metavar="PATH",
+                     help="TDD: also TRANSMIT, on this receiver's own radio (--input pluto), the raw "
+                          "complex64 samples written to this FIFO by hf_ofdm_tx.py --output pipe. One "
+                          "process then knows its own slot timing from the sample counts.")
+    ap.add_argument("--tdd-tx-gain", type=float, default=-10.0, metavar="DB",
+                     help="TDD (--tdd-tx-fifo): transmit gain in dB re full power (default -10).")
     ap.add_argument("--drop-if-slow", action="store_true",
                      help="If a fragment's own decode (search+compute) took longer than its "
                           "real-time budget, discard it instead of still writing it out. Without "
@@ -1854,6 +2098,9 @@ def run_decode_loop(cfg, args, reader):
     # through the stream, so one fragment is always fully resolved before
     # the next is even attempted.
     tdd = _tdd_geometry(cfg, args) if args.tdd_cycle_s else None
+    args.tdd_state = tdd    # the spectrum shows only the other station's slot
+    if tdd and tdd["adjust_file"]:
+        _tdd_set_muted(tdd, True, "until it hears the master")
     if tdd:
         print(f"[tdd] far end sends {tdd['per_slot']} fragment(s) ({tdd['burst'] / cfg.fs * 1000:.1f} ms) "
               f"every {args.tdd_cycle_s * 1000:.0f} ms; the rest of each cycle is skipped", file=sys.stderr)
@@ -1884,8 +2131,7 @@ def run_decode_loop(cfg, args, reader):
 
         if result["status"] == "eof":
             break
-        if tdd:
-            _tdd_track(tdd, result, state, cfg)
+        own_fragment = _tdd_track(tdd, result, state, cfg) if tdd else False
         # Low SNR: a fragment that fails CRC costs ~0.35-0.55 s of decode
         # (LDPC runs to its iteration limit, then a resync retry) against
         # 0.24 s of air time, so a bad patch built up seconds of lag --
@@ -1942,6 +2188,8 @@ def run_decode_loop(cfg, args, reader):
                   f"Time={elapsed:.2f}s", file=sys.stderr)
             break
 
+        if own_fragment:
+            continue  # our own transmission, heard through the radio's leakage: not for output
         payload, crc_ok, cfo_hz, ber, evm = (
             result["payload"], result["crc_ok"], result["cfo_hz"], result["ber"], result["evm"])
         if len(payload) < FRAG_HEADER.size:
@@ -2016,11 +2264,22 @@ def run_decode_loop(cfg, args, reader):
                                  else CFO_EMA_ALPHA * cfo_hz + (1 - CFO_EMA_ALPHA) * prev_cfo_hz)
         state["consecutive_failures"] = 0
 
+        now_ok = time.monotonic()
         if expected_next_frag_idx is not None and frag_idx != expected_next_frag_idx:
             gap = (frag_idx - expected_next_frag_idx) % 65536
-            print(f"  ! sequence gap: expected seq={expected_next_frag_idx}, got seq={frag_idx} "
-                  f"({gap} fragment(s) lost -- no return channel to request a resend)", file=sys.stderr)
+            # more "lost" than could have been sent since the last good one:
+            # the transmitter restarted (its count began again at 0) -- e.g.
+            # 1932 -> 0 read as 63604 lost, and the GUI then froze adding
+            # 63604 lost events to its lock lamps
+            since = now_ok - state.get("last_ok_time", now_ok)
+            if gap > since / SEQ_MIN_FRAGMENT_S + SEQ_GAP_SLACK:
+                print(f"  ! transmitter restarted: seq {expected_next_frag_idx - 1} -> {frag_idx}",
+                      file=sys.stderr)
+            else:
+                print(f"  ! sequence gap: expected seq={expected_next_frag_idx}, got seq={frag_idx} "
+                      f"({gap} fragment(s) lost -- no return channel to request a resend)", file=sys.stderr)
         expected_next_frag_idx = (frag_idx + 1) % 65536
+        state["last_ok_time"] = now_ok
 
         # Only drop when actually BEHIND live -- one slow fragment is
         # normally caught up over the next few (their samples are already

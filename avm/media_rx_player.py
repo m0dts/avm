@@ -705,6 +705,38 @@ class _PwCatStream:
             pass
 
 
+class _RateConverter:
+    """Sample-rate conversion for a device that won't take the decoder's
+    rate: linear interpolation, carrying its position and last sample from
+    one chunk to the next so the joins are seamless (no clicks). Plenty for
+    Codec2/Opus speech to a 44.1/48 kHz device."""
+
+    def __init__(self, in_rate, out_rate, channels):
+        self.step = in_rate / out_rate
+        self.prev = np.zeros(channels, np.float64)
+        self.next_t = 0.0   # next output time, in input samples from the chunk's first
+
+    def process(self, pcm):
+        x = np.asarray(pcm, np.float64)
+        one_d = x.ndim == 1
+        if one_d:
+            x = x[:, None]
+        n = len(x)
+        if n == 0:
+            return pcm
+        ext = np.vstack([self.prev[None, :], x])          # ext[0] is time -1
+        t = np.arange(self.next_t, n - 1 + 1e-9, self.step)
+        pos = t + 1.0
+        i0 = np.floor(pos).astype(np.int64)
+        frac = (pos - i0)[:, None]
+        i1 = np.minimum(i0 + 1, n)
+        y = ext[i0] + frac * (ext[i1] - ext[i0])
+        self.next_t = (t[-1] + self.step - n) if len(t) else self.next_t - n
+        self.prev = x[-1]
+        y = np.clip(np.round(y), -32768, 32767).astype(np.int16)
+        return y[:, 0] if one_d else y
+
+
 class AudioPlaybackWorker:
     """Owns the actual audio OUTPUT device and every blocking write() to
     it, on its own thread -- exactly the same fix VideoWorker above
@@ -802,12 +834,29 @@ class AudioPlaybackWorker:
         return self.decoded_total_s - (time.monotonic() - self.start_wall_t)
 
     def _open_stream(self):
+        self._conv = None
         if _use_pw_cat(self.device):
             self._stream = _PwCatStream(self._sample_rate, self._channels)
             _log("[audio] output via pw-cat (native PipeWire)")
             return
-        self._stream = sd.OutputStream(samplerate=self._sample_rate, channels=self._channels,
-                                        dtype="int16", latency="high", device=self.device)
+        try:
+            self._stream = sd.OutputStream(samplerate=self._sample_rate, channels=self._channels,
+                                            dtype="int16", latency="high", device=self.device)
+        except sd.PortAudioError as e:
+            # Many USB sound devices (e.g. the C-Media "USB PnP Sound Device")
+            # only play 44.1/48 kHz, not Codec2's 8 kHz: "Invalid sample
+            # rate". Play at the device's own rate and convert on the way out.
+            try:
+                rate = int(sd.query_devices(self.device, "output")["default_samplerate"])
+            except Exception:
+                raise e
+            if rate == self._sample_rate:
+                raise
+            self._stream = sd.OutputStream(samplerate=rate, channels=self._channels,
+                                            dtype="int16", latency="high", device=self.device)
+            self._conv = _RateConverter(self._sample_rate, rate, self._channels)
+            _log(f"[audio] the device doesn't take {self._sample_rate} Hz ({e}): "
+                 f"playing at its {rate} Hz, converted")
         self._stream.start()
 
     def _write(self, pcm):
@@ -850,6 +899,8 @@ class AudioPlaybackWorker:
             self._underflow_log_t = now
 
     def _write_chunk(self, pcm):
+        if getattr(self, "_conv", None) is not None:
+            pcm = self._conv.process(pcm)
         try:
             self._note_underflow(self._stream.write(pcm))
             return

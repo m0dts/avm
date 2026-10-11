@@ -197,7 +197,7 @@ if _NEW_G:
 # Min-Sum Belief Propagation Decoder
 # ---------------------------------------------------------------------------
 if _HAVE_NUMBA:
-    @numba.njit(cache=True)
+    @numba.njit(cache=True, nogil=True)
     def _min_sum_decode_numba(llr, check_edges, check_deg, var_edges, var_deg,
                               edge_var, edge_check, max_iter, alpha, stall_iter):
         M = check_edges.shape[0]
@@ -279,7 +279,7 @@ if _HAVE_NUMBA:
 
         return dec, max_iter, False
 
-    @numba.njit(cache=True)
+    @numba.njit(cache=True, nogil=True)
     def _layered_min_sum_numba(llr, check_edges, check_deg, edge_var, max_iter, alpha, stall_iter, post, c2v):
         """Row-layered (serial-C) normalized min-sum: each check row is
         updated in turn against the bit posteriors the rows before it in the

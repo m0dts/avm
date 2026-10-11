@@ -3,6 +3,17 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.17 (2026-10-11)
+- NOT compatible with earlier versions over the air: update both ends
+- All modes: fragment header scrambled -- fixes spectral leakage either side of mode A (worst at 160/250 kHz) and its header decode failures
+- VU: the centre carrier is now used too (slightly higher bitrate)
+- Decoder no longer holds up other work on the Pi (smoother TX/RX, fewer gaps)
+- Smaller gaps between transmitted fragments
+- Header lamp now only judges headers (no longer turns orange when fragments are lost as the signal improves)
+- USB audio devices that don't support 48 kHz now play at their own rate
+- GUI no longer freezes after a very large fragment loss
+- Quicker first start (codec and modem warm-up)
+
 ## 1.0.16 (2026-10-10)
 - 16QAM and VU 80/160 kHz: receiver found each frame's start on the first try again (since 1.0.1 most fragments were decoded twice) -- about half the RX CPU, no more breaks at 16QAM 160
 - TX timing now matches each fragment's real air time (the framer ran 1.6% fast and the transmitter dropped the excess)
