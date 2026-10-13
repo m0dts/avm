@@ -112,6 +112,24 @@ def make_reader(args, cfg):
     if args.input == "pipe":
         reader = StdinReader()
         fe_lo = 0.0  # pipe input: --lo-offset-hz ignored, as before
+    elif args.sdr == "kiwi":
+        # KiwiSDR over the network (--pluto-uri is its host:port): it sets the
+        # rate (~12 kS/s) and delivers IQ centred on --rf-freq -- no LO offset
+        from kiwi_source import KiwiRxSource
+        reader = KiwiRxSource(args.pluto_uri, args.rf_freq, rx_gain_db=args.rx_gain,
+                              gain_file=args.gain_file, freq_offset_file=args.freq_offset_file)
+        args.radio_source = reader
+        fe_lo = 0.0
+        capture_fs = reader.sample_rate_hz
+        use_frontend = capture_fs != cfg.fs and not args.legacy_frontend
+        args.capture_sample_rate = capture_fs
+        args.frontend_active = use_frontend
+        args.sample_rate = capture_fs
+        occupied = len(cfg.data_bins) * cfg.carrier_spacing
+        if occupied > 0.94 * capture_fs:
+            print(f"WARNING: mode {cfg.mode} at this width occupies {occupied / 1e3:.1f} kHz, more than this "
+                  f"KiwiSDR's {capture_fs / 1e3:.2f} kS/s stream carries -- use 10 kHz (or a wideband Kiwi)",
+                  file=sys.stderr)
     else:
         # Lazy import: SoapySDR (and the PlutoSDR support module) is only
         # needed when actually asked for -- most uses of this script are the
@@ -146,6 +164,14 @@ def make_reader(args, cfg):
             args.sample_rate = capture_fs
             # the LO-offset shift: the front end's job if there is one, else the source's
             reader.lo_offset_hz = 0.0 if use_frontend else args.lo_offset_hz
+    if args.invert_spectrum and args.input != "pipe":
+        # mirror the spectrum (I/Q conjugated as it arrives): an inverting
+        # receive path -- some radios' IQ order, a high-side-LO converter.
+        # The LO offset mirrors with it, so it is removed the other way.
+        reader.invert = True
+        reader.lo_offset_hz = -reader.lo_offset_hz
+        fe_lo = -fe_lo
+        print("Spectrum inverted (--invert-spectrum)", file=sys.stderr)
     if not use_frontend:
         return reader
     from rx_frontend import FrontEnd, FrontEndReader
@@ -1782,7 +1808,7 @@ def main():
                           "--occupancy. One of DRM's official values (4.5, 5, 9, 10, 18, 20) uses "
                           "its exact spec'd carrier range; anything else (e.g. 40, 80) falls back "
                           "to a symmetric carrier-count scaling instead.")
-    ap.add_argument("--modulation", choices=["qpsk", "16qam"], default="qpsk",
+    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam"], default="qpsk",
                      help="PAYLOAD modulation (default qpsk) -- must match whatever hf_ofdm_tx.py "
                           "was given, or every payload symbol will decode to noise (the preamble/"
                           "pilots/header stay QPSK either way, so sync itself won't be affected, "
@@ -1846,13 +1872,18 @@ def main():
                           "gain-control/DC-offset/quadrature-tracking settling time -- confirmed for "
                           "real: a freshly-started RX decoded far worse than the identical settings "
                           "moments later after just restarting the RX process. 0 disables it.")
-    ap.add_argument("--sdr", choices=["pluto", "lime", "rtlsdr", "airspy", "airspyhf", "sdrplay"], default="pluto",
+    ap.add_argument("--sdr", choices=["pluto", "lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi"],
+                     default="pluto",
                      help="Radio for --input pluto: 'pluto' (PlutoSDR, default), 'lime' "
                           "(LimeSDR-USB or LimeSDR Mini; manual gain only, no AGC) or 'rtlsdr' "
                           "(RTL2832U dongle, receive only; --sample-rate must be 225-300 kS/s or "
                           "0.9-3.2 MS/s, e.g. 1024000), 'airspy' (Airspy R2/Mini), 'airspyhf' "
                           "(Airspy HF+) or 'sdrplay' (SDRplay RSP), receive only, at their nearest "
-                          "offered sample rate.")
+                          "offered sample rate; 'kiwi' (a KiwiSDR over the network, --pluto-uri "
+                          "host:port, at the rate it sends, ~12 kS/s).")
+    ap.add_argument("--invert-spectrum", action="store_true",
+                     help="Mirror the received spectrum (conjugate the IQ): for a receive path that "
+                          "inverts it. Inverted, sync still triggers but every header fails.")
     ap.add_argument("--sdr-ppm", type=float, default=0.0,
                      help="RTL-SDR crystal correction in ppm (a dongle without a TCXO can be "
                           "+-50 ppm: 21 kHz at 432 MHz, beyond the HF modes' CFO search).")

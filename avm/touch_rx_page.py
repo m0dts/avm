@@ -42,7 +42,7 @@ LAMP_MAX_LOST = 200  # lost fragments counted for the lamps per reported gap
 DUPLEX_RESTART_DELAY_MS = 2000  # duplex RX died: TX+RX restart after this
 # Header / Frame lock lamps under the video: over the last LOCK_WINDOW_S
 # (longer if fragments come further apart), all / some / none decoded
-LOCK_WINDOW_S = 2.0
+LOCK_WINDOW_S = 1.0   # halved (was 2.0): the lamps react faster
 LAMP_ALL, LAMP_SOME, LAMP_NONE, LAMP_OFF = "#43a047", "#fb8c00", "#e53935", "#4a4d52"
 # spectrum Auto: re-fit every this-many seconds; manual mode uses this dB/div
 AUTOSCALE_S = 5
@@ -74,6 +74,7 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
     sdr = "pluto"
     rtl_ppm = 0.0
     lime_port = "Auto"
+    invert_spectrum = False  # the Config tab's RX spectrum: Inverted
     tdd = None          # duplex (touch_widgets.tdd_config): this receiver also transmits
     tdd_tx_gain = -10.0
 
@@ -85,6 +86,8 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
             cmd += ["--spectrum-span-hz", f"{self.span_hz:.0f}"]
         if self.sdr in tw.GAIN_FILE_RADIOS:
             cmd += ["--sdr", self.sdr, "--gain-file", tw.gain_file_path("rx")]
+        if self.invert_spectrum:
+            cmd += ["--invert-spectrum"]
         # live receive offset (the page's Offset stepper), any radio
         cmd += ["--freq-offset-file", tw.freq_offset_file_path()]
         # live spectrum averaging (the Config tab)
@@ -192,12 +195,14 @@ class RxPage(QtWidgets.QWidget):
         self.freq = tw.FreqButton("RX frequency", s_get(settings, "rx_freq", 145500000))
         self.mode = tw.Segmented([(m, m) for m in tw.MODES], tw.saved_mode(s_get(settings, "rx_mode", "A")))
         self.bw = tw.Segmented([(b, b) for b in tw.BANDWIDTHS_KHZ], tw.saved_bandwidth(s_get(settings, "rx_bw", "80")))
-        self.mod = tw.Segmented([("qpsk", "QPSK"), ("16qam", "16QAM")], s_get(settings, "rx_mod", "qpsk"))
+        self.mod = tw.Segmented([("qpsk", "QPSK"), ("16qam", "16QAM"), ("32qam", "32QAM")], s_get(settings, "rx_mod", "qpsk"))
         self.gain = tw.Stepper(0, 73, 1, s_get(settings, "rx_gain", 40), " dB")
         self.audio_out = tw.Picker("Audio output", self._audio_outputs,
                                    s_get(settings, "rx_audio", self.engine.audio_device.currentText()))
         # spectrum reference level (top of the plot), live
-        self.ref = tw.Stepper(-100, 10, 5, s_get(settings, "rx_ref", -25), " dB")
+        # wide: a KiwiSDR that keeps its own AGC on delivers ~-16 dBFS, which
+        # draws at +5..+20 dB here (planet3-style manual gain: ~-60)
+        self.ref = tw.Stepper(-140, 40, 5, s_get(settings, "rx_ref", -25), " dB")
         # Auto: re-fit ref level and dB/div to the spectrum every AUTOSCALE_S
         self.ref_auto = QtWidgets.QPushButton("Auto")
         self.ref_auto.setCheckable(True)
@@ -296,22 +301,27 @@ class RxPage(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     def _apply_to_engine(self):
-        tw.enforce_mode_bandwidth(self.mode, self.bw)
+        # a KiwiSDR's ~12 kS/s stream carries 10 kHz only
+        tw.enforce_mode_bandwidth(self.mode, self.bw, only_khz="10" if self.engine.sdr == "kiwi" else None)
         # after the width check: it can change the width (e.g. VU needs 80 kHz+)
         self._update_tuning_bar()
         e = self.engine
         # how the Pluto is reached: the route picked in the radio list, else
         # its usual network address (pluto_soapy_sink falls back to a search)
-        e.pluto_uri.setText(self.radio.pluto_uri or tw.default_pluto_uri())
+        e.pluto_uri.setText(tw.KIWI_SERVER if e.sdr == "kiwi" else (self.radio.pluto_uri or tw.default_pluto_uri()))
         e.input_mode.setCurrentText("pluto")
         e.rf_freq.setText(str(self.freq.hz()))
         e.mode.setCurrentText(self.mode.value())
         e.occupancy.setCurrentText(self.bw.value())
-        e.lo_offset_hz.setValue(tw.lo_offset_hz(self.bw.value()))
+        e.lo_offset_hz.setValue(0 if e.sdr == "kiwi" else tw.lo_offset_hz(self.bw.value()))  # Kiwi: IQ arrives centred
         e.pluto_sample_rate.setCurrentText(str(tw.RTL_SAMPLE_RATE if e.sdr == "rtlsdr" else tw.sdr_rate(self.bw.value())))
         e.fragment_size.setValue(tw.fragment_size(self.bw.value()))  # before the audio latency below
         e.span_hz = SPECTRUM_SPAN_X * float(self.bw.value()) * 1000
-        e.spectrum_averages.setValue(SPECTRUM_AVERAGES)
+        if e.sdr == "kiwi":
+            e.span_hz = min(e.span_hz, 11000.0)  # all of a ~12 kS/s Kiwi stream, no more
+        # the Config tab's choice (was reset to the default here, and RX start
+        # then wrote that default to the live file: the choice never stuck)
+        e.spectrum_averages.setValue(getattr(self, "_spec_avg", SPECTRUM_AVERAGES))
         # Audio arrives one fragment at a time, so the buffer must outlast
         # the gap between fragments: 0.2 s ran dry continuously in mode C
         # (a fragment every 360 ms) -- heard as no audio.
@@ -469,7 +479,9 @@ class RxPage(QtWidgets.QWidget):
         y = y[np.isfinite(y)]
         if len(y) < 16:
             return
-        peak, floor = np.percentile(y, 99), np.percentile(y, 10)
+        # the real peak: the 99th percentile let narrow strong signals (a
+        # KiwiSDR band's CW stations, carriers, spurs) run off the top
+        peak, floor = float(np.max(y)), np.percentile(y, 10)
         ref = math.ceil((peak + 2) / 5) * 5
         div = min(AUTOSCALE_MAX_DB_PER_DIV, max(2.5, math.ceil((ref - (floor - 3)) / 10 / 2.5) * 2.5))
         self.ref.set_value(ref)          # display only (no emit: stays on Auto)
@@ -485,11 +497,12 @@ class RxPage(QtWidgets.QWidget):
         if not self.freq.in_range():
             msg = (f"{self.freq.hz() / 1e6:g} MHz is outside the {tw.RADIO_NAMES.get(sdr, sdr)}'s "
                    f"range -- set a new RX frequency")
-            self.status.setText(msg)
-            tw.notices().add("RX", msg)
+            tw.notices().add("RX", msg)  # radio messages: errors list only
         self.lime_port.setVisible(sdr == "lime")
         self.ppm.setVisible(sdr == "rtlsdr")
-        self.gain.hi = {"lime": 61, "rtlsdr": 49, "airspy": 45, "airspyhf": 45}.get(sdr, 73)
+        self.gain.hi = {"lime": 61, "rtlsdr": 49, "airspy": 45, "airspyhf": 45, "kiwi": 120}.get(sdr, 73)
+        # a KiwiSDR's manual gain 0 is silence (its output scales from nothing)
+        self.gain.lo = 10 if sdr == "kiwi" else 0
         self.gain.set_value(self.gain.value(), emit=True)
         uri = self.radio.pluto_uri
         changed_uri = uri != getattr(self, "_pluto_uri", uri)
@@ -575,7 +588,6 @@ class RxPage(QtWidgets.QWidget):
         peer = getattr(self, "peer", None)
         if (self.engine.sdr == "lime" and peer is not None and peer.is_running()
                 and peer.engine.sdr == "lime"):
-            self.status.setText("LimeSDR busy: TX is using it (one Lime can't do both)")
             tw.notices().add("RX", "Not started: the LimeSDR is in use by TX (one Lime can't do both)")
             return True
         return False
@@ -583,12 +595,22 @@ class RxPage(QtWidgets.QWidget):
     def start(self):
         if self._lime_busy():
             return
+        if not self.freq.in_range():
+            # the driver would quietly open at the nearest frequency it can tune
+            lo, hi = self.freq._range
+            tw.notices().add("RX", f"Not started: {self.freq.hz() / 1e6:g} MHz is outside the "
+                                    f"{tw.RADIO_NAMES.get(self.engine.sdr, self.engine.sdr)}'s range "
+                                    f"({lo:g}-{hi:g} MHz) -- set a new RX frequency")
+            return
+        if self.engine.sdr == "kiwi" and (self.bw.value() != "10" or self.mode.value() == "VU"):
+            tw.notices().add("RX", "Not started: the KiwiSDR only carries 10 kHz -- set 10 kHz, mode A-D")
+            return
         found, why = tw.radio_present(self.engine.sdr, self.engine.pluto_uri.text().strip() or None)
         if not found:
-            self.status.setText(f"Not started: {why}")
-            tw.notices().add("RX", f"Not started: {why}")
+            tw.notices().add("RX", f"Not started: {why}")  # radio messages: errors list only
             return
         self._apply_to_engine()
+        self._radio_error = ""
         self._ok = self._lost = self._bad = 0
         self._mer = []
         self._cfo = []
@@ -637,6 +659,12 @@ class RxPage(QtWidgets.QWidget):
         err = tw.error_line(line)
         if err:
             tw.notices().add("RX", err)
+        # KiwiSDR trouble (refused, full, password, dropped...): to the errors
+        # list, and kept as the reason if RX then stops
+        if "KiwiSDR" in line and "RX active" not in line:
+            self._radio_error = line[line.index("KiwiSDR"):].strip()
+            if not err:
+                tw.notices().add("RX", self._radio_error)
         # MER from each fragment's EVM (RMS error / ideal): MER = -20 log10(EVM)
         m = re.search(r"Fragment seq=\d+: .*?EVM=([\d.]+)%", line)
         if m and float(m.group(1)) > 0:
@@ -692,15 +720,27 @@ class RxPage(QtWidgets.QWidget):
                                 self.peer.start()
                     QtCore.QTimer.singleShot(DUPLEX_RESTART_DELAY_MS, restart)
                     return
+                why = getattr(self, "_radio_error", "")
                 self.status.setText("RX stopped unexpectedly")
-                tw.notices().add("RX", "RX stopped unexpectedly")
+                tw.notices().add("RX", f"RX stopped: {why}" if why else "RX stopped unexpectedly")
                 return
             self.status.setText(self._status_line())
             self._update_lamps()
 
+    def set_invert_spectrum(self, on):
+        """The Config tab's RX spectrum (Normal / Inverted): applied at once
+        -- a running receiver is restarted."""
+        if on == self.engine.invert_spectrum:
+            return
+        self.engine.invert_spectrum = on
+        if self.is_running():
+            self.stop()
+            self.start()
+
     def set_spectrum_averages(self, n):
         """FFT frames averaged per spectrum update (the Config tab: 4, 8,
         16 or 32). Live: the running receiver re-reads it (no restart)."""
+        self._spec_avg = int(n)
         self.engine.spectrum_averages.setValue(int(n))
         self.s["rx_spec_avg"] = int(n)
         tw.write_spectrum_averages_file(n)
@@ -716,11 +756,11 @@ class RxPage(QtWidgets.QWidget):
     def _lock_window(self):
         """Seconds the lamps judge over: LOCK_WINDOW_S, or longer when
         fragments are further apart than that (slow modes), so a window
-        always spans a couple of them."""
+        always spans at least one of them (1.25x the gap; was 2.5x)."""
         times = [e[0] for e in self._events]
         gaps = [b - a for a, b in zip(times, times[1:]) if b > a]
         typical = sorted(gaps)[len(gaps) // 2] if gaps else 0.0
-        return max(LOCK_WINDOW_S, 2.5 * typical)
+        return max(LOCK_WINDOW_S, 1.25 * typical)
 
     def _update_lamps(self):
         cutoff = time.monotonic() - max(STATUS_WINDOW_S, self._lock_window())

@@ -339,11 +339,11 @@ class MediaRxWindow(QtWidgets.QMainWindow):
 
         self.occupancy = QtWidgets.QComboBox()
         self.occupancy.setEditable(True)
-        self.occupancy.addItems(["80", "20", "40", "160", "250"])
+        self.occupancy.addItems(["80", "10", "20", "40", "160", "250"])
         form.addRow("Occupancy (kHz)", self.occupancy)
 
         self.modulation = QtWidgets.QComboBox()
-        self.modulation.addItems(["qpsk", "16qam"])
+        self.modulation.addItems(["qpsk", "16qam", "32qam"])
         form.addRow("Modulation", self.modulation)
 
         self.fec = QtWidgets.QComboBox()

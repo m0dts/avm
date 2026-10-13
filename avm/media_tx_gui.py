@@ -43,7 +43,7 @@ H264_RESOLUTIONS = ["160x90", "192x108", "256x144", "320x180", "384x216"]
 # 16:9 only meets at 256x144 and 512x288; the rest are the nearest sizes
 # that fit (aspect 1.71-1.83 against 16:9's 1.78). Capped at 384x224: larger
 # frames cost more Pi 4 CPU than the links can usefully fill.
-WAVELET_RESOLUTIONS = ["192x112", "224x128", "256x144", "288x160", "320x176", "352x192",
+WAVELET_RESOLUTIONS = ["128x80", "192x112", "224x128", "256x144", "288x160", "320x176", "352x192",
                        "384x224"]
 # Inherited by every child process: one BLAS thread each (see hf_ofdm_tx.py --
 # OpenBLAS's idle worker threads busy-wait and cost ~1 core on a Pi 4).
@@ -303,12 +303,12 @@ class MediaTxWindow(QtWidgets.QMainWindow):
 
         self.occupancy = QtWidgets.QComboBox()
         self.occupancy.setEditable(True)
-        self.occupancy.addItems(["80", "20", "40", "160", "250"])
+        self.occupancy.addItems(["80", "10", "20", "40", "160", "250"])
         self.occupancy.setToolTip("Occupancy (kHz)")
         form.addPair("Mode", self.mode, "kHz", self.occupancy)
 
         self.modulation = QtWidgets.QComboBox()
-        self.modulation.addItems(["qpsk", "16qam"])
+        self.modulation.addItems(["qpsk", "16qam", "32qam"])
 
         self.fec = QtWidgets.QComboBox()
         self.fec.addItems(["viterbi", "ldpc"])
@@ -463,6 +463,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         self.codec2_mode.setEnabled(is_codec2)
         self.audio_bitrate.setEnabled(not is_codec2 and getattr(self, "_audio_enabled", True))
         self._recalculate_bitrates()
+        self._check_audio_packing()  # an Opus warning must not outlive Opus
 
     def _on_force_audio_only_toggled(self, checked):
         # Mutually exclusive with force_video_only -- both checked at
@@ -619,7 +620,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
             self._video_enabled = not forced_audio_only
             self._set_video_widgets_enabled(self._video_enabled)
             if not self.video_bitrate_manual.isChecked():
-                self.video_bitrate.setValue(round(video_kbps, 1))
+                self.video_bitrate.setValue(math.floor(video_kbps * 10) / 10)  # down: never over what fits
             self.link_capacity_label.setText(
                 f"~{total_kbps:.1f}kbps after TLV overhead (~{tlv_overhead_frac*100:.0f}%) and "
                 f"{(1 - TIMING_MARGIN_FRAC) * 100:.0f}% timing margin -> "
@@ -698,8 +699,11 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         # The wavelet codec degrades smoothly down to a few hundred bits
         # per frame (its per-frame size is exact at any rate), unlike
         # x264 which starves its VBV well before that.
+        # 2 kbps: 10 kHz QPSK (~5.6 kbps) still carries a 1-2 fps picture
+        # -- tested on a webcam scene, 150-700 bytes/frame sharpens to
+        # 24-29 dB within ~12 frames while the scene holds still.
         if self.video_codec.currentText() == "wavelet":
-            VIDEO_MIN_KBPS = 6.0
+            VIDEO_MIN_KBPS = 2.0
         forced_audio_only = getattr(self, "force_audio_only", None) is not None \
             and self.force_audio_only.isChecked()
         forced_video_only = getattr(self, "force_video_only", None) is not None \
@@ -728,7 +732,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         if self._video_enabled:
             self.audio_bitrate.setValue(round(audio_kbps, 1))
             if not self.video_bitrate_manual.isChecked():
-                self.video_bitrate.setValue(round(video_kbps, 1))
+                self.video_bitrate.setValue(math.floor(video_kbps * 10) / 10)  # down: never over what fits
             self.link_capacity_label.setText(
                 f"~{total_kbps:.1f}kbps after TLV overhead (~{tlv_overhead_frac*100:.0f}%) and "
                 f"{(1 - TIMING_MARGIN_FRAC) * 100:.0f}% timing margin -> "
@@ -807,7 +811,9 @@ class MediaTxWindow(QtWidgets.QMainWindow):
             budget -= fragment_duration_s / AUDIO_PACKET_INTERVAL_S * (pkt + 1)
         frames_per_tick = fps * fragment_duration_s
         config_bytes = media_tx_framer.RECORD_HEADER_LEN + 6 + len(media_tx_framer.WAVELET_CODEC_TAG)
-        budget -= frames_per_tick / media_tx_framer.VIDEO_CONFIG_REPEAT_EVERY * config_bytes
+        configs_per_tick = max(frames_per_tick / media_tx_framer.VIDEO_CONFIG_REPEAT_EVERY,
+                               fragment_duration_s / media_tx_framer.VIDEO_CONFIG_REPEAT_S)
+        budget -= configs_per_tick * config_bytes
         frame_bytes = math.floor(budget * (1 - QUEUE_SLACK) / frames_per_tick - media_tx_framer.RECORD_HEADER_LEN)
         return max(0.0, frame_bytes * 8 * fps / 1000)
 
@@ -1253,6 +1259,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                "--fragment-size", str(self.fragment_size.value()),
                "--fragment-gap-ms", str(self.fragment_gap_ms.value()),
                "--amplitude", str(self.amplitude.value()),
+               *(["--papr-db", f"{self.papr_db:g}"] if getattr(self, "papr_db", 0) else []),
                "--stream",
                "--output", "pipe" if self.tdd else self.output_mode.currentText()]
         if self.trim_warmup_backlog.isChecked():

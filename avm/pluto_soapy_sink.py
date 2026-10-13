@@ -796,6 +796,8 @@ class PlutoRxSource:
     hf_ofdm_rx.py's decode path already know how to consume that shape
     and don't need to know or care where the bytes came from."""
 
+    invert = False  # mirror the spectrum (hf_ofdm_rx.py --invert-spectrum)
+
     def __init__(self, freq_hz, sample_rate_hz, rx_gain_db=30.0, agc=False,
                  uri=None, bandwidth_hz=None, buffer_size=1 << 15, stream_bufflen=None,
                  lo_offset_hz=0.0, warmup_discard_s=0.75, tune_offset_hz=None,
@@ -964,6 +966,8 @@ class PlutoRxSource:
                           f"{consecutive_timeouts} second(s) of nothing.", file=sys.stderr)
                 consecutive_timeouts = 0
                 samples = buf[:sr.ret].copy()
+                if self.invert:
+                    np.conjugate(samples, out=samples)
                 if self.lo_offset_hz:
                     # Undo the TX-side pre-shift, with a running sample
                     # counter (not reset per-chunk) so the correction

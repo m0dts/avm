@@ -122,6 +122,8 @@ def run_stream(cfg, args, sink, fixed_peak=None):
         # master puts its report of where it hears the slave there
         frag_payload = FRAG_HEADER.pack(frag_idx % 65536, total_field, len_field) + data
         waveform = ofdm.build_frame(cfg, frag_payload)
+        if args.papr_db:
+            waveform = ofdm.reduce_papr(cfg, waveform, args.papr_db)
 
         out_fs = cfg.fs
         if args.sample_rate is not None and args.sample_rate != cfg.fs:
@@ -472,7 +474,11 @@ def main():
                           "else (e.g. 40, 80 -- wider than DRM ever standardized, needs a "
                           "correspondingly wideband SDR) falls back to a symmetric carrier-count "
                           "scaling instead of an exact spec range.")
-    ap.add_argument("--modulation", choices=["qpsk", "16qam"], default="qpsk",
+    ap.add_argument("--papr-db", type=float, default=0.0,
+                     help="Peak reduction (clip and filter, receiver-transparent): limit peaks to this "
+                          "many dB above the average, e.g. 7. 0 = off. More average power from the same "
+                          "amplifier peak, for a little in-band distortion (a ceiling on MER).")
+    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam"], default="qpsk",
                      help="PAYLOAD modulation (default qpsk). 16qam doubles payload bits/carrier "
                           "(roughly double throughput at a given occupancy) but needs about "
                           "6-7dB more SNR for the same error rate -- an explicit per-link choice, "

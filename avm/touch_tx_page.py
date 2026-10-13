@@ -198,7 +198,7 @@ class TxPage(QtWidgets.QWidget):
         grid.setVerticalSpacing(3)  # 9 rows + START must fit 480 px
         self.source = tw.Picker("Source", list(SOURCES.values()),
                                 SOURCES.get(s_get(settings, "tx_source", "test"), SOURCES["test"]))
-        self.res = tw.Picker("Resolution (16:9)", media_tx_gui.WAVELET_RESOLUTIONS,
+        self.res = tw.Picker("Resolution", media_tx_gui.WAVELET_RESOLUTIONS,
                              _valid_res(s_get(settings, "tx_res", "256x144")))
         self.audio =tw.Segmented([("codec2", "Codec2"), ("opus", "Opus")], s_get(settings, "tx_audio", "codec2"))
         # Not every ffmpeg has a Codec2 encoder (e.g. the standard Windows
@@ -208,11 +208,11 @@ class TxPage(QtWidgets.QWidget):
             self.audio._buttons["codec2"].setEnabled(False)
             if self.audio.value() == "codec2":
                 self.audio.set_value("opus")
-        self.fps = tw.Segmented([(f, f) for f in ("4", "6", "8", "10", "12", "15")], s_get(settings, "tx_fps", "12"))
+        self.fps = tw.Segmented([(f, f) for f in ("1", "2", "4", "6", "8", "10", "12", "15")], s_get(settings, "tx_fps", "12"))
         self.freq = tw.FreqButton("TX frequency", s_get(settings, "tx_freq", 145500000))
         self.mode = tw.Segmented([(m, m) for m in tw.MODES], tw.saved_mode(s_get(settings, "tx_mode", "A")))
         self.bw = tw.Segmented([(b, b) for b in tw.BANDWIDTHS_KHZ], tw.saved_bandwidth(s_get(settings, "tx_bw", "80")))
-        self.mod = tw.Segmented([("qpsk", "QPSK"), ("16qam", "16QAM")], s_get(settings, "tx_mod", "qpsk"))
+        self.mod = tw.Segmented([("qpsk", "QPSK"), ("16qam", "16QAM"), ("32qam", "32QAM")], s_get(settings, "tx_mod", "qpsk"))
         self.gain = tw.Stepper(-89, 0, 1, s_get(settings, "tx_gain", -10), " dB")
         self.radio = tw.RadioPicker("TX radio (connected now)", settings.get("tx_sdr", settings.get("sdr", "pluto")),
                                     pluto_uri=settings.get("tx_pluto_uri", ""))
@@ -391,6 +391,18 @@ class TxPage(QtWidgets.QWidget):
         for lab in self._left_labels:
             lab.setFixedWidth(width)
 
+    def set_papr(self, db):
+        """The Config tab's TX peak reduction: 0 = off, else the peak limit
+        in dB above average (hf_ofdm_tx.py --papr-db). A running TX is
+        restarted to apply it."""
+        db = float(db)
+        if db == getattr(self.engine, "papr_db", 0.0):
+            return
+        self.engine.papr_db = db
+        if self.is_running():
+            self.stop()
+            self.start()
+
     def set_content(self, content):
         """What TX sends (the Config tab's Content): "auto" (video if the
         link has room, else audio only), "audio" (audio only) or "video"
@@ -417,8 +429,7 @@ class TxPage(QtWidgets.QWidget):
         if not self.freq.in_range():
             msg = (f"{self.freq.hz() / 1e6:g} MHz is outside the {tw.RADIO_NAMES.get(sdr, sdr)}'s "
                    f"range -- set a new TX frequency")
-            self.status.setText(msg)
-            tw.notices().add("TX", msg)
+            tw.notices().add("TX", msg)  # radio messages: errors list only
         self.lime_port.setVisible(sdr == "lime")
         uri = self.radio.pluto_uri
         if sdr != self.engine.sdr or uri != getattr(self, "_pluto_uri", uri):
@@ -549,9 +560,8 @@ class TxPage(QtWidgets.QWidget):
         peer = getattr(self, "peer", None)
         if (self.engine.sdr == "lime" and peer is not None and peer.is_running()
                 and peer.engine.sdr == "lime"):
-            self.status.setText("LimeSDR busy: RX is using it. One LimeSDR can't do TX and RX\n"
-                                "at once -- stop RX, or receive with another radio (e.g. an RTL-SDR).")
-            tw.notices().add("TX", "Not started: the LimeSDR is in use by RX (one Lime can't do both)")
+            tw.notices().add("TX", "Not started: the LimeSDR is in use by RX (one LimeSDR can't do TX and "
+                                   "RX at once -- stop RX, or receive with another radio)")
             return True
         return False
 
@@ -560,10 +570,16 @@ class TxPage(QtWidgets.QWidget):
                                 f"codec busy: {self.codec_busy()})")
         if self._lime_busy():
             return
+        if not self.freq.in_range():
+            # the driver would quietly open at the nearest frequency it can tune
+            lo, hi = self.freq._range
+            tw.notices().add("TX", f"Not started: {self.freq.hz() / 1e6:g} MHz is outside the "
+                                    f"{tw.RADIO_NAMES.get(self.engine.sdr, self.engine.sdr)}'s range "
+                                    f"({lo:g}-{hi:g} MHz) -- set a new TX frequency")
+            return
         found, why = tw.radio_present(self.engine.sdr, self.engine.pluto_uri.text().strip() or None)
         if not found:
-            self.status.setText(f"Not started: {why}")
-            tw.notices().add("TX", f"Not started: {why}")
+            tw.notices().add("TX", f"Not started: {why}")  # radio messages: errors list only
             return
         self._apply_to_engine()
         # don't go on air with no picture while the codec compiles: wait

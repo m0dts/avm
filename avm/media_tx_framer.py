@@ -111,6 +111,9 @@ AUDIO_PACKET_FIXED_TYPE = 0x0A  # like AUDIO_PACKET_TYPE, but no length field at
 # to the explicit-length type for anything that doesn't match (a real
 # bitrate change, or in principle a rare non-CBR-conforming frame).
 VIDEO_CONFIG_REPEAT_EVERY = 25  # video packets (~2s at 12.5fps) -- see the intra-refresh note above
+# ... and at least this often in time: at 1 fps, 25 packets was 25 s, and a
+# receiver joining mid-stream waited that long for its first picture
+VIDEO_CONFIG_REPEAT_S = 2.0
 RECORD_HEADER_LEN = 3           # 1 byte type + 2 byte length, per TLV record
 
 STATION_ID_TYPE = 0x0B  # next free record type after AUDIO_PACKET_FIXED_TYPE (0x0A)
@@ -740,12 +743,14 @@ def main():
                 # every piece in one tick: with frames bigger than a fragment
                 # (16QAM at low fps) the framer then made ~2x the link rate
                 # and the transmitter dropped most of it as stale.
-                if is_keyframe or video_packets_since_config == 0:
+                if (is_keyframe or video_packets_since_config == 0
+                        or time.monotonic() - state.get("video_config_t", 0.0) >= VIDEO_CONFIG_REPEAT_S):
                     cfg = state["video_config_record"]
                     if len(block) + len(cfg) > budget:
                         video_carry.extend(video_items[i:])
                         break
                     block.extend(cfg)
+                    state["video_config_t"] = time.monotonic()
                 room = budget - len(block)
                 if RECORD_HEADER_LEN + len(au) <= room:
                     block.extend(struct.pack(">BH", VIDEO_PACKET_TYPE, len(au)) + au)

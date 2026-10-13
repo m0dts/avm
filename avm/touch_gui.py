@@ -509,10 +509,12 @@ class TouchWindow(QtWidgets.QWidget):
     def _update_notice_btn(self):
         n = tw.notices().count()
         self.notice_btn.setText(f"⚠ {n}" if n else "⚠")
-        # red while there's something to read, dim otherwise
+        # red with white text while there's something to read, plain grey otherwise
         # (min-width here too: the tab buttons' style would make it 90 px)
-        self.notice_btn.setStyleSheet(f"color: {tw.STOP if n else tw.TEXT_DIM}; "
-                                      f"min-width: {round(NOTICE_BTN_W * self.scale)}px; padding: 0px;")
+        colours = (f"background: {tw.STOP}; color: white;" if n
+                   else f"background: {tw.BUTTON}; color: {tw.TEXT_DIM};")
+        self.notice_btn.setStyleSheet(f"{colours} min-width: {round(NOTICE_BTN_W * self.scale)}px; "
+                                      f"padding: 0px;")
 
     def _usb_needs(self, page, devs):
         """[(name, attached now)] for the USB devices this page uses."""

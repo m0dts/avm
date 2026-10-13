@@ -3,6 +3,22 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.18 (2026-10-13)
+- Compatible over the air with 1.0.17, except the new 32QAM (both ends need 1.0.18 to use it)
+- New 32QAM modulation: about 20% more throughput than 16QAM for about 2 dB more signal. Tested on air at 10 kHz -- higher bandwidths untested at 32QAM
+- New 10 kHz width, with 1 and 2 fps video and a 128x80 resolution: video works even in QPSK at 10 kHz
+- KiwiSDR as a receive radio: set its address under Config, KiwiSDR, then pick KiwiSDR as the RX radio (10 kHz, modes A-D)
+- Better HF reception in modes A, B and C: a new channel estimate copes far better with multipath and frequency-selective fading (receiver only, works with any transmitter)
+- TX peak reduction (Config, TX peak reduce): 2-4 dB more effective power from the same amplifier peak, decodable by any AVM receiver
+- RX spectrum Normal/Inverted option (Config) for receive paths that mirror the spectrum
+- At low frame rates the first picture now appears within a few seconds (was up to 25 s at 1 fps)
+- Radio problems now go to the errors list, whose button turns red when it has something
+- TX/RX refuse to start on a frequency outside the radio's range
+- Spectrum: auto level follows the true peak, wider level range, averaging None option, and the averaging choice now sticks
+- Lock lamps react faster
+- Fixes: Opus warning shown while using Codec2, false video warning at 1 fps, error pop-up when stopping TX, LimeSDR calibration pop-ups at HF
+- Config page: newer settings moved to the right-hand column
+
 ## 1.0.17 (2026-10-11)
 - NOT compatible with earlier versions over the air: update both ends
 - All modes: fragment header scrambled -- fixes spectral leakage either side of mode A (worst at 160/250 kHz) and its header decode failures

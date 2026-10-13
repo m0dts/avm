@@ -186,7 +186,13 @@ _ERROR_IGNORE = ("Broken pipe", "Error muxing", "Error writing trailer", "Error 
                  "error code: -32", "[video-stats]", "Traceback (most recent call last)",
                  # SoapySDR's Pluto driver looking for network Plutos while
                  # opening: harmless (no network Pluto, no avahi-daemon, Windows: no "local")
-                 "Unable to scan", "Avahi DNS-SD client")
+                 "Unable to scan", "Avahi DNS-SD client",
+                 # arecord killed mid-read as TX stops/restarts (EINTR)
+                 "Interrupted system call",
+                 # LimeSDR at HF (< ~30 MHz): its start-up calibration needs the
+                 # RX synthesiser, which can't tune that low -- expected, harmless
+                 "MCU error 3 (SXR tune failed)",
+                 "MCU error 5 (Loopback signal weak")
 
 
 def error_line(line):
@@ -491,7 +497,9 @@ class KeyboardDialog(QtWidgets.QDialog):
     station ID): digits, A-Z, / - . and space."""
     ROWS = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM-. "]
 
-    def __init__(self, title, text, max_len, parent):
+    HOST_ROWS = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM-.:"]  # host:port (no space)
+
+    def __init__(self, title, text, max_len, parent, rows=None):
         super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
         self.setModal(True)
         self._max = max_len
@@ -506,7 +514,7 @@ class KeyboardDialog(QtWidgets.QDialog):
         lay.addWidget(self.display)
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(4)
-        for r, keys in enumerate(self.ROWS):
+        for r, keys in enumerate(rows or self.ROWS):
             for c, k in enumerate(keys):
                 b = QtWidgets.QPushButton("space" if k == " " else k)
                 b.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -542,9 +550,10 @@ class TextButton(QtWidgets.QPushButton):
     """Shows short text; tapping opens the on-screen keyboard. Emits changed(text)."""
     changed = QtCore.pyqtSignal(str)
 
-    def __init__(self, title, text="", max_len=20, placeholder="(none)", parent=None):
+    def __init__(self, title, text="", max_len=20, placeholder="(none)", parent=None, rows=None):
         super().__init__(parent)
         self._title, self._max, self._placeholder = title, max_len, placeholder
+        self._rows = rows
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.set_text(text)
         self.clicked.connect(self._edit)
@@ -557,7 +566,7 @@ class TextButton(QtWidgets.QPushButton):
         self.setText(self._value or self._placeholder)
 
     def _edit(self):
-        d = KeyboardDialog(self._title, self._value, self._max, self)
+        d = KeyboardDialog(self._title, self._value, self._max, self, rows=self._rows)
         if d.exec_() and d.text() != self._value:
             self.set_text(d.text())
             self.changed.emit(self._value)
@@ -570,7 +579,7 @@ class TextButton(QtWidgets.QPushButton):
 # R820T2, 24-1800. Airspy HF+: 0.5 kHz-31 MHz and 60-260 MHz (gap between).
 # SDRplay RSP: 1 kHz-2 GHz.
 FREQ_RANGE_MHZ = {"pluto": (70.0, 6000.0), "lime": (0.1, 3800.0), "rtlsdr": (24.0, 1766.0),
-                  "airspy": (24.0, 1800.0), "airspyhf": (0.01, 260.0),
+                  "airspy": (24.0, 1800.0), "airspyhf": (0.01, 260.0), "kiwi": (0.01, 32.0),
                   "sdrplay": (0.001, 2000.0)}
 
 
@@ -799,7 +808,7 @@ def write_freq_offset_file(hz):
         pass
 
 
-BANDWIDTHS_KHZ = ("20", "40", "80", "160", "250")
+BANDWIDTHS_KHZ = ("10", "20", "40", "80", "160", "250")
 MODES = ("A", "B", "C", "D", "VU")  # VU: VHF/UHF (144/432 MHz) mobile + troposcatter, not DRM
 
 
@@ -838,7 +847,9 @@ def fragment_size(bw_khz):
     fragment's fixed decode work (sync, header, channel estimate) then
     covers twice the data; at 1024 a wide-mode fragment lasts only ~0.1 s
     and the Pi 4's decoder ran at ~90% of real time (measured at 320 kHz).
-    Costs about a fragment-time more latency."""
+    Costs about a fragment-time more latency. 10 kHz stays at 1024
+    (0.8-1.5 s a fragment): 256 lost a third of the link to each
+    fragment's fixed preamble/header and LDPC block padding."""
     return 2048 if float(bw_khz) > 200 else 1024
 
 
@@ -870,10 +881,24 @@ def ffmpeg_has_encoder(name):
     return not _ffmpeg_encoders or name in _ffmpeg_encoders
 
 
-def enforce_mode_bandwidth(mode_seg, bw_seg):
+def enforce_mode_bandwidth(mode_seg, bw_seg, only_khz=None):
     """Bandwidths a mode can't use are greyed out (and left if selected):
-    mode VU needs at least its min_occupancy_khz (see hf_ofdm_common)."""
+    mode VU needs at least its min_occupancy_khz (see hf_ofdm_common).
+    only_khz: the radio takes just this width (a KiwiSDR: "10") -- every
+    other width is greyed out, and so is any mode that can't run at it."""
     import hf_ofdm_common as ofdm
+    if only_khz is not None:
+        for m, button in mode_seg._buttons.items():
+            button.setEnabled(ofdm.DRM_MODES.get(m, {}).get("min_occupancy_khz", 0) <= float(only_khz))
+        if mode_seg.value() not in mode_seg._buttons or not mode_seg._buttons[mode_seg.value()].isEnabled():
+            mode_seg.set_value("A")
+        for value, button in bw_seg._buttons.items():
+            button.setEnabled(value == only_khz)
+        if bw_seg.value() != only_khz:
+            bw_seg.set_value(only_khz)
+        return
+    for button in mode_seg._buttons.values():
+        button.setEnabled(True)
     min_khz = ofdm.DRM_MODES.get(mode_seg.value(), {}).get("min_occupancy_khz", 0)
     for value, button in bw_seg._buttons.items():
         button.setEnabled(float(value) >= min_khz)
@@ -888,7 +913,7 @@ def saved_bandwidth(value):
 
 
 RADIO_NAMES = {"pluto": "PlutoSDR", "lime": "LimeSDR", "rtlsdr": "RTL-SDR",
-               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay"}
+               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay", "kiwi": "KiwiSDR"}
 # USB vendor:product IDs per radio, for the USB watchdog (touch_gui). A radio
 # that isn't on USB at all (e.g. a Pluto on the network) simply isn't watched.
 USB_IDS = {
@@ -949,9 +974,11 @@ def default_pluto_uri():
     return f"ip:{_pluto_probe['host']}" if _pluto_probe["host"] else ""
 
 
-RX_ONLY_RADIOS = ("rtlsdr", "airspy", "airspyhf", "sdrplay")
+RX_ONLY_RADIOS = ("rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi")
+# KiwiSDR to receive from, host:port (the Config tab's KiwiSDR row sets it)
+KIWI_SERVER = ""
 # radios whose live gain goes via a file the RX process watches (no iio_attr)
-GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf", "sdrplay")
+GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi")
 RTL_SAMPLE_RATE = 1024000  # an RTL-SDR rate (0.9-3.2 MS/s) that fits every bandwidth + LO offset
 
 
@@ -965,6 +992,15 @@ def radio_present(sdr, uri=None):
     never block a start just because the check failed."""
     import socket
     name = RADIO_NAMES.get(sdr, sdr)
+    if sdr == "kiwi":
+        import kiwi_source
+        server = uri or KIWI_SERVER
+        if not server:
+            return False, "no KiwiSDR server set -- Config tab, KiwiSDR"
+        if kiwi_source.server_answers(server):
+            return True, f"KiwiSDR at {server}"
+        return False, (f"KiwiSDR {server} not answering -- check the address (Config tab) "
+                       f"and your internet connection")
     devs = usb_devices()
     if devs is not None:
         if USB_IDS.get(sdr, set()) & devs:
@@ -1023,6 +1059,8 @@ def detect_rx_radios():
             found.append(f"SDRplay {model} {kw.get('serial', '')[-6:]}".strip())
     except Exception:
         pass
+    # KiwiSDR: over the network, so always offered (checked when RX starts)
+    found.append(f"KiwiSDR {KIWI_SERVER}" if KIWI_SERVER else "KiwiSDR (set server: Config tab)")
     return found or ["(no radios found -- check USB / power)"]
 
 
@@ -1098,7 +1136,7 @@ class RadioPicker(Picker):
     search_in_background = True  # the radio search takes ~1.7 s on a Pi 4
 
     SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL", "airspy": "Airspy", "airspyhf": "HF+",
-             "sdrplay": "SDRplay"}  # fits beside the frequency
+             "sdrplay": "SDRplay", "kiwi": "Kiwi"}  # fits beside the frequency
 
     def __init__(self, title, sdr, rx=False, pluto_uri=""):
         allowed = RADIO_NAMES if rx else {k: v for k, v in RADIO_NAMES.items() if k not in RX_ONLY_RADIOS}
@@ -1125,7 +1163,8 @@ class RadioPicker(Picker):
                else "rtlsdr" if label.startswith("RTL-SDR")
                else "airspyhf" if label.startswith("Airspy HF+")
                else "airspy" if label.startswith("Airspy")
-               else "sdrplay" if label.startswith("SDRplay") else None)
+               else "sdrplay" if label.startswith("SDRplay")
+               else "kiwi" if label.startswith("KiwiSDR") else None)
         if sdr == "pluto":
             self.pluto_uri = PLUTO_URIS.get(label, "")
         self.set_sdr(sdr or self.sdr)  # "(no radios found)" keeps the previous choice

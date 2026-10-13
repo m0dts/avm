@@ -1371,20 +1371,78 @@ def qam16_soft(symbols):
     return np.stack([b0, b1, b2, b3], axis=1).reshape(-1)
 
 
+# ---------------------------------------------------------------------------
+# 32-QAM: the standard "cross" constellation -- the 6x6 grid {+-1,+-3,+-5}^2
+# without its 4 corners (5 bits/carrier, between 16QAM's 4 and 64QAM's 6).
+# A cross can't be Gray coded; this labelling (found by search, minimising
+# bit differences between nearest neighbours) averages 1.12 bits per
+# neighbour step. Not separable into I/Q rails like square QAM, so hard and
+# soft decisions use the exact nearest-point / max-log over all 32 points.
+# Entry k is the point for the 5-bit label k (first bit = MSB).
+# ---------------------------------------------------------------------------
+_QAM32_NORM = np.sqrt(20.0)  # average power of the 32 cross points is 20
+_QAM32_TABLE = np.array([
+    (-5, 3), (-5, -3), (-3, -5), (-3, -3), (3, 3), (3, 5), (1, 3), (1, 5),
+    (5, 3), (5, -3), (-1, -5), (-1, -3), (3, -5), (3, -3), (1, -5), (1, -3),
+    (-5, 1), (-5, -1), (-3, 1), (-3, -1), (-3, 3), (-3, 5), (-1, 3), (-1, 5),
+    (5, 1), (5, -1), (-1, 1), (-1, -1), (3, 1), (3, -1), (1, 1), (1, -1)], float)
+_QAM32_GRID = _QAM32_TABLE[:, 0] + 1j * _QAM32_TABLE[:, 1]          # grid units
+_QAM32_POINTS = _QAM32_GRID / _QAM32_NORM                            # unit power
+_QAM32_BITS = ((np.arange(32)[:, None] >> np.arange(4, -1, -1)[None, :]) & 1).astype(np.uint8)
+
+
+def qam32_map(bits):
+    b = bits.reshape(-1, 5).astype(np.int64)
+    idx = (b[:, 0] << 4) | (b[:, 1] << 3) | (b[:, 2] << 2) | (b[:, 3] << 1) | b[:, 4]
+    return _QAM32_POINTS[idx]
+
+
+def _qam32_d2(symbols):
+    """Squared distance (grid units) from each symbol to each of the 32 points."""
+    y = np.asarray(symbols).reshape(-1) * _QAM32_NORM
+    return np.abs(y[:, None] - _QAM32_GRID[None, :]) ** 2
+
+
+def qam32_demap(symbols):
+    return _QAM32_BITS[np.argmin(_qam32_d2(symbols), axis=1)].reshape(-1)
+
+
+def qam32_soft(symbols):
+    """Max-log soft values, same convention and scale as qam16_soft
+    (positive = likely 0; grid units, levels 2 apart): per bit, (nearest
+    point with that bit 1 minus nearest with it 0) in squared distance / 4
+    -- exactly qam16_soft's sign-bit value where both are defined."""
+    d2 = _qam32_d2(symbols)
+    out = np.empty((d2.shape[0], 5))
+    for k in range(5):
+        one = _QAM32_BITS[:, k].astype(bool)
+        out[:, k] = (d2[:, one].min(axis=1) - d2[:, ~one].min(axis=1)) / 4.0
+    return out.reshape(-1)
+
+
+_BITS_PER_CARRIER = {"qpsk": 2, "16qam": 4, "32qam": 5}
+_MAPPERS = {"qpsk": qpsk_map, "16qam": qam16_map, "32qam": qam32_map}
+_DEMAPPERS = {"qpsk": qpsk_demap, "16qam": qam16_demap, "32qam": qam32_demap}
+_SOFTS = {"qpsk": qpsk_soft, "16qam": qam16_soft, "32qam": qam32_soft}
+# soft values from the zero-forced points at the true constellation scale
+# (QAM's magnitude decisions need it), not the matched-filter eq_soft
+TRUE_SCALE_SOFT = ("16qam", "32qam")
+
+
 def data_bits_per_symbol(cfg):
-    return 4 if cfg.data_modulation == "16qam" else 2
+    return _BITS_PER_CARRIER.get(cfg.data_modulation, 2)
 
 
 def data_map(cfg, bits):
-    return qam16_map(bits) if cfg.data_modulation == "16qam" else qpsk_map(bits)
+    return _MAPPERS.get(cfg.data_modulation, qpsk_map)(bits)
 
 
 def data_demap(cfg, symbols):
-    return qam16_demap(symbols) if cfg.data_modulation == "16qam" else qpsk_demap(symbols)
+    return _DEMAPPERS.get(cfg.data_modulation, qpsk_demap)(symbols)
 
 
 def data_soft(cfg, symbols):
-    return qam16_soft(symbols) if cfg.data_modulation == "16qam" else qpsk_soft(symbols)
+    return _SOFTS.get(cfg.data_modulation, qpsk_soft)(symbols)
 
 
 def _cfg_cache(store, cfg, key, build):
@@ -1778,7 +1836,7 @@ def ofdm_modulate(cfg, data_bits_per_symbol, symbol_modulations=None):
         sym = np.zeros(cfg.n_data, dtype=complex)
         sym[mask] = pilots[mask]
         if not np.all(mask):
-            mapper = qam16_map if symbol_modulations[k] == "16qam" else qpsk_map
+            mapper = _MAPPERS.get(symbol_modulations[k], qpsk_map)
             sym[~mask] = mapper(data_bits_per_symbol[k])
         freq = np.zeros(cfg.n_fft, dtype=complex)
         freq[cfg.fft_bins] = sym
@@ -1820,8 +1878,8 @@ def _ofdm_modulate_batched(cfg, data_bits_per_symbol, symbol_modulations):
     masks = phase_masks[np.arange(n) % period]
     syms = np.zeros((n, cfg.n_data), dtype=complex)
     syms[masks] = np.broadcast_to(pilot_sequence(cfg), (n, cfg.n_data))[masks]
-    for mod, mapper in (("qpsk", qpsk_map), ("16qam", qam16_map)):
-        rows = np.array([k for k in range(n) if (symbol_modulations[k] == "16qam") == (mod == "16qam")
+    for mod, mapper in _MAPPERS.items():
+        rows = np.array([k for k in range(n) if symbol_modulations[k] == mod
                          and not masks[k].all()], dtype=np.int64)
         if len(rows) == 0:
             continue
@@ -1946,6 +2004,95 @@ def _equalize_comb(rx_freq, pilots, freq_int, half_window, use_dd, dd_ref):
 
 
 @njit(cache=True, nogil=True)
+def _equalize_comb_tf(rx_freq, pilots, freq_int, half_window):
+    """Time-first comb equaliser: each carrier's pilots (one every freq_int
+    symbols) are interpolated across TIME first, then the carriers still
+    unknown are filled across frequency from neighbours only 1-2 carriers
+    away. _equalize_comb interpolates each symbol's own pilots across
+    frequency first: with echoes spread over several ms the channel's phase
+    turns more than half a cycle between pilots freq_int carriers apart and
+    the estimate aliases (measured: 4 paths over 4.5 ms on a 29 MHz path --
+    mode B's 1-in-2 pilots coped, 1-in-3/4 did not). Assumes the channel
+    changes little over freq_int symbols (a slow path). A residual common
+    frequency drift is measured from the pilots themselves and removed
+    before interpolating, then put back. Same outputs as _equalize_comb."""
+    n_sym, n = rx_freq.shape
+    hp = np.empty((n_sym, n), np.complex128)
+    for k in range(n_sym):
+        for c in range(n):
+            hp[k, c] = rx_freq[k, c] / pilots[c] if c % freq_int == k % freq_int else 0j
+    # common drift per symbol, from the same carrier freq_int symbols apart
+    acc = 0j
+    for k in range(n_sym - freq_int):
+        for c in range(k % freq_int, n, freq_int):
+            acc += hp[k + freq_int, c] * np.conj(hp[k, c])
+    w = np.angle(acc) / freq_int if acc != 0 else 0.0
+    rot = np.empty(n_sym, np.complex128)
+    for k in range(n_sym):
+        rot[k] = np.exp(1j * w * k)
+    h = np.empty((n_sym, n), np.complex128)
+    known = np.zeros((n_sym, n), np.bool_)
+    for c in range(n):
+        k0 = c % freq_int
+        if k0 >= n_sym:
+            continue
+        for k in range(n_sym):
+            # previous / next pilot symbols of this carrier
+            kp = k - ((k - k0) % freq_int) if k >= k0 else -1
+            kn = kp + freq_int if kp >= 0 else k0
+            if kp == k:
+                h[k, c] = hp[k, c] / rot[k]
+                known[k, c] = True
+            elif kp >= 0 and kn < n_sym:
+                a = (k - kp) / (kn - kp)
+                h[k, c] = (1 - a) * hp[kp, c] / rot[kp] + a * hp[kn, c] / rot[kn]
+                known[k, c] = True
+            elif kp >= 0 and k - kp <= freq_int:
+                h[k, c] = hp[kp, c] / rot[kp]
+                known[k, c] = True
+            elif kp < 0 and kn < n_sym and kn - k <= freq_int:
+                h[k, c] = hp[kn, c] / rot[kn]
+                known[k, c] = True
+    # fill the rest across frequency (complex, nearest known either side)
+    for k in range(n_sym):
+        last = -1
+        for c in range(n):
+            if known[k, c]:
+                if last == -1:
+                    for cc in range(c):
+                        h[k, cc] = h[k, c]
+                elif c - last > 1:
+                    for cc in range(last + 1, c):
+                        a = (cc - last) / (c - last)
+                        h[k, cc] = (1 - a) * h[k, last] + a * h[k, c]
+                last = c
+        if last == -1:
+            for cc in range(n):
+                h[k, cc] = hp[k, cc]  # (no pilots at all: shouldn't happen)
+        else:
+            for cc in range(last + 1, n):
+                h[k, cc] = h[k, last]
+    eq = np.empty((n_sym, n), np.complex128)
+    eq_soft = np.empty((n_sym, n), np.complex128)
+    nan = complex(np.nan, 0.0)
+    for k in range(n_sym):
+        lo = max(0, k - half_window)
+        hi = min(n_sym, k + half_window + 1)
+        for c in range(n):
+            sm = 0j
+            for r in range(lo, hi):
+                sm += h[r, c]
+            hh = sm / (hi - lo) * rot[k]
+            if c % freq_int == k % freq_int:
+                eq[k, c] = nan
+                eq_soft[k, c] = nan
+            else:
+                eq[k, c] = rx_freq[k, c] / hh
+                eq_soft[k, c] = rx_freq[k, c] * np.conj(hh)
+    return eq, eq_soft
+
+
+@njit(cache=True, nogil=True)
 def _equalize_comb_batch(rx3, pilots, freq_int, half_window):
     """_equalize_comb for each of rx3's leading-axis slices (e.g. every
     integer-CFO candidate at once): one call instead of ~61."""
@@ -2045,7 +2192,19 @@ TIME_SMOOTHING_HALF_WINDOW = 3
 TIME_SMOOTHING_RETRY_HALF_WINDOWS = (1,)
 
 
-def estimate_and_equalize(cfg, rx_freq, n_symbols, dd_ref=None, time_half_window=None):
+TIME_FIRST_MODES = ("A", "B", "C")
+
+
+def time_first_default(cfg):
+    """The HF comb-pilot modes estimate the channel time-first (see
+    _equalize_comb_tf). Simulated on a measured 29 MHz path (4 echoes over
+    4.5 ms), QPSK 10 kHz: mode A went from 0/6 to 6/6 at 6 dB, never worse
+    with fading up to +-3 Hz, level with the old way at +-8 Hz (both fail).
+    D (full training symbols) and VU keep their own estimates."""
+    return cfg.mode in TIME_FIRST_MODES and not cfg.uses_full_training
+
+
+def estimate_and_equalize(cfg, rx_freq, n_symbols, dd_ref=None, time_half_window=None, time_first=None):
     """Per-symbol channel estimate + equalization. Returns (eq, eq_soft):
     eq is the standard zero-forced equalized symbol (rx/h) used for hard
     decisions; eq_soft is a matched-filter-weighted version (rx*conj(h),
@@ -2077,6 +2236,8 @@ def estimate_and_equalize(cfg, rx_freq, n_symbols, dd_ref=None, time_half_window
     For comb-pilot modes: each symbol's own pilots (no time dependency).
     For full-training modes (D): time-interpolate between the nearest
     full training symbols, as before."""
+    if time_first is None:
+        time_first = time_first_default(cfg)
     pilots = pilot_sequence(cfg)
     eq = np.full((n_symbols, cfg.n_data), np.nan, dtype=complex)
     eq_soft = np.full((n_symbols, cfg.n_data), np.nan, dtype=complex)
@@ -2101,6 +2262,12 @@ def estimate_and_equalize(cfg, rx_freq, n_symbols, dd_ref=None, time_half_window
             h = h0 if i1 == i0 else (1 - (k - i0) / (i1 - i0)) * h0 + ((k - i0) / (i1 - i0)) * h1
             eq[k] = rx_freq[k] / h
             eq_soft[k] = rx_freq[k] * np.conj(h)
+    elif time_first and not dd_ref:
+        # see _equalize_comb_tf: slow paths with echoes spread over several ms
+        half_window = TIME_SMOOTHING_HALF_WINDOW if time_half_window is None else time_half_window
+        eq, eq_soft = _equalize_comb_tf(np.ascontiguousarray(rx_freq[:n_symbols], np.complex128),
+                                        np.ascontiguousarray(pilot_sequence(cfg), np.complex128),
+                                        cfg.freq_int, half_window)
     elif USE_COMPILED_EQUALIZER:
         half_window = TIME_SMOOTHING_HALF_WINDOW if time_half_window is None else time_half_window
         use_dd = np.zeros(n_symbols, np.bool_)
@@ -2788,16 +2955,89 @@ def build_frame(cfg, payload: bytes):
     return np.concatenate([preamble, frame])
 
 
+PAPR_OVERSAMPLE = 4
+PAPR_ITERATIONS = 3
+
+
+def reduce_papr(cfg, frame, target_db, iterations=PAPR_ITERATIONS):
+    """Clip-and-filter peak reduction of a built frame (build_frame's
+    output), receiver-transparent: per OFDM symbol, its carriers are
+    upsampled 4x (peaks between samples count too), the magnitude clipped
+    at target_db above the frame's RMS, and only the DATA carriers take the
+    result -- pilots keep their exact values (channel estimates unharmed),
+    unused bins stay empty (no out-of-band regrowth). Repeated: putting the
+    pilots and empty bins back lets some peaks regrow. The preamble is left
+    alone (sync). The cost is a little in-band distortion on the data
+    carriers -- a ceiling on MER, set by target_db.
+    OFDM's PAPR is ~10 dB (AVM measured 9.5 dB); a single carrier like
+    DVB-S2 ~4 dB, so the same amplifier peak gives OFDM several dB less
+    average power. 0 or None: off."""
+    if not target_db:
+        return frame
+    n, L, cp = cfg.n_fft, cfg.symbol_len, cfg.n_cp
+    pre = cfg.preamble_len
+    n_sym = (len(frame) - pre) // L
+    if n_sym <= 0:
+        return frame
+    os_n = PAPR_OVERSAMPLE * n
+    bins = np.asarray(cfg.fft_bins)
+    idx_n, idx_os = bins % n, bins % os_n
+    body = np.asarray(frame[pre:pre + n_sym * L]).reshape(n_sym, L)[:, cp:]
+    carriers = np.fft.fft(body, axis=1)[:, idx_n] / np.sqrt(n)           # (n_sym, n_data)
+    data = np.stack([~pilot_mask(cfg, k) for k in range(n_sym)])          # data carriers per symbol
+    X = np.zeros((n_sym, os_n), np.complex128)
+    X[:, idx_os] = carriers
+    x = np.fft.ifft(X, axis=1)
+    thr = np.sqrt(np.mean(np.abs(x) ** 2)) * 10 ** (target_db / 20)
+    cur = carriers.copy()
+    for _ in range(iterations):
+        mag = np.abs(x)
+        x = np.where(mag > thr, x * (thr / np.maximum(mag, 1e-30)), x)
+        Y = np.fft.fft(x, axis=1)[:, idx_os]
+        cur = np.where(data, Y, carriers)                                 # data carriers only
+        X = np.zeros((n_sym, os_n), np.complex128)
+        X[:, idx_os] = cur
+        x = np.fft.ifft(X, axis=1)
+    F = np.zeros((n_sym, n), np.complex128)
+    F[:, idx_n] = cur
+    t = np.fft.ifft(F, axis=1) * np.sqrt(n)
+    out = np.array(frame, dtype=np.complex128, copy=True)
+    out[pre:pre + n_sym * L] = np.concatenate([t[:, -cp:], t], axis=1).reshape(-1) if cp else t.reshape(-1)
+    return out
+
+
+def papr_db(x, oversample=4):
+    """Peak-to-average power of a signal, measured after oversampling
+    (so the peaks between samples count), in dB."""
+    x = np.asarray(x)
+    y = fft_resample(x.astype(np.complex128), len(x) * oversample) if oversample > 1 else x
+    p = np.abs(y) ** 2
+    return float(10 * np.log10(p.max() / p.mean()))
+
+
 def _pam_levels_for(modulation):
     if modulation == "16qam":
         return np.array([-3.0, -1.0, 1.0, 3.0]) / _QAM16_NORM
+    if modulation == "32qam":  # its axes' levels (the cross itself: _nearest_err2_for)
+        return np.array([-5.0, -3.0, -1.0, 1.0, 3.0, 5.0]) / _QAM32_NORM
     return np.array([-1.0, 1.0]) / np.sqrt(2)
+
+
+def _nearest_err2_for(points, modulation):
+    """|point - nearest ideal point|^2: per axis for the square
+    constellations, over all 32 points for the 32-QAM cross (per axis would
+    measure a corner point against a corner the cross doesn't have)."""
+    if modulation == "32qam":
+        return np.min(np.abs(np.asarray(points)[:, None] - _QAM32_POINTS[None, :]) ** 2, axis=1)
+    return _nearest_err2(points, _pam_levels_for(modulation))
 
 
 def _nearest_ideal_point(points, modulation):
     """Nearest ideal constellation point per axis -- exact for QPSK (a
     sign check) and for square 16-QAM (separable into two independent
     4-level PAM rails, so nearest-per-axis IS the nearest 2D point)."""
+    if modulation == "32qam":
+        return _QAM32_POINTS[np.argmin(np.abs(np.asarray(points)[:, None] - _QAM32_POINTS[None, :]), axis=1)]
     levels = _pam_levels_for(modulation)
     real_idx = np.argmin(np.abs(points.real[:, None] - levels[None, :]), axis=1)
     imag_idx = np.argmin(np.abs(points.imag[:, None] - levels[None, :]), axis=1)
@@ -2833,7 +3073,7 @@ def _evm_percent(points, modulation="qpsk"):
     # deep_fade_fraction) -- the outliers the median was there to ignore.
     pts = np.ascontiguousarray(points, np.complex128)
     levels = _pam_levels_for(modulation)
-    err2 = _nearest_err2(pts, levels)
+    err2 = _nearest_err2_for(pts, modulation)
     axis_max2 = float(np.max(levels)) ** 2
     keep = (pts.real ** 2 + pts.imag ** 2) <= DEEP_FADE_MAG_RATIO ** 2 * axis_max2
     if not np.any(keep):
@@ -2858,11 +3098,14 @@ def _true_err2(measured, modulation):
         n = 20000
         true_db = np.arange(-6.0, 30.5, 0.5)
         meas = []
-        sym = rng.choice(levels, n) + 1j * rng.choice(levels, n)
+        if modulation == "32qam":
+            sym = rng.choice(_QAM32_POINTS, n)
+        else:
+            sym = rng.choice(levels, n) + 1j * rng.choice(levels, n)
         unit = rng.normal(size=n) + 1j * rng.normal(size=n)
         for snr in true_db:
             pts = sym + unit * np.sqrt(10 ** (-snr / 10) / 2)
-            meas.append(float(np.mean(_nearest_err2(pts, levels))))
+            meas.append(float(np.mean(_nearest_err2_for(pts, modulation))))
         true_err2 = 10 ** (-true_db / 10)
         order = np.argsort(meas)
         table = (np.asarray(meas)[order], true_err2[order])
@@ -3041,7 +3284,7 @@ def decode_frame(cfg, rx_after_preamble, verbose=False, max_wait_samples=None):
     # noise suppression for 16-QAM's payload specifically -- an
     # acceptable trade given 16-QAM is already an explicit higher-SNR
     # opt-in, not the robust default.
-    payload_soft_source = all_eq if cfg.data_modulation == "16qam" else all_eq_soft
+    payload_soft_source = all_eq if cfg.data_modulation in TRUE_SCALE_SOFT else all_eq_soft
 
     # Every payload symbol's data carriers at once, in symbol-then-carrier
     # order (what a per-symbol loop of concatenations gave): the pilot mask
@@ -3118,11 +3361,13 @@ def decode_frame(cfg, rx_after_preamble, verbose=False, max_wait_samples=None):
         return payload_bytes, crc_ok, False, ber, evm, constellation
 
     if not crc_ok and not cfg.uses_full_training:
-        for hw in TIME_SMOOTHING_RETRY_HALF_WINDOWS:
-            if hw == TIME_SMOOTHING_HALF_WINDOW:
-                continue
-            eq_w, eq_soft_w = estimate_and_equalize(cfg, all_freq, n_symbols, time_half_window=hw)
-            src_w = eq_w if cfg.data_modulation == "16qam" else eq_soft_w
+        # first the OTHER equaliser (time-first <-> per-symbol), so a fragment
+        # the old estimate would have decoded still does; then shorter smoothing
+        variants = [(None, not time_first_default(cfg))] if time_first_default(cfg) else []
+        variants += [(hw, None) for hw in TIME_SMOOTHING_RETRY_HALF_WINDOWS if hw != TIME_SMOOTHING_HALF_WINDOW]
+        for hw, tf in variants:
+            eq_w, eq_soft_w = estimate_and_equalize(cfg, all_freq, n_symbols, time_half_window=hw, time_first=tf)
+            src_w = eq_w if cfg.data_modulation in TRUE_SCALE_SOFT else eq_soft_w
             chunks_w, const_w = [], []
             for sym_idx in range(header_symbol_indices[-1] + 1, n_symbols):
                 mask = pilot_mask(cfg, sym_idx)
@@ -3146,7 +3391,7 @@ def decode_frame(cfg, rx_after_preamble, verbose=False, max_wait_samples=None):
             if (zlib.crc32(bytes_w) & 0xFFFFFFFF) == expected_crc:
                 constellation_w = np.concatenate(const_w) if const_w else np.zeros(0, dtype=complex)
                 ber_w = float(np.mean(re_w[:len(soft_w)] != (soft_w < 0).astype(np.uint8)))
-                dbg(f"time-smoothing retry (half-window {hw}) SUCCEEDED: ber={ber_w:.4f}")
+                dbg(f"equaliser retry (half-window {hw}, time-first {tf}) SUCCEEDED: ber={ber_w:.4f}")
                 return bytes_w, True, False, ber_w, _evm_percent(constellation_w, cfg.data_modulation), constellation_w
 
     # Decision-directed retry: only on a first-pass CRC failure, and only
@@ -3185,7 +3430,7 @@ def decode_frame(cfg, rx_after_preamble, verbose=False, max_wait_samples=None):
 
         pilots = pilot_sequence(cfg)
         all_eq2, all_eq_soft2 = estimate_and_equalize(cfg, all_freq, n_symbols, dd_ref=dd_ref)
-        payload_soft_source2 = all_eq2 if cfg.data_modulation == "16qam" else all_eq_soft2
+        payload_soft_source2 = all_eq2 if cfg.data_modulation in TRUE_SCALE_SOFT else all_eq_soft2
 
         coded_bit_chunks2 = []
         constellation_chunks2 = []
