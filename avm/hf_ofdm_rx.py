@@ -40,6 +40,16 @@ import time
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
+# Start opening the radio before the heavy imports below (numba, the modem:
+# ~3.5 s on a Pi 4) -- the ~2 s radio open overlaps them instead of
+# following them. pluto_soapy_sink itself only needs numpy.
+if __name__ == "__main__":
+    try:
+        import pluto_soapy_sink as _pss
+        _pss.preopen_from_argv(sys.argv[1:], "RX")
+    except Exception:
+        pass
+
 import numpy as np
 
 import hf_ofdm_common as ofdm
@@ -130,6 +140,24 @@ def make_reader(args, cfg):
             print(f"WARNING: mode {cfg.mode} at this width occupies {occupied / 1e3:.1f} kHz, more than this "
                   f"KiwiSDR's {capture_fs / 1e3:.2f} kS/s stream carries -- use 10 kHz (or a wideband Kiwi)",
                   file=sys.stderr)
+    elif args.sdr == "hpsdr":
+        # openHPSDR protocol 2 radio (ANAN-10/100, Hermes) over the network,
+        # found by discovery (--pluto-uri: its address, optional). Its DDC
+        # delivers IQ centred on --rf-freq (no LO offset) at the lowest of
+        # its rates that carries the mode with room to spare -- not the
+        # Pluto-style rate the GUI passes, which would only cost CPU here.
+        from hpsdr_source import HpsdrRxSource
+        occupied = len(cfg.data_bins) * cfg.carrier_spacing
+        reader = HpsdrRxSource(args.pluto_uri, args.rf_freq, sample_rate_hz=max(48000.0, 1.3 * occupied),
+                               rx_gain_db=args.rx_gain, antenna=args.sdr_antenna,
+                               gain_file=args.gain_file, freq_offset_file=args.freq_offset_file)
+        args.radio_source = reader
+        fe_lo = 0.0
+        capture_fs = reader.sample_rate_hz
+        use_frontend = capture_fs != cfg.fs and not args.legacy_frontend
+        args.capture_sample_rate = capture_fs
+        args.frontend_active = use_frontend
+        args.sample_rate = capture_fs
     else:
         # Lazy import: SoapySDR (and the PlutoSDR support module) is only
         # needed when actually asked for -- most uses of this script are the
@@ -1254,9 +1282,12 @@ def _peek_latest_samples(reader, n_samples):
     return np.frombuffer(data[-usable:], dtype=np.complex64).copy()
 
 
-# 1024 bins is still more points than the GUI's plot is pixels wide (it
-# was 4096, redrawn ~7x/s: costly on a Raspberry Pi for a monitoring view).
-SPECTRUM_FFT_SIZE = 1024
+# 512 bins: about the GUI plot's width in pixels on the 800x480 screen
+# (~420 px) -- 1024 was more points than it can show, at twice the cost to
+# compute, send and draw (it was 4096 once, redrawn ~7x/s).
+SPECTRUM_FFT_SIZE = 512
+SPECTRUM_SEGMENTS = 8        # FFTs averaged per update (see _build_spectrum_computer)
+SPECTRUM_MAX_RAW = 32768     # ...within this many raw SDR samples per update
 # Per-radio spectrum display offset (dB), so different radios' plots read alike.
 SPECTRUM_OFFSET_DB = {"rtlsdr": -50.0}
 
@@ -1319,17 +1350,28 @@ def _build_spectrum_computer(cfg, args, reader):
         decim = max(1, int(fs // (2 * occupied_bw))) if occupied_bw > 0 else 1
     disp_fs = fs / decim
     if decim > 1:
-        taps = 8 * decim + 1  # a few sidelobes' worth per decimated sample is plenty for a monitoring display
+        # 16 taps per decimated sample, Blackman: the SDR's DC spur sits one
+        # LO offset from the signal and can fold onto the display -- at VU
+        # 80 kHz onto the signal's very edge (+37.5 kHz), only 47 dB down
+        # with the old 8x Hann filter (seen as a product at the band edge,
+        # varying with the Pluto's DC tracking); 83 dB down now
+        taps = 16 * decim + 1
         n = np.arange(taps) - taps // 2
         cutoff = 1.0 / decim  # normalized to the ORIGINAL fs/2
         aa_kernel = np.sinc(cutoff * n) * cutoff
-        aa_kernel *= np.hanning(taps)
+        aa_kernel *= np.blackman(taps)
         aa_kernel /= aa_kernel.sum()
         print(f"Spectrum: decimating {fs/1e3:.1f}kHz -> {disp_fs/1e3:.1f}kHz "
               f"(occupied bandwidth ~{occupied_bw/1e3:.1f}kHz)", file=sys.stderr)
     else:
         aa_kernel = None
-    raw_needed = FFT_SIZE * decim + (len(aa_kernel) - 1 if aa_kernel is not None else 0)
+    # Several FFTs per update, power-averaged (Welch): one short FFT (under
+    # 4 ms in VU 80) caught a whole preamble now and then -- every other
+    # carrier at double power -- seen as tall spikes once per fragment. Same
+    # resolution, less variance; capped by raw samples (CPU: the narrow HF
+    # modes decimate a lot, so they get fewer segments).
+    segs = max(1, min(SPECTRUM_SEGMENTS, SPECTRUM_MAX_RAW // (FFT_SIZE * decim)))
+    raw_needed = FFT_SIZE * decim * segs + (len(aa_kernel) - 1 if aa_kernel is not None else 0)
     freqs = np.fft.fftshift(np.fft.fftfreq(FFT_SIZE, d=1.0 / disp_fs))
     # Decimation is by a whole number, so the display rate can overshoot the
     # requested span (550 kS/s / 4 = 137.5 kHz for 120): trim to the span.
@@ -1387,10 +1429,13 @@ def _build_spectrum_computer(cfg, args, reader):
             elif lo_hz:
                 samples = samples * np.exp(2j * np.pi * lo_hz * np.arange(len(samples)) / fs)
         if aa_kernel is not None:
+            # (np.convolve then [::decim]: computing only the kept outputs via
+            # a strided matmul was 18 ms per update on a Pi 4, this ~4)
             samples = np.convolve(samples, aa_kernel, mode="valid")[::decim]
-        windowed = samples[-FFT_SIZE:] * np.hanning(FFT_SIZE)
-        spectrum = np.fft.fftshift(np.fft.fft(windowed))
-        power_history.append(np.abs(spectrum) ** 2)
+        n = min(segs, len(samples) // FFT_SIZE)
+        blocks = samples[len(samples) - n * FFT_SIZE:].reshape(n, FFT_SIZE) * np.hanning(FFT_SIZE)
+        spectrum = np.fft.fftshift(np.fft.fft(blocks, axis=1), axes=1)
+        power_history.append(np.mean(np.abs(spectrum) ** 2, axis=0))
         averages = _live_averages()
         while len(power_history) > averages:
             power_history.pop(0)
@@ -1872,7 +1917,7 @@ def main():
                           "gain-control/DC-offset/quadrature-tracking settling time -- confirmed for "
                           "real: a freshly-started RX decoded far worse than the identical settings "
                           "moments later after just restarting the RX process. 0 disables it.")
-    ap.add_argument("--sdr", choices=["pluto", "lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi"],
+    ap.add_argument("--sdr", choices=["pluto", "lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi", "hpsdr"],
                      default="pluto",
                      help="Radio for --input pluto: 'pluto' (PlutoSDR, default), 'lime' "
                           "(LimeSDR-USB or LimeSDR Mini; manual gain only, no AGC) or 'rtlsdr' "
@@ -1880,7 +1925,10 @@ def main():
                           "0.9-3.2 MS/s, e.g. 1024000), 'airspy' (Airspy R2/Mini), 'airspyhf' "
                           "(Airspy HF+) or 'sdrplay' (SDRplay RSP), receive only, at their nearest "
                           "offered sample rate; 'kiwi' (a KiwiSDR over the network, --pluto-uri "
-                          "host:port, at the rate it sends, ~12 kS/s).")
+                          "host:port, at the rate it sends, ~12 kS/s); 'hpsdr' (an openHPSDR protocol 2 radio "
+                          "such as an ANAN-10/100 on the network, receive only, found by discovery; "
+                          "--pluto-uri its IP if several; --sdr-antenna ANT1-3; --rx-gain 0-31 drives "
+                          "its step attenuator, 31 = no attenuation).")
     ap.add_argument("--invert-spectrum", action="store_true",
                      help="Mirror the received spectrum (conjugate the IQ): for a receive path that "
                           "inverts it. Inverted, sync still triggers but every header fails.")
@@ -2104,6 +2152,91 @@ def _skip_limits(cfg, args):
     return keep + SKIP_EXTRA_LAG_S, keep
 
 
+# AFC: the decoder works at the mode's own rate, which leaves little room
+# beside the carriers (VU 80: 1.25 kHz each side of 31 carriers at 80 kS/s)
+# -- a signal tuned further off had its outer carriers cut by the front
+# end's filter (5 kHz off in VU 80: EVM ~35%, BER ~8%). The front end shifts
+# the SDR samples anyway (LO offset) at their full rate, where there's room;
+# AFC moves that shift by the measured CFO so the signal arrives centred.
+# Only CRC-good fragments count, averaged over AFC_MIN_FRAGMENTS at least,
+# and it only steps when the offset uses AFC_ROOM_FRAC of the filter room,
+# so a weak signal's jittery estimates don't move it. It holds its value
+# while nothing decodes. Acquisition is unchanged (the search runs first).
+AFC_ROOM_FRAC = 0.3
+AFC_MIN_FRAGMENTS = 2
+AFC_EMA_ALPHA = 0.5
+
+
+def _afc_applied(state, frame_start):
+    """The AFC correction (Hz) in force when this fragment began."""
+    applied = 0.0
+    for pos, total in state.get("afc_hist", ()):
+        if frame_start is not None and frame_start >= pos:
+            applied = total
+    return applied
+
+
+def _afc_update(cfg, reader, state, cfo_hz, frame_start=None, header_only=False):
+    """After a CRC-good fragment: maybe re-centre the front end (see AFC_*).
+    frame_start: where the fragment began in the front end's output -- the
+    decoder runs behind the front end, so fragments that began before the
+    last correction still carry the old offset and must not count (they
+    made it correct the same offset again and again)."""
+    fe = getattr(reader, "_fe", None)
+    if fe is None or not hasattr(fe, "set_lo_offset"):
+        return   # no front end (the input already at the mode's rate): nothing to steer
+    if "afc_base_hz" not in state:
+        state["afc_base_hz"] = fe.lo_offset_hz
+        state["afc_hz"] = 0.0
+        state["afc_from"] = 0
+    if frame_start is None or frame_start < state["afc_from"]:
+        return   # from before the last correction (or unknown): no evidence
+    hi = (int(np.max(np.abs(np.asarray(cfg.data_bins)))) + 0.5) * cfg.carrier_spacing
+    room = max(cfg.fs / 2 - hi, cfg.carrier_spacing)
+    n = state.get("afc_n", 0)
+    if n and abs(cfo_hz - state["afc_ema"]) > 0.5 * cfg.carrier_spacing:
+        # disagrees with the running estimate: start again from this one
+        # (a header-only fragment must be confirmed by the next before it counts)
+        state["afc_ema"], state["afc_n"] = cfo_hz, 1
+        return
+    ema = cfo_hz if n == 0 else AFC_EMA_ALPHA * cfo_hz + (1 - AFC_EMA_ALPHA) * state["afc_ema"]
+    state["afc_ema"], state["afc_n"] = ema, n + 1
+    if state["afc_n"] < AFC_MIN_FRAGMENTS or abs(ema) < AFC_ROOM_FRAC * room:
+        return
+    # signal at +ema: shift it down by that much (the front end shifts UP by its offset)
+    state["afc_hz"] -= ema
+    state["afc_from"] = fe.n_out   # only fragments starting after this see the new shift
+    state.setdefault("afc_hist", []).append((fe.n_out, state["afc_hz"]))
+    del state["afc_hist"][:-8]
+    fe.set_lo_offset(state["afc_base_hz"] + state["afc_hz"])
+    state["afc_n"] = 0
+    state["last_cfo_hz"] = None   # the next fragment's CFO jumps by design: no stale prior
+    print(f"[afc] re-centred by {-ema:+.0f} Hz (total correction {state['afc_hz']:+.0f} Hz)", file=sys.stderr)
+
+
+# Live constellation for the GUI's popup (touch_widgets.ConstellationDialog):
+# while this flag file exists (the popup creates it), each decoded
+# fragment's equalised data points -- up to CONSTELLATION_POINTS of them --
+# go out on stderr as "[constellation] <base64 complex64>". Off: nothing.
+CONSTELLATION_FLAG = "/dev/shm/avm_constellation"
+CONSTELLATION_POINTS = 3000
+_const_state = {"t": 0.0, "on": False}
+
+
+def _emit_constellation(points):
+    now = time.monotonic()
+    if now - _const_state["t"] > 1.0:
+        _const_state["t"] = now
+        _const_state["on"] = os.path.exists(CONSTELLATION_FLAG)
+    if not _const_state["on"] or points is None or len(points) == 0:
+        return
+    import base64
+    pts = np.asarray(points, np.complex64)
+    if len(pts) > CONSTELLATION_POINTS:
+        pts = pts[np.linspace(0, len(pts) - 1, CONSTELLATION_POINTS).astype(np.int64)]
+    print("[constellation] " + base64.b64encode(pts.tobytes()).decode(), file=sys.stderr, flush=True)
+
+
 def run_decode_loop(cfg, args, reader):
     """The actual receive/decode/output loop -- unchanged from before
     --gui existed, just extracted out of main() so it can be run either
@@ -2234,6 +2367,7 @@ def run_decode_loop(cfg, args, reader):
                 for pt in result["constellation"]:
                     f.write(f"{frag_idx},{pt.real},{pt.imag}\n")
 
+        _emit_constellation(result["constellation"])
         fade_frac = ofdm.deep_fade_fraction(result["constellation"]) if result["constellation"] is not None else None
         status_word = "OK" if crc_ok else "CRC MISMATCH"
         # search_start_before to next_native_search_start spans however far
@@ -2271,11 +2405,23 @@ def run_decode_loop(cfg, args, reader):
         gap_note = f"  (spans a {search_duration_s:.2f}s search gap)" if search_duration_s > signal_duration_s + 1.0 else ""
         time_note = (f"  Time={elapsed:.2f}s (budget {search_duration_s:.2f}s)"
                      f"{' <-- SLOWER THAN REALTIME' if slow else ''}{_retry_note(result)}{gap_note}")
+        # Reported within +-fs/2: at the mode's rate an offset and the same
+        # offset +-fs are the same rotation (identical correction), and the
+        # +-30-carrier search can land on either -- VU 80 (32 carriers,
+        # 80 kS/s) read a real -4.87 kHz as +75.13 kHz.
+        cfo_shown = (cfo_hz + cfg.fs / 2) % cfg.fs - cfg.fs / 2
+        # reported: the full offset, i.e. plus what the AFC had already taken
+        # out of this fragment (the AFC itself works on the residual)
+        cfo_full = cfo_shown - _afc_applied(state, frame_start)
         print(f"Fragment seq={frag_idx}: {status_word}  "
-              f"CFO={cfo_hz:+.1f}Hz  BER={ber:.4f}  EVM={evm:.1f}%  "
+              f"CFO={cfo_full:+.1f}Hz  BER={ber:.4f}  EVM={evm:.1f}%  "
               f"DeepFade={fade_frac*100:.2f}%{time_note}", file=sys.stderr)
 
         if not crc_ok:
+            # the header decoded (its checksum held), so its CFO is good even
+            # though the payload isn't -- far enough off tune that NO payload
+            # passes (outer carriers cut), only these can steer the AFC back
+            _afc_update(cfg, reader, state, cfo_shown, frame_start, header_only=True)
             _note_reacquisition_trouble(state)
             continue  # don't accept a corrupted fragment; wait to see if a retry/next attempt helps
         # Smooth the confirmed-CFO prior with an EMA instead of trusting
@@ -2294,6 +2440,7 @@ def run_decode_loop(cfg, args, reader):
         state["last_cfo_hz"] = (cfo_hz if prev_cfo_hz is None
                                  else CFO_EMA_ALPHA * cfo_hz + (1 - CFO_EMA_ALPHA) * prev_cfo_hz)
         state["consecutive_failures"] = 0
+        _afc_update(cfg, reader, state, cfo_shown, frame_start)
 
         now_ok = time.monotonic()
         if expected_next_frag_idx is not None and frag_idx != expected_next_frag_idx:

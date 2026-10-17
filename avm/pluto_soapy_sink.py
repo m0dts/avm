@@ -78,7 +78,75 @@ def _nearest_supported_rate(sdr, direction, want):
     return next((r for r in rates if r >= want), rates[-1])
 
 
+# preopen(): the radio opened on a thread while the rest of hf_ofdm_rx/tx
+# is still importing -- opening it takes ~2 s (a Pluto over its network
+# link), the imports (numpy, numba, the modem) ~3.5 s on a Pi 4, and the
+# two used to run one after the other on every TX/RX start.
+_preopened = {}
+
+
+def preopen(driver, uri, what):
+    """Start opening the radio now, in the background; _open_sdr picks the
+    result up (or its exception) when asked for the same driver/uri."""
+    key = (driver, uri or None, what)
+    if key in _preopened:
+        return   # already opening/open (a preloaded process, warm_python.py)
+    box = {}
+
+    def run():
+        try:
+            box["sdr"] = _open_sdr_now(driver, uri, what)
+        except BaseException as e:   # re-raised in the caller's thread
+            box["error"] = e
+
+    t = threading.Thread(target=run, daemon=True, name="sdr-preopen")
+    _preopened[key] = (t, box)
+    t.start()
+
+
+def preopen_from_argv(argv, what):
+    """hf_ofdm_rx/tx: a light scan of their own command line, before the
+    heavy imports -- preopen the SoapySDR radio a run will use, if any."""
+    def opt(name, default=None):
+        for i, a in enumerate(argv):
+            if a == name and i + 1 < len(argv):
+                return argv[i + 1]
+            if a.startswith(name + "="):
+                return a.split("=", 1)[1]
+        return default
+    if opt("--input" if what == "RX" else "--output", "pipe") != "pluto":
+        return
+    if any(a in ("-h", "--help") or a.startswith("--list") for a in argv):
+        return
+    driver = opt("--sdr", "pluto")
+    if driver in ("kiwi", "hpsdr"):   # not SoapySDR radios
+        return
+    try:
+        preopen(driver, opt("--pluto-uri"), what)
+    except Exception:
+        pass   # never stop a run: it opens the radio the normal way then
+
+
 def _open_sdr(driver, uri, what):
+    pending = _preopened.pop((driver, uri or None, what), None)
+    if pending is not None:
+        t, box = pending
+        t.join()
+        if "error" in box:
+            raise box["error"]
+        sdr = box["sdr"]
+        try:
+            from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_TX
+            sdr.getFrequency(SOAPY_SDR_RX if what == "RX" else SOAPY_SDR_TX, 0)   # still answering?
+            return sdr
+        except Exception as e:
+            # opened a while ago by a preloaded process and gone since (the
+            # Pluto re-plugged or rebooted): open it again
+            print(f"{what}: the radio opened in advance no longer answers ({e}) -- reopening", file=sys.stderr)
+    return _open_sdr_now(driver, uri, what)
+
+
+def _open_sdr_now(driver, uri, what):
     """Opens the SoapySDR device for driver 'pluto' (PlutoSDR, at uri),
     'lime' (LimeSDR-USB or LimeSDR Mini, via the LMS7 SoapySDR module) or
     'rtlsdr' (an RTL2832U dongle, receive only, via SoapyRTLSDR), 'airspy'
@@ -431,12 +499,25 @@ class PlutoTxSink:
         REPORT_INTERVAL_S = 5.0
         window_start = time.monotonic()
         silence_s_in_window = 0.0
+        # Every gap, however short, is a hard RF stop/start -- it splatters
+        # energy just outside the signal's edges, seen on a receiver's
+        # spectrum as a periodic product at the band edges. Counted and
+        # summarised every GAP_REPORT_S (the 10% warning below only
+        # catches gross underruns).
+        GAP_REPORT_S = 10.0
+        gaps = gap_s = 0
+        in_gap = False
+        gap_window_start = time.monotonic()
         while True:
             try:
                 samples = self._queue.get(timeout=SILENCE_CHUNK_S)
             except queue.Empty:
                 self._write_all(silence_chunk)
                 silence_s_in_window += SILENCE_CHUNK_S
+                gap_s += SILENCE_CHUNK_S
+                if not in_gap:
+                    in_gap = True
+                    gaps += 1
                 now = time.monotonic()
                 elapsed = now - window_start
                 if elapsed >= REPORT_INTERVAL_S:
@@ -451,6 +532,15 @@ class PlutoTxSink:
                     window_start = now
                     silence_s_in_window = 0.0
                 continue
+            in_gap = False
+            now = time.monotonic()
+            if now - gap_window_start >= GAP_REPORT_S:
+                if gaps:
+                    print(f"PlutoSDR TX: {gaps} gap(s) in the last {now - gap_window_start:.0f} s, "
+                          f"{1000 * gap_s:.0f} ms of silence in all (a fragment came late)",
+                          file=sys.stderr)
+                gaps = gap_s = 0
+                gap_window_start = now
             self._write_all(samples)
             self._queue.task_done()
 

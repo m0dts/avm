@@ -33,6 +33,7 @@ import gui_layout
 import hf_ofdm_common as ofdm
 import media_source
 import media_tx_framer
+import warm_pool
 
 PYTHON = sys.executable
 
@@ -1092,8 +1093,13 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         # subprocesses directly (see its own module docstring) instead
         # of being piped into from a single upstream media_source.py --
         # only two processes to chain here now, not three.
-        p_framer = subprocess.Popen(framer_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    **avm_threads.die_with_parent())
+        # a preloaded modulator (warm_pool.py) skips its ~3.5 s of imports;
+        # its stdin is a pipe made in advance, which the framer writes to.
+        # Only for the usual output (duplex / a file output: a fresh process)
+        warm = warm_pool.take("tx") if tdd_fd is None and tx_stdout is subprocess.DEVNULL else None
+        p_framer = subprocess.Popen(framer_cmd, stdin=subprocess.DEVNULL,
+                                    stdout=warm.stdin_w if warm is not None else subprocess.PIPE,
+                                    stderr=subprocess.PIPE, **avm_threads.die_with_parent())
         # Raises hf_ofdm_tx.py's OS scheduling priority above its sibling
         # ffmpeg encoder process(es) and media_tx_framer.py, same reasoning
         # as media_rx_gui.py's identical boost for hf_ofdm_rx.py: this is
@@ -1111,9 +1117,15 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         # Unverified whether this alone fixes it; a genuine measured
         # improvement either way, and matches the RX side's own fix.
         tx_priority = {"creationflags": subprocess.HIGH_PRIORITY_CLASS} if sys.platform == "win32" else {}
-        p_tx = subprocess.Popen(tx_cmd, stdin=p_framer.stdout, stdout=tx_stdout,
-                                 stderr=subprocess.PIPE, **tx_priority, **avm_threads.die_with_parent())
-        p_framer.stdout.close()
+        if warm is not None:
+            os.close(warm.stdin_w)   # the framer has its own copy
+            warm.stdin_w = None
+            p_tx = warm.launch(tx_cmd[2:])
+            self._append_log("[gui] tx: started from the preloaded process")
+        else:
+            p_tx = subprocess.Popen(tx_cmd, stdin=p_framer.stdout, stdout=tx_stdout,
+                                     stderr=subprocess.PIPE, **tx_priority, **avm_threads.die_with_parent())
+            p_framer.stdout.close()
         if tdd_fd is not None:
             os.close(tdd_fd)  # the modulator has its own copy
 
@@ -1144,6 +1156,15 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._append_log("[gui] stopped.")
+        self._schedule_prewarm()
+
+    PREWARM_DELAY_MS = 3000   # after a stop (never while one is starting)
+
+    def _schedule_prewarm(self, delay_ms=PREWARM_DELAY_MS):
+        def go():
+            if not self.procs and self.output_mode.currentText() == "pluto":
+                warm_pool.prewarm("tx", getattr(self, "sdr", "pluto"), self.pluto_uri.text().strip() or None)
+        QtCore.QTimer.singleShot(delay_ms, go)
 
     def closeEvent(self, event):
         self.stop()
@@ -1193,6 +1214,8 @@ class MediaTxWindow(QtWidgets.QMainWindow):
                                                    / self.framerate.value() + 1e-6)),
                    "--leak", f"{self.wavelet_leak.value():.3f}",
                    "--refresh-seconds", f"{self.wavelet_refresh_s.value():.2f}"]
+            if getattr(self, "mono", False):
+                cmd += ["--mono"]
             if self.source_combo.currentText() == "device":
                 cmd += ["--video-device", self.video_device.currentText()]
             return cmd

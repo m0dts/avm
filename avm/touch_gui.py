@@ -262,8 +262,8 @@ class TouchWindow(QtWidgets.QWidget):
                 pct = 100 * busy / total
                 self.cpu.setText(f"CPU {pct:.0f}%")
                 # bright orange-red and bold when the CPU is nearly flat out
-                self.cpu.setStyleSheet(f"color: {CPU_HOT_COLOUR}; font-weight: bold;"
-                                       if pct > CPU_HOT_PCT else "")
+                tw.set_style(self.cpu, f"color: {CPU_HOT_COLOUR}; font-weight: bold;"
+                             if pct > CPU_HOT_PCT else "")
         self._cpu_last = now
 
     def _build_splash(self):
@@ -347,6 +347,10 @@ class TouchWindow(QtWidgets.QWidget):
             return
         self._warmup_timer.stop()
         QtCore.QTimer.singleShot(SPLASH_HOLD_MS, self._splash.hide)  # a moment longer to read
+        # preload the receiver and transmitter processes (warm_pool.py) now
+        # the codec warm-up is done -- one after the other, not competing
+        self.rx.engine._schedule_prewarm(1000)
+        self.tx.engine._schedule_prewarm(6000)
         if self._warmup is not None and self._warmup.returncode:
             tw.notices().add("TX", "Video codec warm-up failed (exit "
                                    f"{self._warmup.returncode}); TX will compile it when it starts")
@@ -513,7 +517,7 @@ class TouchWindow(QtWidgets.QWidget):
         # (min-width here too: the tab buttons' style would make it 90 px)
         colours = (f"background: {tw.STOP}; color: white;" if n
                    else f"background: {tw.BUTTON}; color: {tw.TEXT_DIM};")
-        self.notice_btn.setStyleSheet(f"{colours} min-width: {round(NOTICE_BTN_W * self.scale)}px; "
+        tw.set_style(self.notice_btn, f"{colours} min-width: {round(NOTICE_BTN_W * self.scale)}px; "
                                       f"padding: 0px;")
 
     def _usb_needs(self, page, devs):
@@ -600,6 +604,8 @@ class TouchWindow(QtWidgets.QWidget):
     def closeEvent(self, event):
         self.tx.shutdown()
         self.rx.shutdown()
+        import warm_pool
+        warm_pool.shutdown()
         save_settings(self.settings)
         event.accept()
 
@@ -661,7 +667,84 @@ def main():
         win.show()
     else:
         win.showFullScreen()
-    sys.exit(app.exec_())
+    profile_path = os.environ.get("AVM_PROFILE_GUI")
+    if not profile_path:
+        sys.exit(app.exec_())
+    sys.exit(_run_profiled(app, profile_path))
+
+
+class _StallMonitor(QtCore.QObject):
+    """GUI responsiveness: a 20 ms timer that notes how late each tick
+    fires. A late tick = the event loop was busy (or blocked) that long --
+    what a user feels as a laggy touch or a stuttering picture."""
+
+    STALL_DUMP_S = 0.1   # loop held this long: every thread's stack to the .stalls file
+
+    def __init__(self, stalls_path=None):
+        super().__init__()
+        self.lags = []
+        self._t = time.perf_counter()
+        self._fh = None
+        if stalls_path:
+            import faulthandler
+            self._faulthandler = faulthandler
+            self._fh = open(stalls_path, "w")
+        self._timer = QtCore.QTimer(self)
+        self._timer.setTimerType(QtCore.Qt.PreciseTimer)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(20)
+        self._arm()
+
+    def _arm(self):
+        # re-armed every tick: it only fires if the event loop is stuck for
+        # STALL_DUMP_S, and then shows what the GUI thread was doing
+        if self._fh:
+            self._faulthandler.dump_traceback_later(self.STALL_DUMP_S, repeat=False, file=self._fh)
+
+    def _tick(self):
+        now = time.perf_counter()
+        self.lags.append(max(0.0, now - self._t - 0.020))
+        self._t = now
+        self._arm()
+
+    def close(self):
+        if self._fh:
+            self._faulthandler.cancel_dump_traceback_later()
+            self._fh.close()
+            self._fh = None
+
+
+def _run_profiled(app, path):
+    """AVM_PROFILE_GUI=<file>: profile and log the GUI's responsiveness:
+    <file> (cProfile stats -- on Python 3.12+ these include the other
+    threads, mostly blocked on pipes), <file>.txt (event-loop lag summary
+    and top functions) and <file>.stalls (every thread's stack whenever the
+    event loop was stuck 0.1 s or more: what caused each noticeable stall)."""
+    import cProfile
+    import pstats
+    mon = _StallMonitor(path + ".stalls")
+    prof = cProfile.Profile()
+    t0 = time.perf_counter()
+    prof.enable()
+    try:
+        rc = app.exec_()
+    finally:
+        prof.disable()
+        mon.close()
+        wall = time.perf_counter() - t0
+        prof.dump_stats(path)
+        lags = sorted(mon.lags)
+        with open(path + ".txt", "w") as f:
+            n = len(lags)
+            if n:
+                f.write(f"GUI thread, {wall:.0f} s: event-loop lag median {1e3 * lags[n // 2]:.1f} ms, "
+                        f"p95 {1e3 * lags[int(0.95 * n)]:.1f} ms, p99 {1e3 * lags[int(0.99 * n)]:.1f} ms, "
+                        f"max {1e3 * lags[-1]:.0f} ms; ticks late >50 ms: {sum(x > 0.05 for x in lags)}, "
+                        f">100 ms: {sum(x > 0.1 for x in lags)} (of {n})" + "\n\n")
+            st = pstats.Stats(prof, stream=f)
+            st.sort_stats("tottime").print_stats(40)
+            st.sort_stats("cumulative").print_stats(40)
+    return rc
 
 
 if __name__ == "__main__":

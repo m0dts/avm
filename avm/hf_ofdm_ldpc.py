@@ -497,18 +497,26 @@ def ldpc_encode(bits: np.ndarray) -> np.ndarray:
     else:
         padded = bits
         
-    # All blocks in one float32 matrix product (BLAS): exact, since every
-    # sum is at most K <= 972 ones, far inside float32's exact-integer
-    # range -- and ~20x faster than one uint8 product per block, which
-    # numpy can't hand to BLAS (the receiver re-encodes every decoded
-    # fragment for its BER figure, so this was ~20 ms per fragment).
+    # Parity in GF(2) directly: each block's parity is the XOR of the
+    # generator columns its 1-bits select, the columns pre-packed 8 bits to
+    # a byte -- ~K/2 row XORs of ~K/8 bytes per block. Was one float32 BLAS
+    # matrix product (exact, ~0.8 ms per 1 KB fragment on a PC) which on a
+    # Raspberry Pi 4 took ~18 ms -- half the transmitter's time per 50 ms
+    # fragment in VU mode, and the receiver re-encodes every decoded
+    # fragment for its BER figure too. Same bits.
     table = _LDPC_TABLES[Z]
-    g = table.get("G_parity_f32")
-    if g is None:
-        g = table["G_parity_f32"] = table["G_parity"].astype(np.float32)
+    gc = table.get("G_parity_cols_packed")
+    if gc is None:
+        gc = table["G_parity_cols_packed"] = np.packbits(table["G_parity"].T.astype(np.uint8), axis=1)
+    M = table["G_parity"].shape[0]
     u = padded.reshape(n_blocks, K)
-    p = (u.astype(np.float32) @ g.T) % 2
-    return np.concatenate([u, p.astype(np.uint8)], axis=1).ravel()
+    out = np.empty((n_blocks, K + M), np.uint8)
+    out[:, :K] = u
+    for b in range(n_blocks):
+        sel = gc[u[b].astype(bool)]
+        acc = np.bitwise_xor.reduce(sel, axis=0) if len(sel) else np.zeros(gc.shape[1], np.uint8)
+        out[b, K:] = np.unpackbits(acc)[:M]
+    return out.ravel()
 
 
 # Default iteration cap. Measured at 1.8 dB SNR (200 frames): 50 iterations

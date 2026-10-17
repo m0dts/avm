@@ -26,13 +26,15 @@ _PR_SET_PDEATHSIG = 1
 _prctl = None
 
 
-def die_with_parent():
+def die_with_parent(hard=False):
     """subprocess.Popen/run kwargs so the child gets SIGTERM when its parent
     dies (Linux): an ffmpeg capturing a camera that delivers no frames never
     writes, so it never sees the closed pipe and would otherwise hold the
     camera forever after TX stops. The signal is tied to the thread that
     started the child: only use from a thread that lives as long as it.
-    Empty elsewhere."""
+    Empty elsewhere. hard=True sends SIGKILL instead: for ffmpeg/arecord
+    capture children, which on SIGTERM try to flush into the pipe that just
+    closed and print a screen of "Broken pipe" errors on every TX restart."""
     global _prctl
     if not sys.platform.startswith("linux"):
         return {}
@@ -43,7 +45,7 @@ def die_with_parent():
         except Exception:
             return {}
     import signal
-    sig = int(signal.SIGTERM)
+    sig = int(signal.SIGKILL if hard else signal.SIGTERM)
     return {"preexec_fn": lambda: _prctl(_PR_SET_PDEATHSIG, sig, 0, 0, 0)}
 
 

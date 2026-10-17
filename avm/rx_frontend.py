@@ -177,6 +177,15 @@ class FrontEnd:
         self.lo_offset_hz = lo_offset_hz
         self.in_fs = float(in_fs)
 
+    def set_lo_offset(self, lo_offset_hz):
+        """Change the LO shift while running (the receiver's AFC). The
+        phasor stays continuous: both paths index it by the absolute sample
+        count. The offset is set before the table, so a chunk in between
+        only sees the old shift once."""
+        table = lo_phasor_table(lo_offset_hz, self.in_fs)
+        self.lo_offset_hz = lo_offset_hz
+        self.lo_table = table
+
     def _next_iq_boundary(self):
         """Sample count at which the IQ coefficients are next (re)computed."""
         if self._iq_count < self._iq_first:

@@ -41,6 +41,7 @@ import avm_version
 import gui_layout
 import hf_ofdm_common as ofdm
 import media_rx_player
+import warm_pool
 
 try:
     import cv2 as _cv2  # optional: fast frame scaling in _video_frame_sink
@@ -143,6 +144,7 @@ class VideoSignal(QtCore.QObject):
 
 class SpectrumSignal(QtCore.QObject):
     data_ready = QtCore.pyqtSignal(object, object)  # (freqs: np.ndarray, mag_db: np.ndarray)
+    constellation_ready = QtCore.pyqtSignal(object)  # equalised data points (complex np.ndarray)
 
 
 def pump_stderr(proc, tag, log_stream, spectrum_signal=None, spectrum_re=None):
@@ -164,6 +166,13 @@ def pump_stderr(proc, tag, log_stream, spectrum_signal=None, spectrum_re=None):
             try:
                 text = raw.decode(errors="replace").rstrip()
                 if not text:
+                    continue
+                if spectrum_signal is not None and text.startswith("[constellation] "):
+                    try:   # hf_ofdm_rx.py's live constellation (only while the popup is open)
+                        pts = np.frombuffer(base64.b64decode(text[16:]), dtype=np.complex64)
+                        spectrum_signal.constellation_ready.emit(pts)
+                    except Exception:
+                        pass
                     continue
                 if spectrum_signal is not None:
                     m = spectrum_re.match(text)
@@ -554,6 +563,14 @@ class MediaRxWindow(QtWidgets.QMainWindow):
     # Spectrum widget
     # ------------------------------------------------------------------
 
+    PREWARM_DELAY_MS = 3000   # after a stop (never while one is starting)
+
+    def _schedule_prewarm(self, delay_ms=PREWARM_DELAY_MS):
+        def go():
+            if not self.procs and self.input_mode.currentText() == "pluto":
+                warm_pool.prewarm("rx", getattr(self, "sdr", "pluto"), self.pluto_uri.text().strip() or None)
+        QtCore.QTimer.singleShot(delay_ms, go)
+
     def _apply_spectrum_ref_level(self, top_db):
         div = self.spectrum_db_per_div.value()
         self.spectrum_plot.setYRange(top_db - 10 * div, top_db, padding=0)
@@ -741,21 +758,28 @@ class MediaRxWindow(QtWidgets.QMainWindow):
         except OSError:
             pass
 
+    def _set_station_style(self, css):
+        # only when it changes: setStyleSheet re-polishes the label each time,
+        # and this ran for every log line that matched
+        if getattr(self, "_station_css", None) != css:
+            self._station_css = css
+            self.station_id_label.setStyleSheet(css)
+
     def _append_log(self, text):
         self._log_pending_lines.append(text)
         if self._station_id_reset_re.match(text):
             self.station_id_label.setText("(none received yet)")
-            self.station_id_label.setStyleSheet("")
+            self._set_station_style("")
             return
         m = self._station_id_tentative_re.match(text)
         if m:
             self.station_id_label.setText(f"'{m.group(1)}' (unconfirmed)")
-            self.station_id_label.setStyleSheet("color: #b70;")
+            self._set_station_style("color: #b70;")
             return
         m = self._station_id_re.match(text)
         if m:
             self.station_id_label.setText(f"'{m.group(1)}'")
-            self.station_id_label.setStyleSheet("")
+            self._set_station_style("")
             return
         m = self._frag_re.match(text)
         if m:
@@ -804,7 +828,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
 
         self._reset_frag_stats()
         self.station_id_label.setText("(none received yet)")
-        self.station_id_label.setStyleSheet("")
+        self._set_station_style("")
         self.video_label.set_frame(QtGui.QPixmap())
         self.video_label.setText("(no video)")
         self._append_log(f"[gui] rx: {' '.join(shlex.quote(c) for c in rx_cmd)}")
@@ -822,8 +846,15 @@ class MediaRxWindow(QtWidgets.QMainWindow):
         # media_rx_player.py one, but the same OS-level scheduling
         # interaction applies regardless of which process it's in).
         rx_priority = {"creationflags": subprocess.HIGH_PRIORITY_CLASS} if sys.platform == "win32" else {}
-        p_rx = subprocess.Popen(rx_cmd, stdin=rx_stdin if rx_stdin is not None else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 **rx_priority)
+        # a preloaded receiver (warm_pool.py) skips its ~3.5 s of imports;
+        # only for the usual pipes (a file input gets a fresh process)
+        warm = warm_pool.take("rx") if rx_stdin is subprocess.PIPE else None
+        if warm is not None:
+            p_rx = warm.launch(rx_cmd[2:])
+            self._append_log("[gui] rx: started from the preloaded process")
+        else:
+            p_rx = subprocess.Popen(rx_cmd, stdin=rx_stdin if rx_stdin is not None else subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, **rx_priority)
 
         self.procs = [p_rx]
         t = threading.Thread(target=pump_stderr, args=(p_rx, "rx", self.log_stream,
@@ -906,6 +937,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
         self.threads = []
         self._player_thread = None
         self._video = None
+        self._schedule_prewarm()
         self._audio_worker = None
         self._record = None
         if getattr(self, "_rx_in_file", None) is not None:

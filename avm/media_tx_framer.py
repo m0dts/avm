@@ -281,7 +281,7 @@ def read_codec2_frames(pipe, frame_bytes):
         del buf[:frame_bytes]
 
 
-WAVELET_CODEC_TAG = b"WVT4"  # VIDEO_CONFIG extradata for media_source_wavelet.py's stream
+WAVELET_CODEC_TAG = b"WVT8"  # 5: reference as coefficients; 6: + global motion; 7: motion bytes only when moving; 8: + block motion  # VIDEO_CONFIG extradata for media_source_wavelet.py's stream
 
 
 def read_length_prefixed(pipe):

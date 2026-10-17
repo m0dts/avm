@@ -63,6 +63,11 @@ class ConfigPage(QtWidgets.QWidget):
         self.papr = tw.Segmented([("0", "Off"), ("7", "On")], str(s_get(settings, "tx_papr", "0")))
         self.papr.changed.connect(self._papr_changed)
 
+        # black and white video: every bit to brightness (low bitrates)
+        self.mono = tw.Segmented([("colour", "Colour"), ("bw", "B/W")],
+                                 "bw" if s_get(settings, "tx_mono", False) else "colour")
+        self.mono.changed.connect(self._mono_changed)
+
         # receive paths that mirror the spectrum (sync triggers, every header fails)
         self.invert = tw.Segmented([("normal", "Normal"), ("inverted", "Inverted")],
                                    "inverted" if s_get(settings, "rx_invert", False) else "normal")
@@ -71,7 +76,7 @@ class ConfigPage(QtWidgets.QWidget):
         rows = [
             ("Mode type", mode_row),
             ("TX radio", tw.freq_radio_row(tx.radio, tx.lime_port)),
-            ("RX radio", tw.freq_radio_row(rx.radio, rx.lime_port, rx.ppm)),
+            ("RX radio", tw.freq_radio_row(rx.radio, rx.lime_port, rx.ppm, rx.anan_ant)),
             ("Camera", tx.camera),
             ("Mic", tx.mic),
             ("Audio out", rx.audio_out),
@@ -95,8 +100,8 @@ class ConfigPage(QtWidgets.QWidget):
         more = QtWidgets.QGridLayout()
         more.setHorizontalSpacing(8)
         more.setVerticalSpacing(5)
-        for r, (label, w) in enumerate((("KiwiSDR", self.kiwi), ("RX spectrum", self.invert),
-                                        ("TX peak reduce", self.papr))):
+        for r, (label, w) in enumerate((("Video", self.mono), ("KiwiSDR", self.kiwi),
+                                        ("RX spectrum", self.invert), ("TX peak reduce", self.papr))):
             more.addWidget(tw.row_label(label), r, 0)
             more.addWidget(w, r, 1)
         more.setColumnStretch(1, 1)
@@ -112,6 +117,11 @@ class ConfigPage(QtWidgets.QWidget):
         self.rx.set_spectrum_averages(int(self.averages.value()))
         self.rx.engine.invert_spectrum = self.invert.value() == "inverted"
         self.tx.engine.papr_db = float(self.papr.value() or 0)
+        self.tx.engine.mono = self.mono.value() == "bw"
+
+    def _mono_changed(self, value):
+        self.s["tx_mono"] = value == "bw"
+        self.tx.set_mono(value == "bw")
 
     def _papr_changed(self, value):
         self.s["tx_papr"] = value

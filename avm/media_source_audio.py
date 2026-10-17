@@ -133,13 +133,13 @@ def main():
         print(f"[media_source_audio] capture: {' '.join(rec)}", file=sys.stderr)
         # arecord -> ffmpeg. If either end goes (TX stopped: the framer closes
         # ffmpeg's output), the other follows via EOF / SIGPIPE.
-        capture = subprocess.Popen(rec, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **avm_threads.die_with_parent())
+        capture = subprocess.Popen(rec, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **avm_threads.die_with_parent(hard=True))
         try:
-            proc = subprocess.run(cmd, stdin=capture.stdout, **priority, **avm_threads.die_with_parent())
+            proc = subprocess.run(cmd, stdin=capture.stdout, **priority, **avm_threads.die_with_parent(hard=True))
         finally:
             capture.kill()
         sys.exit(proc.returncode)
-    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, **priority, **avm_threads.die_with_parent())
+    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, **priority, **avm_threads.die_with_parent(hard=True))
     sys.exit(proc.returncode)
 
 

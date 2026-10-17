@@ -33,6 +33,16 @@ import time
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
+# Start opening the radio before the heavy imports below (numba, the modem:
+# ~3.5 s on a Pi 4) -- the ~2 s radio open overlaps them instead of
+# following them. pluto_soapy_sink itself only needs numpy.
+if __name__ == "__main__":
+    try:
+        import pluto_soapy_sink as _pss
+        _pss.preopen_from_argv(sys.argv[1:], "TX")
+    except Exception:
+        pass
+
 import numpy as np
 
 import hf_ofdm_common as ofdm
@@ -131,7 +141,8 @@ def run_stream(cfg, args, sink, fixed_peak=None):
             # (a 12-bit DAC on the Pluto), and the resample's large FFTs run
             # ~2x faster in float32 (numpy >= 2 keeps the dtype) -- ~10 ms
             # per fragment on a Raspberry Pi 4.
-            waveform = ofdm.fft_resample_rate(waveform.astype(np.complex64), cfg.fs, args.sample_rate)
+            waveform = ofdm.fft_resample_rate(waveform.astype(np.complex64), cfg.fs, args.sample_rate,
+                                              *ofdm.tx_spectrum_cut(cfg))
             out_fs = args.sample_rate
 
         # Normalize by RMS (not peak) so that --amplitude controls average
@@ -688,7 +699,7 @@ def main():
 
     out_fs = cfg.fs
     if args.sample_rate is not None and args.sample_rate != cfg.fs:
-        waveform = ofdm.fft_resample_rate(waveform, cfg.fs, args.sample_rate)
+        waveform = ofdm.fft_resample_rate(waveform, cfg.fs, args.sample_rate, *ofdm.tx_spectrum_cut(cfg))
         out_fs = args.sample_rate
         print(f"Resampled {cfg.fs:.1f} Hz -> {out_fs:.1f} Hz "
               f"({len(waveform)} samples)", file=sys.stderr)

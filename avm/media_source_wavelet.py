@@ -30,6 +30,9 @@ from media_source import build_video_args, list_devices
 from wavelet_codec import WaveletCodec
 
 
+MOTION_PIXEL_RATE = 1.1e6   # pixels/s up to which --motion auto turns it on
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", choices=["device", "test"], default="device")
@@ -56,6 +59,12 @@ def main():
                     help="Also trial-encode each frame with every weight at the full leak and keep "
                          "the better one: ~+0.1 dB, ~1.5x encode time (~23 -> ~35 ms/frame at "
                          "256x144), but ~2x slower recovery after a lost packet. Same bitstream.")
+    ap.add_argument("--motion", choices=["auto", "on", "off"], default="auto",
+                    help="Motion compensation (camera pans and moving subjects): auto = on while "
+                         "width x height x fps <= 1.1 million pixels/s (all sizes to 384x224 at 12 fps, "
+                         "640x352 to ~5 fps), where a Pi 4 can afford its ~20-25 ms a frame at 640x352.")
+    ap.add_argument("--mono", action="store_true",
+                    help="Black and white: send flat grey colour, every bit to brightness.")
     ap.add_argument("--duration", type=float, default=None)
     ap.add_argument("--preview", type=str, default=None,
                     help="Also publish every input frame to this shared-memory file for a live "
@@ -71,8 +80,17 @@ def main():
 
     w, h = (int(x) for x in args.resolution.lower().split("x"))
     frame_bytes = args.frame_bytes or round(args.video_bitrate * 1000 / 8 / args.framerate)
-    codec = WaveletCodec(w, h, frame_bytes, leak=args.leak,
-                         refresh_frames=round(args.refresh_seconds * args.framerate), rd_trial=args.rd_trial)
+    # Refresh at least every 20 frames: at 1 fps, --refresh-seconds 5 meant a
+    # fifth of every tiny frame re-sent picture the receiver already had
+    # (+0.3-0.4 dB at 1 fps with 20, measured at 150-600 B/frame)
+    refresh = (max(round(args.refresh_seconds * args.framerate), 20) if args.refresh_seconds > 0 else 0)
+    # auto: on while the picture rate fits a Pi 4 -- motion adds ~20-25 ms a
+    # frame at 640x352 (the moved reference's transforms + the search):
+    # everything to 384x224 at 12 fps, 640x352 to ~5 fps
+    motion = args.motion == "on" or (args.motion == "auto" and w * h * args.framerate <= MOTION_PIXEL_RATE)
+    codec = WaveletCodec(w, h, frame_bytes, leak=args.leak, refresh_frames=refresh,
+                         rd_trial=args.rd_trial, motion=motion)
+    grey = np.full((h // 2, w // 2), 128, np.uint8) if args.mono else None
     # JIT warm-up before capture starts: quick once compiled, but the first
     # run on a machine compiles the codec (minutes on a slow CPU). The GUI
     # shows these two lines in its preview.
@@ -106,7 +124,7 @@ def main():
         except OSError as e:
             print(f"[media_source_wavelet] preview disabled: {e}", file=sys.stderr)
 
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, bufsize=0, **avm_threads.die_with_parent())
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, bufsize=0, **avm_threads.die_with_parent(hard=True))
     ysz, csz = w * h, (w // 2) * (h // 2)
     fsz = ysz + 2 * csz
     out = sys.stdout.buffer
@@ -127,8 +145,8 @@ def main():
                 preview.write(frame)
             t0 = time.perf_counter()
             pkt = codec.encode(f[:ysz].reshape(h, w),
-                               f[ysz:ysz + csz].reshape(h // 2, w // 2),
-                               f[ysz + csz:].reshape(h // 2, w // 2))
+                               grey if grey is not None else f[ysz:ysz + csz].reshape(h // 2, w // 2),
+                               grey if grey is not None else f[ysz + csz:].reshape(h // 2, w // 2))
             t_enc += time.perf_counter() - t0
             out.write(struct.pack(">H", len(pkt)) + pkt)
             out.flush()

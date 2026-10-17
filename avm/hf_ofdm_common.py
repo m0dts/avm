@@ -808,7 +808,7 @@ def _max_prime_factor(n):
 _FAST_PAD_CACHE = {}
 
 
-def fft_resample_rate(x, fs_in, fs_out):
+def fft_resample_rate(x, fs_in, fs_out, cut_hz=None, taper_hz=0.0):
     """fft_resample to the rate fs_out, first appending the fewest zero
     samples that make both FFT lengths free of large prime factors.
     Without this the output length can be a large prime times a few small
@@ -824,7 +824,27 @@ def fft_resample_rate(x, fs_in, fs_out):
     # The pad stays on air (cutting it back off raised out-of-band emission
     # 20-35 dB at the fragment joins): fragment timing that must match the
     # radio uses resample_pad() / estimate_effective_bitrate(out_fs=...).
-    return fft_resample(x, int(round(len(x) * fs_out / fs_in)))
+    return fft_resample(x, int(round(len(x) * fs_out / fs_in)), fs_in, cut_hz, taper_hz)
+
+
+# The transmitted spectrum, cut just past the last carrier. OFDM's carriers
+# have slowly-falling sidelobes; the mode's rate is only ~6% wider than the
+# signal, so they filled the gap to the rate's edge as a shelf ~-14 dB
+# beside the band, ending in a cliff -- a "tone" either side, plainly
+# visible on another receiver. The resampler works on a whole fragment in
+# one FFT, so it can cut sharply: everything beyond TX_CUT_SPACINGS carrier
+# spacings past the last carrier goes, rolled off over TX_TAPER_SPACINGS.
+# Measured (modes A/B/D): worst emission outside -13..-15 dB -> -56..-70 dB,
+# decode unchanged at 22 dB SNR (EVM within 0.1%). Half a spacing let the
+# emission back; the VU modes fill their rate, so the cut changes nothing there.
+TX_CUT_SPACINGS = 2.0
+TX_TAPER_SPACINGS = 1.5
+
+
+def tx_spectrum_cut(cfg):
+    """(cut_hz, taper_hz) for fft_resample_rate on the transmit side."""
+    last = float(np.max(np.abs(np.asarray(cfg.data_bins)))) * cfg.carrier_spacing
+    return last + TX_CUT_SPACINGS * cfg.carrier_spacing, TX_TAPER_SPACINGS * cfg.carrier_spacing
 
 
 def resample_pad(n_in, fs_in, fs_out):
@@ -854,12 +874,18 @@ def resample_pad(n_in, fs_in, fs_out):
     return pad
 
 
-def fft_resample(x, n_out):
-    """Fourier-method resample (like scipy.signal.resample) to n_out samples."""
+def fft_resample(x, n_out, fs_in=None, cut_hz=None, taper_hz=0.0):
+    """Fourier-method resample (like scipy.signal.resample) to n_out samples.
+    cut_hz (with fs_in): also remove everything beyond cut_hz, rolled off
+    over taper_hz with a raised cosine (see tx_spectrum_cut)."""
     n_in = len(x)
-    if n_out == n_in:
+    if n_out == n_in and cut_hz is None:
         return x
     X = np.fft.fft(x)
+    if cut_hz is not None and fs_in and cut_hz < fs_in / 2:
+        f = np.abs(np.fft.fftfreq(n_in, 1.0 / fs_in))
+        u = np.clip((f - cut_hz) / max(taper_hz, 1e-9), 0.0, 1.0)
+        X = X * (0.5 + 0.5 * np.cos(np.pi * u)).astype(X.real.dtype)
     if n_out > n_in:
         pad = n_out - n_in
         left = (n_in + 1) // 2
@@ -1878,17 +1904,20 @@ def _ofdm_modulate_batched(cfg, data_bits_per_symbol, symbol_modulations):
     masks = phase_masks[np.arange(n) % period]
     syms = np.zeros((n, cfg.n_data), dtype=complex)
     syms[masks] = np.broadcast_to(pilot_sequence(cfg), (n, cfg.n_data))[masks]
+    has_data = ~phase_masks.all(axis=1)[np.arange(n) % period]   # once, not per symbol per mapper
+    mods = np.array(symbol_modulations)
     for mod, mapper in _MAPPERS.items():
-        rows = np.array([k for k in range(n) if symbol_modulations[k] == mod
-                         and not masks[k].all()], dtype=np.int64)
+        rows = np.flatnonzero((mods == mod) & has_data)
         if len(rows) == 0:
             continue
         sel = np.zeros((n, cfg.n_data), dtype=bool)
         sel[rows] = ~masks[rows]
         syms[sel] = mapper(np.concatenate([np.asarray(data_bits_per_symbol[k]) for k in rows]))
-    freq = np.zeros((n, cfg.n_fft), dtype=complex)
+    # single precision for the inverse FFT: every sink sends complex64 (and
+    # the radios' DACs are 12 bits), and float32 FFTs run ~2x faster on a Pi
+    freq = np.zeros((n, cfg.n_fft), dtype=np.complex64)
     freq[:, cfg.fft_bins] = syms  # standard (non-shifted) bin order -- see the loop version's comment
-    time_sig = np.fft.ifft(freq, axis=1) * np.sqrt(cfg.n_fft)
+    time_sig = np.fft.ifft(freq, axis=1) * np.float32(np.sqrt(cfg.n_fft))
     return np.concatenate([time_sig[:, cfg.n_fft - cfg.n_cp:], time_sig], axis=1).reshape(-1)
 
 
@@ -2931,47 +2960,50 @@ def build_frame(cfg, payload: bytes):
         offset += cap
     k = header_symbol_indices[-1] + 1
 
-    remaining = coded_bits
-    scramble_pos = 0
-    while len(remaining) > 0:
+    # Payload symbols: capacities first, then ONE whitening XOR over the
+    # zero-padded total and a split -- the same bits as whitening symbol by
+    # symbol (the PRBS runs on continuously), without a PRBS slice per
+    # symbol: mode VU fragments have ~100 payload symbols.
+    caps = []
+    got = 0
+    while got < len(coded_bits):
         cap = _payload_bits_capacity(cfg, k)
-        if cap == 0:
-            symbol_bits_list.append(np.zeros(0, dtype=np.uint8))
-            symbol_modulations.append(cfg.data_modulation)
-            k += 1
-            continue
-        chunk = remaining[:cap]
-        if len(chunk) < cap:
-            chunk = np.concatenate([chunk, np.zeros(cap - len(chunk), dtype=np.uint8)])
-        chunk = chunk ^ _prbs_bits(cap, scramble_pos)  # whiten (see _descramble_soft)
-        scramble_pos += cap
-        symbol_bits_list.append(chunk)
-        symbol_modulations.append(cfg.data_modulation)
-        remaining = remaining[cap:]
+        caps.append(cap)
+        got += cap
         k += 1
+    padded = np.zeros(got, dtype=np.uint8)
+    padded[:len(coded_bits)] = coded_bits
+    padded ^= _prbs_bits(got)  # whiten (see _descramble_soft)
+    pos = 0
+    for cap in caps:
+        symbol_bits_list.append(padded[pos:pos + cap])
+        symbol_modulations.append(cfg.data_modulation)
+        pos += cap
 
     preamble = build_preamble(cfg)
     frame = ofdm_modulate(cfg, symbol_bits_list, symbol_modulations)
     return np.concatenate([preamble, frame])
 
 
-PAPR_OVERSAMPLE = 4
+PAPR_OVERSAMPLE = 2   # 4x reached ~0.2 dB lower peaks for ~2x the time
 PAPR_ITERATIONS = 3
 
 
 def reduce_papr(cfg, frame, target_db, iterations=PAPR_ITERATIONS):
     """Clip-and-filter peak reduction of a built frame (build_frame's
     output), receiver-transparent: per OFDM symbol, its carriers are
-    upsampled 4x (peaks between samples count too), the magnitude clipped
-    at target_db above the frame's RMS, and only the DATA carriers take the
-    result -- pilots keep their exact values (channel estimates unharmed),
-    unused bins stay empty (no out-of-band regrowth). Repeated: putting the
-    pilots and empty bins back lets some peaks regrow. The preamble is left
-    alone (sync). The cost is a little in-band distortion on the data
-    carriers -- a ceiling on MER, set by target_db.
-    OFDM's PAPR is ~10 dB (AVM measured 9.5 dB); a single carrier like
-    DVB-S2 ~4 dB, so the same amplifier peak gives OFDM several dB less
-    average power. 0 or None: off."""
+    upsampled PAPR_OVERSAMPLE x (peaks between samples count too), the
+    magnitude clipped at target_db above the frame's RMS, and only the DATA
+    carriers take the result -- pilots keep their exact values (channel
+    estimates unharmed), unused bins stay empty (no out-of-band regrowth).
+    Repeated: putting the pilots and empty bins back lets some peaks
+    regrow. The preamble is left alone (sync). The cost is a little in-band
+    distortion on the data carriers -- a ceiling on MER, set by target_db.
+    OFDM's PAPR is ~10 dB; a single carrier like DVB-S2 ~4 dB, so the same
+    amplifier peak gives OFDM several dB less average power. Cost on a Pi 4:
+    ~14 ms a VU 160 fragment (91 ms on air) -- the first version (4x,
+    complex np.where every pass) took 57 ms there and, on top of the
+    modulator's own ~54%, ran the transmitter out of real time. 0/None: off."""
     if not target_db:
         return frame
     n, L, cp = cfg.n_fft, cfg.symbol_len, cfg.n_cp
@@ -2983,26 +3015,25 @@ def reduce_papr(cfg, frame, target_db, iterations=PAPR_ITERATIONS):
     bins = np.asarray(cfg.fft_bins)
     idx_n, idx_os = bins % n, bins % os_n
     body = np.asarray(frame[pre:pre + n_sym * L]).reshape(n_sym, L)[:, cp:]
-    carriers = np.fft.fft(body, axis=1)[:, idx_n] / np.sqrt(n)           # (n_sym, n_data)
-    data = np.stack([~pilot_mask(cfg, k) for k in range(n_sym)])          # data carriers per symbol
+    carriers = np.fft.fft(body, axis=1)[:, idx_n] * (1 / np.sqrt(n))
+    rows, cols = np.nonzero(np.stack([~pilot_mask(cfg, k) for k in range(n_sym)]))   # data cells
+    dcol = idx_os[cols]
     X = np.zeros((n_sym, os_n), np.complex128)
     X[:, idx_os] = carriers
     x = np.fft.ifft(X, axis=1)
-    thr = np.sqrt(np.mean(np.abs(x) ** 2)) * 10 ** (target_db / 20)
-    cur = carriers.copy()
+    thr2 = np.mean(x.real ** 2 + x.imag ** 2) * 10 ** (target_db / 10)
     for _ in range(iterations):
-        mag = np.abs(x)
-        x = np.where(mag > thr, x * (thr / np.maximum(mag, 1e-30)), x)
-        Y = np.fft.fft(x, axis=1)[:, idx_os]
-        cur = np.where(data, Y, carriers)                                 # data carriers only
-        X = np.zeros((n_sym, os_n), np.complex128)
-        X[:, idx_os] = cur
+        pw = x.real ** 2 + x.imag ** 2
+        big = pw > thr2
+        if big.any():
+            x[big] *= np.sqrt(thr2 / pw[big])          # clip only the peaks
+        X[rows, dcol] = np.fft.fft(x, axis=1)[rows, dcol]   # data carriers take the clipped values
         x = np.fft.ifft(X, axis=1)
     F = np.zeros((n_sym, n), np.complex128)
-    F[:, idx_n] = cur
+    F[:, idx_n] = X[:, idx_os]
     t = np.fft.ifft(F, axis=1) * np.sqrt(n)
     out = np.array(frame, dtype=np.complex128, copy=True)
-    out[pre:pre + n_sym * L] = np.concatenate([t[:, -cp:], t], axis=1).reshape(-1) if cp else t.reshape(-1)
+    out[pre:pre + n_sym * L] = (np.concatenate([t[:, -cp:], t], axis=1) if cp else t).reshape(-1)
     return out
 
 

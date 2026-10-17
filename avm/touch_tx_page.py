@@ -164,8 +164,18 @@ class TxPage(QtWidgets.QWidget):
         self.warning.setObjectName("warn")
         self.status = tw.ElideLabel("Idle")
         self.status.setObjectName("dim")
+        # start-up progress, in the preview area while there's no picture:
+        # Python preloaded / radio open / warm-up / on air (placed by
+        # eventFilter on the preview's resize)
+        self.stages = tw.StageBlocks(["Python", "Radio", "Warm-up", "On air"], parent=self.preview,
+                                     block_size=(34, 8))
+        self.stages.adjustSize()
+        self.preview.installEventFilter(self)
         for w in (self.rates, self.link, self.warning, self.status):
             il.addWidget(w)
+        self._stage_timer = QtCore.QTimer(self)
+        self._stage_timer.timeout.connect(self._idle_stages)
+        self._stage_timer.start(500)
         left.addWidget(info)
         # C920 focus: only shown for that camera (see _update_focus_row)
         self.focus_cam = CameraFocus()
@@ -349,7 +359,8 @@ class TxPage(QtWidgets.QWidget):
         link = f"Link {m.group(1)} kbps" if m else "Link --"
         self.link.setText(f"{link}  ·  {e.resolution.currentText()} @ {e.framerate.value():g} fps"
                           f"  ·  {'LimeSDR' if e.sdr == 'lime' else 'PlutoSDR'}")
-        warn = e.video_bitrate_warning.text() or e.audio_packing_warning.text()
+        warn = (tw.cpu_warning(self.mode.value(), self.bw.value(), self.mod.value(), self.duplex())
+                or e.video_bitrate_warning.text() or e.audio_packing_warning.text())
         forced_audio = self.s.get("tx_content", "auto") == "audio"
         if not video and not forced_audio:
             warn = "NO VIDEO: link too slow, sending audio only -- use a wider kHz or faster mode"
@@ -390,6 +401,15 @@ class TxPage(QtWidgets.QWidget):
         width = max(lab.sizeHint().width() for lab in self._left_labels)
         for lab in self._left_labels:
             lab.setFixedWidth(width)
+
+    def set_mono(self, on):
+        """The Config tab's Video: Colour / B&W. A running TX is restarted."""
+        if bool(on) == bool(getattr(self.engine, "mono", False)):
+            return
+        self.engine.mono = bool(on)
+        if self.is_running():
+            self.stop()
+            self.start()
 
     def set_papr(self, db):
         """The Config tab's TX peak reduction: 0 = off, else the peak limit
@@ -613,6 +633,7 @@ class TxPage(QtWidgets.QWidget):
         if self.is_running():
             self.run.set_state("running")
             self.status.setText("Starting...")
+            self.stages.set_states(["busy", "todo", "todo", "todo"])
             # the camera may reset its controls when ffmpeg opens it
             QtCore.QTimer.singleShot(2500, self._focus_changed)
             self.running_changed.emit(True)
@@ -644,7 +665,41 @@ class TxPage(QtWidgets.QWidget):
             pass  # not there (first run), or still held: the source reports it
         self.running_changed.emit(False)
 
+    def eventFilter(self, obj, event):
+        if obj is self.preview and event.type() == QtCore.QEvent.Resize:
+            self._place_stages()
+        return super().eventFilter(obj, event)
+
+    def _place_stages(self):
+        """Centred, below the preview's (two-line) placeholder text."""
+        v, s = self.preview, self.stages
+        s.move((v.width() - s.width()) // 2, v.height() // 2 + round(30 * tw.SCALE))
+
+    def _idle_stages(self):
+        """The bar shows only while there's no camera picture; while
+        stopped, its first block shows the preload (warm_pool.py)."""
+        self.stages.setVisible(getattr(self.preview, "_pix", None) is None)
+        if self.is_running():
+            return
+        import warm_pool
+        st = warm_pool.state("tx")
+        self.stages.set_states([{"ready": "done", "loading": "busy"}.get(st, "todo"), "todo", "todo", "todo"])
+
+    def _stage_from_log(self, line):
+        if "started from the preloaded process" in line or "] Mode " in line:
+            self.stages.set(0, "done")
+        elif "Opening" in line and "TX" in line:
+            self.stages.set(1, "busy")
+        elif "TX active" in line:
+            self.stages.set(1, "done")
+        elif "Warmup:" in line or "warmup:" in line:
+            self.stages.set(2, "busy")
+        elif "Warmup done" in line or ("Streamed fragment" in line and "[warmup]" not in line
+                                       and self.stages.states[3] != "done"):
+            self.stages.set(3, "done")
+
     def _on_log(self, line):
+        self._stage_from_log(line)
         if "Streamed fragment" in line:
             self._sent += 1
         # Problems go to the title bar's errors list, not the status line:

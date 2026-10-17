@@ -49,7 +49,10 @@ AUTOSCALE_S = 5
 TUNE_BAR_COLOUR = "#4fc3f7"  # spectrum tuning indicator: signal band (light blue, not the yellow trace)
 TUNE_OK_COLOUR = "#66bb6a"   # ...and the +- pull-in zones at the centre and edges (green)
 MANUAL_DB_PER_DIV = 2.5
-AUTOSCALE_MAX_DB_PER_DIV = 5.0  # cap: a very low floor drops off the bottom instead
+# Auto: dB/div from these, the smallest whose 10 divisions fit noise..peak
+# (10 and 20 only when 5 can't: a very strong signal shouldn't run off the top)
+AUTOSCALE_DIVS = (1.0, 2.0, 4.0, 5.0, 10.0, 20.0)
+AUTOSCALE_NOISE_LIFT_DB = 1.0   # the noise mean this far above the bottom line
 
 
 def _station_text(engine_text):
@@ -74,6 +77,7 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
     sdr = "pluto"
     rtl_ppm = 0.0
     lime_port = "Auto"
+    anan_antenna = "ANT1"
     invert_spectrum = False  # the Config tab's RX spectrum: Inverted
     tdd = None          # duplex (touch_widgets.tdd_config): this receiver also transmits
     tdd_tx_gain = -10.0
@@ -96,6 +100,8 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
             cmd += ["--sdr-ppm", f"{self.rtl_ppm:g}"]
         if self.sdr == "lime" and self.lime_port != "Auto":
             cmd += ["--sdr-antenna", self.lime_port]
+        if self.sdr == "hpsdr":
+            cmd += ["--sdr-antenna", self.anan_antenna]
         if self.tdd:
             # same-channel duplex: listen between our own slots, and transmit
             # (on this radio) what the TX page's modulator writes to the FIFO
@@ -170,12 +176,29 @@ class RxPage(QtWidgets.QWidget):
             text.setObjectName("dim")
             status_row.addWidget(text)
             status_row.addSpacing(4)
+        # start-up progress, in the video area while there's no picture:
+        # Python preloaded / radio open / samples arriving (orange until the
+        # first spectrum update -- made from received samples -- then green).
+        # Positioned by eventFilter (video resize).
+        self.stages = tw.StageBlocks(["Python", "Radio", "Samples"], parent=video, block_size=(34, 8))
+        self.engine.spectrum_signal.data_ready.connect(self._samples_arriving)
+        self.stages.adjustSize()
         status_row.addWidget(self.status, 1)
         left.addLayout(status_row)
+        # tap the status line: live constellation (tw.ConstellationDialog)
+        self.status.installEventFilter(self)
+        self._stage_timer = QtCore.QTimer(self)
+        self._stage_timer.timeout.connect(self._idle_stages)
+        self._stage_timer.start(500)
         self._set_lamps(None)
         spec = self.engine.spectrum_plot
         spec.setParent(None)
         spec.setMinimumHeight(80)
+        # a display only on the touchscreen: a touch nearby panned it sideways
+        # (the desktop RX window keeps its pan/zoom)
+        spec.setMouseEnabled(x=False, y=False)
+        spec.setMenuEnabled(False)
+        spec.hideButtons()
         # compact axes for a small plot: no axis titles, small tick labels
         tick_font = self.font()
         tick_font.setPixelSize(max(9, round(11 * tw.SCALE)))
@@ -226,6 +249,11 @@ class RxPage(QtWidgets.QWidget):
         self.lime_port = tw.lime_port_picker("rx", s_get(settings, "rx_lime_port", "Auto"))
         self.engine.lime_port = self.lime_port.value()
         self.lime_port.changed.connect(self._lime_port_changed)
+        # ANAN / openHPSDR receive antenna (ANT1-3): only shown with that radio
+        self.anan_ant = tw.Picker("ANAN RX antenna", tw.ANAN_ANTENNAS,
+                                  s_get(settings, "rx_anan_antenna", "ANT1"))
+        self.engine.anan_antenna = self.anan_ant.value()
+        self.anan_ant.changed.connect(self._anan_ant_changed)
         # the radio on its own row (the RX column is too narrow to share Freq's),
         # with the radio's own extra: the LimeSDR port or the RTL-SDR's PPM
         # receive offset, live: nudges the receiver onto an off-frequency signal
@@ -259,6 +287,7 @@ class RxPage(QtWidgets.QWidget):
         self._autoscale_timer = QtCore.QTimer(self)
         self._autoscale_timer.timeout.connect(self._autoscale)
         self._autoscale_timer.start(AUTOSCALE_S * 1000)
+        self._show_idle_warning()
 
         self.set_radio(self.radio.sdr, force=True)
         self._apply_to_engine()
@@ -271,6 +300,11 @@ class RxPage(QtWidgets.QWidget):
         # a touch arrives as a synthesized mouse release
         if obj is self._video and event.type() == QtCore.QEvent.MouseButtonRelease:
             self._toggle_fullscreen()
+            return True
+        if obj is self._video and event.type() == QtCore.QEvent.Resize:
+            self._place_stages()
+        if obj is self.status and event.type() == QtCore.QEvent.MouseButtonRelease:
+            tw.ConstellationDialog(self, self.engine.spectrum_signal, self.mod.value()).show()
             return True
         return super().eventFilter(obj, event)
 
@@ -308,12 +342,14 @@ class RxPage(QtWidgets.QWidget):
         e = self.engine
         # how the Pluto is reached: the route picked in the radio list, else
         # its usual network address (pluto_soapy_sink falls back to a search)
-        e.pluto_uri.setText(tw.KIWI_SERVER if e.sdr == "kiwi" else (self.radio.pluto_uri or tw.default_pluto_uri()))
+        e.pluto_uri.setText(tw.KIWI_SERVER if e.sdr == "kiwi" else "" if e.sdr == "hpsdr"
+                            else (self.radio.pluto_uri or tw.default_pluto_uri()))
         e.input_mode.setCurrentText("pluto")
         e.rf_freq.setText(str(self.freq.hz()))
         e.mode.setCurrentText(self.mode.value())
         e.occupancy.setCurrentText(self.bw.value())
-        e.lo_offset_hz.setValue(0 if e.sdr == "kiwi" else tw.lo_offset_hz(self.bw.value()))  # Kiwi: IQ arrives centred
+        # Kiwi / ANAN: IQ arrives centred (the radio's own DDC), no LO offset
+        e.lo_offset_hz.setValue(0 if e.sdr in ("kiwi", "hpsdr") else tw.lo_offset_hz(self.bw.value()))
         e.pluto_sample_rate.setCurrentText(str(tw.RTL_SAMPLE_RATE if e.sdr == "rtlsdr" else tw.sdr_rate(self.bw.value())))
         e.fragment_size.setValue(tw.fragment_size(self.bw.value()))  # before the audio latency below
         e.span_hz = SPECTRUM_SPAN_X * float(self.bw.value()) * 1000
@@ -366,12 +402,20 @@ class RxPage(QtWidgets.QWidget):
                       rx_pluto_uri=self.radio.pluto_uri if hasattr(self, "radio") else "",
                       rx_rtl_ppm=self.ppm.value() if hasattr(self, "ppm") else 60,
                       rx_offset_khz=self.offset.value() if hasattr(self, "offset") else 0,
-                      rx_lime_port=self.lime_port.value() if hasattr(self, "lime_port") else "Auto")
+                      rx_lime_port=self.lime_port.value() if hasattr(self, "lime_port") else "Auto",
+                      rx_anan_antenna=self.anan_ant.value() if hasattr(self, "anan_ant") else "ANT1")
 
     def _offset_changed(self, khz):
         """Live: the running receiver re-tunes by this much (~0.2 s)."""
         tw.write_freq_offset_file(khz * 1000)
         self._save()
+
+    def _anan_ant_changed(self, ant):
+        """Applied when RX (re)starts."""
+        self.engine.anan_antenna = ant
+        self._save()
+        if self.is_running() and self.engine.sdr == "hpsdr":
+            self.run.set_state("pending")
 
     def _lime_port_changed(self, port):
         """Applied when RX (re)starts."""
@@ -434,7 +478,9 @@ class RxPage(QtWidgets.QWidget):
             lo, hi, pull = self._tuning_geometry(self.mode.value(), self.bw.value())
         except Exception:
             return  # an invalid combination being switched through: keep the last bar
-        self._tune_inner.setRegion((lo, hi))
+        # the band shading stops where the edge guides start: overlapping
+        # half of each, it tinted them unequally (the two looked different)
+        self._tune_inner.setRegion((lo + pull, hi - pull))
         for zone, at in zip(self._tune_zones, (lo, hi)):
             zone.setRegion((at - pull, at + pull))
 
@@ -442,6 +488,13 @@ class RxPage(QtWidgets.QWidget):
         self._apply_to_engine()  # (updates the tuning indicator too)
         if self.is_running():
             self.run.set_state("pending")
+        else:
+            self._show_idle_warning()
+
+    def _show_idle_warning(self):
+        warn = tw.cpu_warning(self.mode.value(), self.bw.value(), self.mod.value(), self.duplex())
+        if warn or self.status.text().startswith("Duplex 32QAM"):
+            self.status.setText(warn or "Idle")
 
     def _ref_changed(self, db):
         # a manual -/+ tap takes over from Auto
@@ -468,8 +521,9 @@ class RxPage(QtWidgets.QWidget):
         e.spectrum_plot.getAxis("left").setTickSpacing(major=2 * db_per_div, minor=db_per_div)
 
     def _autoscale(self):
-        """Ref level just above the spectrum's peak (5 dB steps), dB/div the
-        smallest multiple of 2.5 whose 10 divisions also reach the noise floor."""
+        """Bottom of the plot at the mean noise level (the spectrum's two
+        ends, outside the signal, averaged in power); dB/div the smallest of
+        AUTOSCALE_DIVS whose 10 divisions reach from there past the peak."""
         if not self.ref_auto.isChecked():
             return
         _, y = self.engine.spectrum_curve.getData()
@@ -479,13 +533,18 @@ class RxPage(QtWidgets.QWidget):
         y = y[np.isfinite(y)]
         if len(y) < 16:
             return
-        # the real peak: the 99th percentile let narrow strong signals (a
-        # KiwiSDR band's CW stations, carriers, spurs) run off the top
-        peak, floor = float(np.max(y)), np.percentile(y, 10)
-        ref = math.ceil((peak + 2) / 5) * 5
-        div = min(AUTOSCALE_MAX_DB_PER_DIV, max(2.5, math.ceil((ref - (floor - 3)) / 10 / 2.5) * 2.5))
-        self.ref.set_value(ref)          # display only (no emit: stays on Auto)
-        self._set_scale(self.ref.value(), div)
+        # the view is 1.5x the signal's width: its outer ~8% each side is band
+        # noise (power mean, not dB mean -- a dB mean sits ~2.5 dB low)
+        k = max(2, len(y) * 8 // 100)
+        edges = np.concatenate([y[:k], y[-k:]])
+        noise = 10 * np.log10(np.mean(10 ** (edges / 10)))
+        peak = float(np.max(y))    # the real peak, narrow carriers and spurs too
+        bottom = noise - AUTOSCALE_NOISE_LIFT_DB   # the noise mean just above the bottom line
+        span = peak + 1.0 - bottom  # a little headroom over the peak
+        div = next((d for d in AUTOSCALE_DIVS if 10 * d >= span), AUTOSCALE_DIVS[-1])
+        top = bottom + 10 * div
+        self.ref.set_value(int(round(top)))   # display only (no emit: stays on Auto)
+        self._set_scale(top, div)
 
     def set_radio(self, sdr, force=False):
         """'pluto', 'lime', 'rtlsdr', 'airspy', 'airspyhf' or 'sdrplay' -- from the Radio
@@ -499,8 +558,11 @@ class RxPage(QtWidgets.QWidget):
                    f"range -- set a new RX frequency")
             tw.notices().add("RX", msg)  # radio messages: errors list only
         self.lime_port.setVisible(sdr == "lime")
+        self.anan_ant.setVisible(sdr == "hpsdr")
         self.ppm.setVisible(sdr == "rtlsdr")
-        self.gain.hi = {"lime": 61, "rtlsdr": 49, "airspy": 45, "airspyhf": 45, "kiwi": 120}.get(sdr, 73)
+        # ANAN: 0-31 drives its step attenuator (31 = none)
+        self.gain.hi = {"lime": 61, "rtlsdr": 49, "airspy": 45, "airspyhf": 45, "kiwi": 120,
+                        "hpsdr": 31}.get(sdr, 73)
         # a KiwiSDR's manual gain 0 is silence (its output scales from nothing)
         self.gain.lo = 10 if sdr == "kiwi" else 0
         self.gain.set_value(self.gain.value(), emit=True)
@@ -640,6 +702,7 @@ class RxPage(QtWidgets.QWidget):
         if self.is_running():
             self.run.set_state("running")
             self.status.setText("Searching...")
+            self.stages.set_states(["busy", "todo", "todo"])
             self.running_changed.emit(True)
 
     def stop(self):
@@ -655,14 +718,45 @@ class RxPage(QtWidgets.QWidget):
                             f"  ·  {self._mer_text()}  ·  {self._cfo_text()}")
         self.running_changed.emit(False)
 
+    def _place_stages(self):
+        """Centred, a little below the middle (under the "(no video)" text)."""
+        v, s = self._video, self.stages
+        s.move((v.width() - s.width()) // 2, v.height() // 2 + round(18 * tw.SCALE))
+
+    def _idle_stages(self):
+        """The bar shows only while there's no picture; while stopped, its
+        first block shows the preload (warm_pool.py)."""
+        pm = getattr(self._video, "_raw_pixmap", None)
+        self.stages.setVisible(pm is None or pm.isNull())
+        if self.is_running():
+            return
+        import warm_pool
+        st = warm_pool.state("rx")
+        self.stages.set_states([{"ready": "done", "loading": "busy"}.get(st, "todo"), "todo", "todo"])
+
+    def _stage_from_log(self, line):
+        if "started from the preloaded process" in line or "] Mode " in line:
+            self.stages.set(0, "done")
+        elif "Opening" in line and "RX" in line:
+            self.stages.set(1, "busy")
+        elif "RX active" in line:
+            self.stages.set(1, "done")
+            self.stages.set(2, "busy")
+
+    def _samples_arriving(self, *_):
+        if self.is_running() and self.stages.states[2] != "done":
+            self.stages.set(2, "done")
+
     def _on_log(self, line):
+        self._stage_from_log(line)
         err = tw.error_line(line)
         if err:
             tw.notices().add("RX", err)
         # KiwiSDR trouble (refused, full, password, dropped...): to the errors
         # list, and kept as the reason if RX then stops
-        if "KiwiSDR" in line and "RX active" not in line:
-            self._radio_error = line[line.index("KiwiSDR"):].strip()
+        tag = next((t for t in ("KiwiSDR", "ANAN/HPSDR") if t in line), None)
+        if tag and "RX active" not in line and "attenuator now" not in line:
+            self._radio_error = line[line.index(tag):].strip()
             if not err:
                 tw.notices().add("RX", self._radio_error)
         # MER from each fragment's EVM (RMS error / ideal): MER = -20 log10(EVM)
@@ -674,12 +768,15 @@ class RxPage(QtWidgets.QWidget):
             del self._mer[:-MER_AVERAGE]
             self._mer_t = time.monotonic()
         now = time.monotonic()
-        if re.search(r"Fragment seq=\d+: OK", line):
-            # CFO only from good fragments: a failed one's can be a wrong lock
+        # CFO from every fragment whose header decoded (OK or CRC MISMATCH:
+        # the header's checksum held, so its lock and CFO are real -- far off
+        # tune those may be all there is); not from a garbage-header failure
+        if re.search(r"Fragment seq=\d+: (OK|CRC MISMATCH)", line):
             c = re.search(r"CFO=([+-]?[\d.]+)Hz", line)
             if c:
                 self._cfo.append(float(c.group(1)))
                 del self._cfo[:-MER_AVERAGE]
+        if re.search(r"Fragment seq=\d+: OK", line):
             self._ok += 1
             self._events.append((now, True, True))   # (time, header ok, frame ok)
         elif "CRC MISMATCH" in line:
@@ -746,12 +843,10 @@ class RxPage(QtWidgets.QWidget):
         tw.write_spectrum_averages_file(n)
 
     def _status_line(self):
-        """One row: MER, CFO, video fps, video queue (lock: the lamps)."""
+        """One row: MER measured/required, CFO, video fps (lock: the lamps)."""
         m = re.search(r"Video: (\d+)/", self.engine.video_stats_label.text())
         fps = f"{m.group(1)} fps" if m else "-- fps"
-        video = getattr(self.engine, "_video", None)
-        queue = f"Q {video.queue_depth()}" if video is not None else "Q --"
-        return f"{self._mer_text(live=True)} · {self._cfo_text()} · {fps} · {queue}"
+        return f"{self._mer_text(live=True)} · {self._cfo_text()} · {fps}"
 
     def _lock_window(self):
         """Seconds the lamps judge over: LOCK_WINDOW_S, or longer when
@@ -781,22 +876,31 @@ class RxPage(QtWidgets.QWidget):
                 colour = (LAMP_OFF if not judged else LAMP_NONE if not good
                           else LAMP_ALL if good == len(judged) else LAMP_SOME)
             r = self._lamps[name].width() // 4
-            self._lamps[name].setStyleSheet(f"background: {colour}; border-radius: {r}px;")
+            tw.set_style(self._lamps[name], f"background: {colour}; border-radius: {r}px;")
+
+    def _mer_required(self):
+        """MER (dB) at which 90% of frames decode in plain AWGN for the
+        current mode / width / modulation (mer_thresholds.json), or None."""
+        t = tw.mer_threshold(self.mode.value(), self.bw.value(), self.mod.value())
+        return t and t.get("mer_frame90")
 
     def _mer_text(self, live=False):
+        """"MER measured/required dB" -- required: see _mer_required."""
+        req = self._mer_required()
+        need = f"{req:.1f}" if req is not None else "--"
         # live: nothing decoded for MER_STALE_S (signal gone) reads 0, not the last value
         if live and self._mer and time.monotonic() - self._mer_t > MER_STALE_S:
-            return "MER 0.0 dB"
+            return f"0.0/{need} dB"
         if not self._mer:
-            return "MER --"
-        return f"MER {sum(self._mer) / len(self._mer):.1f} dB"
+            return f"--/{need} dB"
+        return f"{sum(self._mer) / len(self._mer):.1f}/{need} dB"
 
     def _cfo_text(self):
-        """Mean carrier frequency offset of the last good fragments (TX vs
-        RX oscillator difference, after the LO offset)."""
+        """Mean carrier frequency offset of the last fragments whose header
+        decoded (TX vs RX oscillator difference, after the LO offset)."""
         if not self._cfo:
-            return "CFO --"
-        return f"CFO {sum(self._cfo) / len(self._cfo):+.0f} Hz"
+            return "-- Hz"
+        return f"{sum(self._cfo) / len(self._cfo):+.0f} Hz"
 
     def shutdown(self):
         self.engine.stop()

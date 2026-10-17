@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 
+import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 SCALE = 1.0  # set by touch_gui.py before building pages (1.0 = 480 px tall)
@@ -241,6 +242,95 @@ class NoticesDialog(QtWidgets.QDialog):
     def _clear(self):
         notices().clear()
         self._fill()
+
+
+class ConstellationDialog(QtWidgets.QDialog):
+    """Live constellation of the received signal: the equalised data points
+    of the last FRAGMENTS fragments as a density image, updated as each
+    fragment decodes. While open, hf_ofdm_rx.py sends the points (its
+    CONSTELLATION_FLAG file is created here and removed on close)."""
+    FLAG = "/dev/shm/avm_constellation"
+    FRAGMENTS = 2   # the last two fragments: fuller clusters, still quick to change
+    SIZE = 300   # histogram bins each way
+
+    # outermost point (per axis) of each unit-power constellation, as
+    # equalised: the view is a fixed EXTENT x that, per modulation
+    OUTER = {"qpsk": 0.7071, "16qam": 0.9487, "32qam": 1.1180}
+    EXTENT = 1.4
+
+    def __init__(self, parent, signal, modulation="qpsk"):
+        super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        self.setModal(True)
+        # fixed scale: rescaling each picture to its own outliers made the
+        # whole constellation appear to pulse in size from update to update
+        self._lim = self.EXTENT * self.OUTER.get(modulation, 1.0)
+        lay = QtWidgets.QVBoxLayout(self)
+        top = QtWidgets.QHBoxLayout()
+        self.title = QtWidgets.QLabel("Constellation -- waiting for a decoded fragment...")
+        self.title.setObjectName("big")
+        top.addWidget(self.title, 1)
+        clear = QtWidgets.QPushButton("Clear")
+        clear.clicked.connect(self._clear)
+        top.addWidget(clear)
+        close = QtWidgets.QPushButton("Close")
+        close.clicked.connect(self.accept)
+        top.addWidget(close)
+        lay.addLayout(top)
+        self.view = QtWidgets.QLabel()
+        self.view.setAlignment(QtCore.Qt.AlignCenter)
+        self.view.setStyleSheet("background: #0c0c0c;")
+        lay.addWidget(self.view, 1)
+        self._frags = []
+        self._signal = signal
+        signal.constellation_ready.connect(self._add)
+        try:
+            open(self.FLAG, "w").close()
+        except OSError:
+            self.title.setText("Constellation -- can't switch the receiver's output on (/dev/shm)")
+        self.setGeometry(dialog_geometry(parent))
+
+    def _add(self, pts):
+        self._frags.append(np.asarray(pts))
+        del self._frags[:-self.FRAGMENTS]
+        self._draw()
+
+    def _clear(self):
+        self._frags = []
+        self.view.clear()
+
+    def _draw(self):
+        z = np.concatenate(self._frags)
+        if len(z) == 0:
+            return
+        lim = self._lim
+        h, _, _ = np.histogram2d(z.real, z.imag, bins=self.SIZE, range=[[-lim, lim], [-lim, lim]])
+        img = np.log1p(h.T[::-1])
+        img = (255 * img / max(img.max(), 1e-9)).astype(np.uint8)
+        try:
+            import cv2
+            rgb = cv2.cvtColor(cv2.applyColorMap(img, cv2.COLORMAP_INFERNO), cv2.COLOR_BGR2RGB)
+            rgb[img == 0] = (12, 12, 12)
+        except Exception:
+            rgb = np.repeat(img[:, :, None], 3, axis=2)
+        c = self.SIZE // 2
+        rgb[c, :] = rgb[:, c] = (60, 60, 60)
+        rgb = np.ascontiguousarray(rgb)
+        q = QtGui.QImage(rgb.data, self.SIZE, self.SIZE, 3 * self.SIZE, QtGui.QImage.Format_RGB888).copy()
+        side = max(50, min(self.view.width(), self.view.height()))
+        self.view.setPixmap(QtGui.QPixmap.fromImage(q).scaled(side, side, QtCore.Qt.KeepAspectRatio,
+                                                              QtCore.Qt.FastTransformation))
+        self.title.setText(f"Constellation -- last {len(self._frags)} fragment(s), {len(z)} points")
+
+    def done(self, r):
+        try:
+            self._signal.constellation_ready.disconnect(self._add)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            os.remove(self.FLAG)
+        except OSError:
+            pass
+        super().done(r)
 
 
 def dialog_geometry(widget):
@@ -580,7 +670,7 @@ class TextButton(QtWidgets.QPushButton):
 # SDRplay RSP: 1 kHz-2 GHz.
 FREQ_RANGE_MHZ = {"pluto": (70.0, 6000.0), "lime": (0.1, 3800.0), "rtlsdr": (24.0, 1766.0),
                   "airspy": (24.0, 1800.0), "airspyhf": (0.01, 260.0), "kiwi": (0.01, 32.0),
-                  "sdrplay": (0.001, 2000.0)}
+                  "sdrplay": (0.001, 2000.0), "hpsdr": (0.01, 55.0)}
 
 
 class FreqButton(QtWidgets.QPushButton):
@@ -881,6 +971,19 @@ def ffmpeg_has_encoder(name):
     return not _ffmpeg_encoders or name in _ffmpeg_encoders
 
 
+# Mode / width / modulation combinations a Raspberry Pi 4 can't keep up with
+# in duplex (TX and RX on one Pi): 32QAM at VU 160 and 250 kHz runs out of
+# CPU (fragments arrive late or are dropped). Fine one way at a time.
+CPU_HEAVY_DUPLEX = {("VU", "160", "32qam"), ("VU", "250", "32qam")}
+
+
+def cpu_warning(mode, khz, modulation, duplex):
+    """A warning line for a duplex combination the Pi can't keep up with, or ""."""
+    if duplex and (mode, str(khz), modulation) in CPU_HEAVY_DUPLEX:
+        return f"Duplex 32QAM at VU {khz} kHz: not enough CPU on a Pi -- expect dropped frames; use 16QAM"
+    return ""
+
+
 def enforce_mode_bandwidth(mode_seg, bw_seg, only_khz=None):
     """Bandwidths a mode can't use are greyed out (and left if selected):
     mode VU needs at least its min_occupancy_khz (see hf_ofdm_common).
@@ -913,7 +1016,7 @@ def saved_bandwidth(value):
 
 
 RADIO_NAMES = {"pluto": "PlutoSDR", "lime": "LimeSDR", "rtlsdr": "RTL-SDR",
-               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay", "kiwi": "KiwiSDR"}
+               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay", "kiwi": "KiwiSDR", "hpsdr": "ANAN (HPSDR)"}
 # USB vendor:product IDs per radio, for the USB watchdog (touch_gui). A radio
 # that isn't on USB at all (e.g. a Pluto on the network) simply isn't watched.
 USB_IDS = {
@@ -974,11 +1077,13 @@ def default_pluto_uri():
     return f"ip:{_pluto_probe['host']}" if _pluto_probe["host"] else ""
 
 
-RX_ONLY_RADIOS = ("rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi")
+RX_ONLY_RADIOS = ("rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi", "hpsdr")
 # KiwiSDR to receive from, host:port (the Config tab's KiwiSDR row sets it)
 KIWI_SERVER = ""
 # radios whose live gain goes via a file the RX process watches (no iio_attr)
-GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi")
+GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi", "hpsdr")
+# ANAN / openHPSDR receive antenna inputs
+ANAN_ANTENNAS = ["ANT1", "ANT2", "ANT3"]
 RTL_SAMPLE_RATE = 1024000  # an RTL-SDR rate (0.9-3.2 MS/s) that fits every bandwidth + LO offset
 
 
@@ -1001,6 +1106,16 @@ def radio_present(sdr, uri=None):
             return True, f"KiwiSDR at {server}"
         return False, (f"KiwiSDR {server} not answering -- check the address (Config tab) "
                        f"and your internet connection")
+    if sdr == "hpsdr":
+        import hpsdr_source
+        host = (uri or "").replace("ip:", "").split(":")[0] or None
+        radios = hpsdr_source.discover(host)
+        if not radios:
+            return False, "ANAN/HPSDR radio not answering on the network -- check it's on and connected"
+        ip, board, busy = radios[0]
+        if busy:
+            return False, f"ANAN/HPSDR {ip} is in use by another program -- close it first"
+        return True, f"ANAN ({board}) at {ip}"
     devs = usb_devices()
     if devs is not None:
         if USB_IDS.get(sdr, set()) & devs:
@@ -1057,6 +1172,13 @@ def detect_rx_radios():
             # label e.g. "SDRplay Dev0 RSP1A 2105090A1B"
             model = next((w for w in kw.get("label", "").split() if w.startswith("RSP")), "RSP")
             found.append(f"SDRplay {model} {kw.get('serial', '')[-6:]}".strip())
+    except Exception:
+        pass
+    # ANAN / openHPSDR protocol 2 radios on the network (discovery, ~0.6 s)
+    try:
+        import hpsdr_source
+        for ip, board, busy in hpsdr_source.discover():
+            found.append(f"ANAN {board} {ip}{' (in use)' if busy else ''}")
     except Exception:
         pass
     # KiwiSDR: over the network, so always offered (checked when RX starts)
@@ -1136,7 +1258,7 @@ class RadioPicker(Picker):
     search_in_background = True  # the radio search takes ~1.7 s on a Pi 4
 
     SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL", "airspy": "Airspy", "airspyhf": "HF+",
-             "sdrplay": "SDRplay", "kiwi": "Kiwi"}  # fits beside the frequency
+             "sdrplay": "SDRplay", "kiwi": "Kiwi", "hpsdr": "ANAN"}  # fits beside the frequency
 
     def __init__(self, title, sdr, rx=False, pluto_uri=""):
         allowed = RADIO_NAMES if rx else {k: v for k, v in RADIO_NAMES.items() if k not in RX_ONLY_RADIOS}
@@ -1164,7 +1286,8 @@ class RadioPicker(Picker):
                else "airspyhf" if label.startswith("Airspy HF+")
                else "airspy" if label.startswith("Airspy")
                else "sdrplay" if label.startswith("SDRplay")
-               else "kiwi" if label.startswith("KiwiSDR") else None)
+               else "kiwi" if label.startswith("KiwiSDR")
+               else "hpsdr" if label.startswith("ANAN") else None)
         if sdr == "pluto":
             self.pluto_uri = PLUTO_URIS.get(label, "")
         self.set_sdr(sdr or self.sdr)  # "(no radios found)" keeps the previous choice
@@ -1172,9 +1295,10 @@ class RadioPicker(Picker):
             self.radio_changed.emit(sdr)
 
 
-def freq_radio_row(freq, radio, port=None):
+def freq_radio_row(freq, radio, port=None, *extras):
     """Freq button and radio picker sharing one row (plus the LimeSDR port
-    picker, shown only while the LimeSDR is the radio)."""
+    picker and any other radio-specific extras, each shown only while its
+    radio is the one picked)."""
     w = QtWidgets.QWidget()
     w.setObjectName("seg")
     lay = QtWidgets.QHBoxLayout(w)
@@ -1182,8 +1306,9 @@ def freq_radio_row(freq, radio, port=None):
     lay.setSpacing(4)
     lay.addWidget(freq, 3)
     lay.addWidget(radio, 2)
-    if port is not None:
-        lay.addWidget(port, 2)
+    for x in (port,) + extras:
+        if x is not None:
+            lay.addWidget(x, 2)
     return w
 
 
@@ -1191,6 +1316,80 @@ def freq_radio_row(freq, radio, port=None):
 # pluto_soapy_sink._lime_configure); a port the board lacks (e.g. LNAL on a
 # LimeSDR Mini) falls back to Auto at start.
 LIME_PORTS = {"tx": ["Auto", "BAND1", "BAND2"], "rx": ["Auto", "LNAL", "LNAW", "LNAH"]}
+
+
+def set_style(widget, css):
+    """setStyleSheet, but only when the style actually changes: every call
+    re-polishes the widget (style rules re-resolved, layout redone), so the
+    lamps / CPU readout / notice button refreshed several times a second
+    were ~500 calls per couple of minutes on the GUI thread for nothing."""
+    if widget.property("_avm_css") != css:
+        widget.setProperty("_avm_css", css)
+        widget.setStyleSheet(css)
+
+
+class StageBlocks(QtWidgets.QWidget):
+    """A bar of colour blocks beside the START/STOP button showing how far a
+    TX/RX start has got: grey = not yet, amber = under way, green = done
+    (each block's name is its tooltip). The first block also shows, while
+    idle, whether the process is preloaded (warm_pool.py)."""
+    COLOURS = {"todo": (BUTTON, TEXT_DIM), "busy": (WARN, "#111"), "done": (GO, "#111")}
+
+    def __init__(self, labels, parent=None, block_size=None):
+        """block_size: (w, h) px at scale 1 for fixed blocks (e.g. a flat bar
+        in the video area); default narrow blocks the height of the row."""
+        super().__init__(parent)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        self._boxes = []
+        for text in labels:
+            b = QtWidgets.QLabel()
+            b.setToolTip(text)
+            if block_size:
+                b.setFixedSize(round(block_size[0] * SCALE), round(block_size[1] * SCALE))
+            else:
+                b.setFixedWidth(round(14 * SCALE))
+                b.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+            lay.addWidget(b)
+            self._boxes.append(b)
+        self.states = ["todo"] * len(labels)
+        self.set_states(self.states)
+
+    def set_states(self, states):
+        for b, st in zip(self._boxes, states):
+            bg, fg = self.COLOURS[st]
+            set_style(b, f"background: {bg}; border-radius: {round(3 * SCALE)}px;")
+        self.states = list(states)
+
+    def set(self, index, state):
+        """This block to state; blocks before a busy/done one count as done."""
+        states = list(self.states)
+        states[index] = state
+        if state in ("busy", "done"):
+            for i in range(index):
+                states[i] = "done"
+        self.set_states(states)
+
+
+_MER_TABLE = None
+
+
+def mer_threshold(mode, khz, modulation):
+    """AWGN decode thresholds for this mode / width / modulation from
+    mer_thresholds.json (made by tools/make_mer_table.py): a dict with
+    mer_frame50, mer_frame90 (MER in dB where 50% / 90% of frames decode)
+    and mer_header90, or None if the table or the entry is missing."""
+    global _MER_TABLE
+    if _MER_TABLE is None:
+        try:
+            import json
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "mer_thresholds.json")) as f:
+                _MER_TABLE = json.load(f).get("table", {})
+        except (OSError, ValueError):
+            _MER_TABLE = {}
+    e = _MER_TABLE.get(f"{mode}/{int(float(khz))}/{modulation}")
+    return {k: e.get(k) for k in ("mer_frame50", "mer_frame90", "mer_header90")} if e else None
 
 
 def lime_port_picker(kind, current):

@@ -3,6 +3,19 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.19 (2026-10-17)
+- Compatible over the air with 1.0.18 except video: the video format is new, so both ends need 1.0.19 for pictures (audio and data still work with 1.0.18)
+- Better video at low bitrates (about 2-3.5 dB at 5 kbps on camera video), with motion compensation, and a B/W option in Config
+- Much faster start: TX and RX are loaded in advance and a PlutoSDR is opened ready -- RX now starts in under a second (was 5-6 s). Coloured blocks in the video area show start-up progress
+- Lower CPU on the Raspberry Pi: the transmitter is about 3x faster, and video encoding and decoding are lighter
+- Cleaner transmitted spectrum: the shelf or 'tone' either side of the signal is gone (about 40 dB lower)
+- RX automatic frequency control: a signal several kHz off tune now pulls in and decodes normally (most useful in VU). The CFO shown is the full offset
+- RX status shows measured/required MER -- required is the plain-noise threshold for your mode, width and modulation
+- Tap the RX status line for a live constellation display
+- Spectrum: smoother (no spikes from preambles), auto scale in 1/2/4/5 dB per division with the noise near the bottom, and no accidental scrolling on the touchscreen
+- ANAN-10/100 (openHPSDR) as a receive radio -- experimental
+- Fixes: log noise on every TX restart, band-edge guides now the same colour, a spur on the VU 80 kHz spectrum
+
 ## 1.0.18 (2026-10-13)
 - Compatible over the air with 1.0.17, except the new 32QAM (both ends need 1.0.18 to use it)
 - New 32QAM modulation: about 20% more throughput than 16QAM for about 2 dB more signal. Tested on air at 10 kHz -- higher bandwidths untested at 32QAM
