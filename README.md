@@ -12,9 +12,8 @@ digital OFDM modem 20 to 250 kHz wide.
 
 It's a complete station in one program, with a full-screen touch interface.
 It's built to run on a **Raspberry Pi 4 with a 7" touch screen**, which can
-transmit and receive at the same time. It also runs on an ordinary 64-bit
-Linux PC (Ubuntu or Debian); see [Which platform?](#which-platform) before
-choosing.
+transmit and receive at the same time. See [Install](#install) to set one
+up.
 
 > **This is communications quality, not HD!** Think small, low-frame-rate
 > pictures (at most 384×224, typically around 10 fps) and clear speech: good
@@ -186,9 +185,7 @@ AVM, not that every setting has been tried on it.
 
 | Computer | Notes |
 |---|---|
-| **Raspberry Pi 4** (64-bit Raspberry Pi OS) | The main platform: what AVM is developed and tested on. Best with the 7" touch screen. |
-| **64-bit PC** (Ubuntu 22.04+, Debian 12+) | Works; a faster CPU allows bigger video. Expect to sort out the odd problem yourself (see [Which platform?](#which-platform)). |
-| **Minimal Debian on 8 GB** | Works, with care: see [Small machines](#small-machines-minimal-debian-on-8-gb). |
+| **Raspberry Pi 4** with 64-bit Raspberry Pi OS (Trixie, desktop) | What AVM is developed and tested on. Best with the 7" touch screen. |
 
 ### Radios
 
@@ -212,57 +209,74 @@ back.
 
 ## Install
 
-### Which platform?
+AVM runs on a **Raspberry Pi 4**. If you already have a Portsdown DATV
+station, it has the right hardware (a Pi 4 with the 7" touch screen and a
+Pluto or LimeSDR): make a separate SD card for AVM, and swap cards to switch
+between Portsdown and AVM.
 
-**A Raspberry Pi 4 is the recommended way to run AVM.** It's what AVM is
-developed and tested on, and the installer is made for a fresh 64-bit
-Raspberry Pi OS card. If you already have a Portsdown
-DATV station, it has the right hardware (a Pi 4 with the 7" touch screen and
-a Pluto or LimeSDR). Just make a new SD card for AVM, and swap cards to
-switch between Portsdown and AVM.
+### Step 1: make the SD card with Raspberry Pi Imager
 
-**A Linux PC or distribution you've set up yourself will likely need some
-work from you.** The installer handles the common cases, but every machine
-differs: other SDR software already installed, a different ffmpeg
-build, missing drivers, sound and camera setups. It isn't possible to
-support every combination, so on these, expect to sort out the odd problem
-yourself.
+AVM needs a fresh card with **Raspberry Pi OS (64-bit), the desktop
+version, based on Debian 13 "Trixie"**. Other versions (32-bit, Lite, or
+the older Bookworm) are not supported.
 
-### Installing
+1. Download and install **Raspberry Pi Imager** on your PC or Mac from
+   [raspberrypi.com/software](https://www.raspberrypi.com/software/).
+2. In Imager, choose:
+   - **Device:** Raspberry Pi 4
+   - **Operating system:** **Raspberry Pi OS (64-bit)**, the first entry,
+     with desktop. Make sure it says **Trixie** and **64-bit**.
+   - **Storage:** your SD card (16 GB or larger).
+3. When Imager asks about OS customisation, choose **Edit settings** and set:
+   - a **username and password** (you'll need them to log in);
+   - your **Wi-Fi** name and password, unless you'll use an Ethernet cable;
+   - on the **Services** tab, **Enable SSH** (with password authentication)
+     if you want to install from another computer.
+4. Write the card, put it in the Pi, and power it up. The first boot takes a
+   few minutes while it sets itself up, and ends at the desktop.
 
-**Linux (Ubuntu 22.04+, Debian 12+, Raspberry Pi OS, 64-bit):**
+### Step 2: run the AVM installer
+
+Only once the Pi has booted to its desktop. Open a terminal **either**:
+
+- **on the Pi itself:** click the **Terminal** icon on the desktop's top
+  bar; **or**
+- **from another computer over SSH:** `ssh YOURNAME@PI_ADDRESS`, with the
+  username you set in Imager. The address shows when you hover over the
+  network icon on the Pi's top bar, or try `ssh YOURNAME@raspberrypi.local`
+  (or the hostname you set).
+
+Then type these two lines:
 
 ```bash
 wget https://raw.githubusercontent.com/m0dts/avm/main/install_avm.sh
 bash install_avm.sh
 ```
 
-First it checks the machine and lists what's already there, with versions
-and anything it would install or change. Nothing is touched until you answer
-**y**. It then downloads AVM into `~/avm` and installs what's missing. It
-keeps SDR drivers your system already has, e.g. on DragonOS. It also adds an
-**AVM** icon to the menu and desktop, and an `avm` command. Run it again with
-`--update` to get the latest version, or `--check` to just see the report.
+First it checks the Pi and lists what it would install or change. Nothing is
+touched until you answer **y**. It then downloads AVM into `~/avm` and
+installs everything it needs; this takes a while. When it's done it adds an
+**AVM** icon to the menu and desktop, and an `avm` command. Reboot, then
+start AVM from the desktop icon.
 
-AVM's version (1.0.x, going up by one each release) shows in its title bar,
-and in the [VERSION](VERSION) file here.
+Run `bash install_avm.sh --update` later to get the latest version, or
+`--check` to just see the report. AVM's version (1.0.x, going up by one each
+release) shows in its title bar, and in the [VERSION](VERSION) file here.
 
 The first transmit or receive after installing takes a minute or two while
-the modem and codec are compiled for your machine; on a slow CPU it can take
-several minutes. The TX preview shows "Preparing video codec..." meanwhile.
-After that, starts are quick.
+the modem and codec are compiled for the Pi. The TX preview shows
+"Preparing video codec..." meanwhile. After that, starts are quick.
 
 ### SDRplay RSPs
 
 An SDRplay RSP needs SDRplay's own **API**: a background service that talks
 to the radio. It isn't part of any Linux distribution and AVM can't download
 it for you, because you have to accept SDRplay's licence. Get it yourself,
-then AVM's installer does the rest (Linux only).
+then AVM's installer does the rest.
 
 1. **Download the API for Linux** from
    [sdrplay.com/api](https://www.sdrplay.com/api/). It's one file, e.g.
-   `SDRplay_RSP_API-Linux-3.15.2.run`, for PCs and for the Raspberry Pi
-   (64- and 32-bit) alike.
+   `SDRplay_RSP_API-Linux-3.15.2.run` (the same file covers the Pi).
 2. **Put it where the installer looks:** on a USB drive plugged into the
    machine, in `~/Downloads`, or in the `~/avm` folder.
 3. **Run AVM's installer at the machine itself**, not with `--yes`, so you
@@ -306,76 +320,6 @@ when the file is newer than what's installed, and rebuilds the driver.
   RSP. If not, check SDRplay's service is running with
   `systemctl status sdrplay`, and restart it with
   `sudo systemctl restart sdrplay`.
-- **Windows:** AVM's installer doesn't set up SDRplay there. Installing
-  SDRplay's Windows API and a SoapySDRPlay3 module by hand may work, but it
-  hasn't been tested.
-
-## Small machines: minimal Debian on 8 GB
-
-AVM doesn't need a desktop, only an X server for its full-screen window. A
-full desktop such as LXQt takes about 4 GB, which leaves too little room on
-an 8 GB card or disk. Without one, Debian 13 plus AVM uses about 4.8 GB of a
-5.8 GB root partition, leaving roughly 0.7 GB free. That's from a working
-system with an Intel Atom x5 (4 cores, 1 GHz).
-
-1. **Install Debian (netinstall), 64-bit.** At "Software selection", untick
-   every desktop environment and tick only **SSH server** and **standard
-   system utilities**.
-2. **Give your user sudo**, if you set a root password during install:
-
-   ```bash
-   su -                                   # root's password; note the "-"
-   apt-get install -y sudo && usermod -aG sudo YOURNAME
-   exit
-   ```
-
-   Then log out and back in.
-3. **Install a minimal X server** (about 100–150 MB):
-
-   ```bash
-   sudo apt install --no-install-recommends xserver-xorg-core xserver-xorg-input-libinput xinit openbox x11-xserver-utils
-   ```
-
-4. **Install AVM** with the Linux commands above. On a system like this,
-   the installer also sets up the Pluto's USB network link, so the Pluto
-   answers at 192.168.2.1.
-5. **Start AVM full-screen with `startx`.** Create `~/.xinitrc`:
-
-   ```bash
-   xset s off -dpms s noblank        # no screen blanking
-   openbox &
-   cd ~/avm
-   export HF_RX_GUI_LOG=$HOME/avm/gui_logs/rx_session.log
-   exec ~/venv/bin/python touch_gui.py
-   ```
-
-   Run `startx`, and AVM fills the screen. Quitting AVM returns you to the
-   console.
-6. **Optional: start AVM at power-on.** Run
-   `sudo systemctl edit getty@tty1` and add the following, with your
-   username in place of YOURNAME:
-
-   ```
-   [Service]
-   ExecStart=
-   ExecStart=-/sbin/agetty --autologin YOURNAME --noclear %I $TERM
-   ```
-
-   Then add this line to the end of `~/.bash_profile`:
-
-   ```bash
-   [ -z "$DISPLAY" ] && [ "$(tty)" = /dev/tty1 ] && exec startx
-   ```
-
-Notes:
-
-- With no desktop, there's no PulseAudio or PipeWire. AVM plays and records
-  through ALSA directly, so pick the devices in AVM's audio settings.
-- To find the machine's address for SSH, run `hostname -I` on it.
-- Keep `sudo apt clean` handy: apt's download cache can eat the last few
-  hundred MB.
-- A slow CPU compiles the codec slowly on first use, and it also limits live
-  video. Use a lower resolution or frame rate if the video stutters.
 
 ## Use
 
