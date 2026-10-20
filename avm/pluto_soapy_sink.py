@@ -440,22 +440,34 @@ class PlutoTxSink:
         self._queue.put(waveform)
 
     def _lo_phasor(self, n):
-        """exp(-j*2*pi*lo*t) for t = 0..n-1 samples, complex64 -- built from
-        a short exact repeating table (see hf_ofdm_common.lo_phasor_table)
-        and cached per length (every fragment is the same length), instead
-        of a complex exp over every sample of every fragment."""
-        cache = self.__dict__.setdefault("_lo_phasor_cache", {})
-        ph = cache.get(n)
-        if ph is None:
+        """exp(-j*2*pi*lo*t) for the next n samples, complex64, CONTINUING
+        from where the last write ended. It used to restart at t=0 every
+        write: harmless for a lone fragment, but back-to-back writes (joined
+        fragments, the DPD tuner's chunks) then jumped in phase at each
+        join -- a hard step on air that splattered like a cut. Built from a
+        short exact repeating table (hf_ofdm_common.lo_phasor_table) where
+        there is one, cached per (length, phase), else from the running
+        sample count."""
+        pos = getattr(self, "_lo_pos", 0)
+        if not hasattr(self, "_lo_table"):
             import hf_ofdm_common as ofdm
-            table = ofdm.lo_phasor_table(-self.lo_offset_hz, self.sample_rate_hz)
-            if table is not None:
-                ph = np.resize(table, n).astype(np.complex64)
-            else:
-                t = np.arange(n) / self.sample_rate_hz
-                ph = np.exp(-1j * 2 * np.pi * self.lo_offset_hz * t).astype(np.complex64)
-            cache.clear()
-            cache[n] = ph
+            self._lo_table = ofdm.lo_phasor_table(-self.lo_offset_hz, self.sample_rate_hz)
+        table = self._lo_table
+        if table is not None:
+            period = len(table)
+            key = (n, pos % period)
+            cache = self.__dict__.setdefault("_lo_phasor_cache", {})
+            ph = cache.get(key)
+            if ph is None:
+                ph = np.resize(np.roll(table, -(pos % period)), n).astype(np.complex64)
+                if len(cache) > 32:
+                    cache.clear()
+                cache[key] = ph
+            self._lo_pos = (pos + n) % period
+        else:
+            t = (pos + np.arange(n)) / self.sample_rate_hz
+            ph = np.exp(-1j * 2 * np.pi * self.lo_offset_hz * t).astype(np.complex64)
+            self._lo_pos = pos + n
         return ph
 
     def drain(self):
@@ -508,10 +520,12 @@ class PlutoTxSink:
         gaps = gap_s = 0
         in_gap = False
         gap_window_start = time.monotonic()
-        while True:
+        while not getattr(self, "_closing", False):
             try:
                 samples = self._queue.get(timeout=SILENCE_CHUNK_S)
             except queue.Empty:
+                if getattr(self, "_closing", False):
+                    break
                 self._write_all(silence_chunk)
                 silence_s_in_window += SILENCE_CHUNK_S
                 gap_s += SILENCE_CHUNK_S
@@ -583,6 +597,13 @@ class PlutoTxSink:
 
     def close(self):
         self.drain()
+        # stop the writer thread before the stream goes: it used to keep
+        # feeding silence to the closed stream forever (an error line every
+        # 2 ms, and CPU) -- one more each time a program stopped and started TX
+        self._closing = True
+        t = getattr(self, "_thread", None)
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=2)
         self.sdr.deactivateStream(self.stream)
         self.sdr.closeStream(self.stream)
 

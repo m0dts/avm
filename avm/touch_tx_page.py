@@ -21,6 +21,7 @@ try:
 except ImportError:
     _cv2 = None
 
+import dpd
 import media_source
 import media_tx_framer
 import media_tx_gui
@@ -28,7 +29,8 @@ import preview_shm
 import touch_widgets as tw
 
 PREVIEW_PATH = preview_shm.default_path() + "_tx"
-SOURCES = {"test": "Test pattern", "device": "Camera + mic"}  # engine source -> label
+SOURCES = {"test": "Test pattern", "device": "Camera + mic",
+           "image": "Image + mic"}  # engine source -> label (image: uploaded on the web page)
 # audio only on a link more than this many times what it uses: warn (wasted)
 WASTED_LINK_RATIO = 1.5
 TX_QUEUE_DEPTH = 1  # fragments built ahead of the radio (see _apply_to_engine)
@@ -37,6 +39,11 @@ TX_QUEUE_DEPTH = 1  # fragments built ahead of the radio (see _apply_to_engine)
 # ~0.001% of samples, clipping noise 60 dB below the signal -- +6 dB over the
 # old 0.1 with no visible distortion. (0.25: +8 dB, noise 43 dB down.)
 TX_AMPLITUDE = 0.2
+# S (one carrier) peaks at 1.77x its RMS against 2.66x for the OFDM modes
+# with peak reduction (measured at the 550 kS/s output: 0.354 vs 0.532 at
+# 0.2): at 0.3 its peaks match theirs -- the same drive into the amplifier,
+# 3.5 dB more average power on air
+TX_AMPLITUDE_SC = 0.3
 
 
 class _TxEngine(media_tx_gui.MediaTxWindow):
@@ -61,6 +68,9 @@ class _TxEngine(media_tx_gui.MediaTxWindow):
 
     def _build_tx_cmd(self):
         cmd = super()._build_tx_cmd()
+        if getattr(self, "dpd_allowed", False):
+            # predistortion (Config: experimental features, TX DPD), live
+            cmd += ["--dpd-file", dpd.DPD_PATH]
         if self.sdr == "lime":
             cmd += ["--sdr", "lime", "--gain-file", tw.gain_file_path("tx")]
             if self.lime_port != "Auto":
@@ -222,7 +232,8 @@ class TxPage(QtWidgets.QWidget):
         self.freq = tw.FreqButton("TX frequency", s_get(settings, "tx_freq", 145500000))
         self.mode = tw.Segmented([(m, m) for m in tw.MODES], tw.saved_mode(s_get(settings, "tx_mode", "A")))
         self.bw = tw.Segmented([(b, b) for b in tw.BANDWIDTHS_KHZ], tw.saved_bandwidth(s_get(settings, "tx_bw", "80")))
-        self.mod = tw.Segmented([("qpsk", "QPSK"), ("16qam", "16QAM"), ("32qam", "32QAM")], s_get(settings, "tx_mod", "qpsk"))
+        self.mod = tw.Segmented([("qpsk", "QPSK"), ("8psk", "8PSK"), ("16qam", "16QAM"), ("32qam", "32QAM")],
+                              s_get(settings, "tx_mod", "qpsk"))   # 8PSK: mode S only
         self.gain = tw.Stepper(-89, 0, 1, s_get(settings, "tx_gain", -10), " dB")
         self.radio = tw.RadioPicker("TX radio (connected now)", settings.get("tx_sdr", settings.get("sdr", "pluto")),
                                     pluto_uri=settings.get("tx_pluto_uri", ""))
@@ -275,7 +286,7 @@ class TxPage(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     def _apply_to_engine(self):
-        tw.enforce_mode_bandwidth(self.mode, self.bw)
+        tw.enforce_mode_bandwidth(self.mode, self.bw, mod_seg=self.mod)
         e = self.engine
         # how the Pluto is reached: the route picked in the radio list, else
         # its usual network address (pluto_soapy_sink falls back to a search)
@@ -296,8 +307,12 @@ class TxPage(QtWidgets.QWidget):
         # leakage then lands on the centre carrier, which every mode leaves
         # empty (VU's notch; A-D skip DC), and TX saves the per-sample
         # baseband shift. RX keeps its own offset (tw.lo_offset_hz).
-        e.lo_offset_hz.setValue(0)
-        e.amplitude.setValue(TX_AMPLITUDE)
+        # S is the exception: one carrier, strongest at its centre -- the LO
+        # leakage would sit in the middle of every burst. Its LO goes one
+        # receive-style offset away instead (the sink shifts the samples).
+        sc = self.mode.value() in tw.SINGLE_CARRIER_MODES
+        e.lo_offset_hz.setValue(tw.lo_offset_hz(self.bw.value()) if sc else 0)
+        e.amplitude.setValue(TX_AMPLITUDE_SC if sc else TX_AMPLITUDE)
         e.pluto_sample_rate.setCurrentText(str(tw.sdr_rate(self.bw.value())))
         e.fragment_size.setValue(tw.fragment_size(self.bw.value()))
         # One fragment built ahead, not two: each queued fragment is a whole
@@ -313,7 +328,7 @@ class TxPage(QtWidgets.QWidget):
             e._recalculate_bitrates()
         device = self._source_key() == "device"
         self.camera.setEnabled(device)
-        self.mic.setEnabled(device)
+        self.mic.setEnabled(device or self._source_key() == "image")
         self._update_focus_row()
         self._refresh_info()
         self._save()

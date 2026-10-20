@@ -109,15 +109,26 @@ class AspectRatioVideoLabel(QtWidgets.QLabel):
         super().setPixmap(scaled)
 
 
-def list_audio_output_devices():
+def list_audio_output_devices(rescan=False):
     """Enumerates audio OUTPUT devices via sounddevice (the same library
     media_rx_player.py itself plays through), for the GUI's device
     dropdown -- returns [(index, name), ...], only devices with at least
     one output channel. Imported lazily (only when this GUI runs, not by
     every script that happens to import this module) since sounddevice
-    touches real audio hardware/drivers on load."""
+    touches real audio hardware/drivers on load.
+
+    rescan: restart PortAudio first. It lists the devices once, when it
+    starts, so one plugged in after AVM started (a USB headset) never
+    showed -- but the player plays through it in THIS process, so only
+    while nothing is playing (a restart would cut the sound off)."""
     import sounddevice as sd
     devices = []
+    if rescan:
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
     try:
         for i, dev in enumerate(sd.query_devices()):
             if dev.get("max_output_channels", 0) > 0:
@@ -125,6 +136,44 @@ def list_audio_output_devices():
     except Exception:
         pass
     return devices
+
+
+def set_output_full_volume(device):
+    """Linux: every playback volume control of the output device's sound
+    card to 100% and unmuted, as playback starts -- the volume is meant to
+    be set outside (a volume knob after the device), not left low inside it
+    (seen: a USB adapter's Speaker at 14/37). Controls named Mic are left
+    alone: on USB adapters that is the microphone fed back into the speaker.
+    device: a sounddevice index or name ('... (hw:5,0)'); the system default
+    and aliases without a card number are left as they are."""
+    import shutil
+    import subprocess
+    if not sys.platform.startswith("linux") or not shutil.which("amixer") or device is None:
+        return
+    try:
+        import sounddevice as sd
+        name = sd.query_devices(device)["name"] if isinstance(device, int) else str(device)
+    except Exception:
+        return
+    m = re.search(r"\(hw:(\d+),", name) or re.search(r"CARD=(\w+)", name)
+    if not m:
+        return
+    card = m.group(1)
+    try:
+        controls = subprocess.run(["amixer", "-c", card, "scontrols"], capture_output=True, text=True,
+                                  timeout=3).stdout
+        for ctl in re.findall(r"Simple mixer control '([^']+)',(\d+)", controls):
+            label = f"{ctl[0]},{ctl[1]}"
+            if "mic" in ctl[0].lower() or "capture" in ctl[0].lower():
+                continue
+            info = subprocess.run(["amixer", "-c", card, "sget", label], capture_output=True, text=True,
+                                  timeout=3).stdout
+            if "pvolume" not in info and "pswitch" not in info:
+                continue                    # not a playback control
+            subprocess.run(["amixer", "-q", "-c", card, "sset", label, "100%", "unmute"],
+                           capture_output=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 class LogStream(QtCore.QObject):
@@ -343,7 +392,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
         form.addRow(QtWidgets.QLabel("--- link/RF settings (must match the transmitter) ---"))
 
         self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(["A", "B", "C", "D", "VU"])  # VU: VHF/UHF mobile + tropo (not DRM)
+        self.mode.addItems(["A", "B", "C", "D", "VU", "S", "SH"])  # VU: VHF/UHF mobile + tropo (not DRM)
         form.addRow("Mode", self.mode)
 
         self.occupancy = QtWidgets.QComboBox()
@@ -352,7 +401,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
         form.addRow("Occupancy (kHz)", self.occupancy)
 
         self.modulation = QtWidgets.QComboBox()
-        self.modulation.addItems(["qpsk", "16qam", "32qam"])
+        self.modulation.addItems(["qpsk", "16qam", "32qam", "8psk"])   # 8psk: mode S
         form.addRow("Modulation", self.modulation)
 
         self.fec = QtWidgets.QComboBox()
@@ -682,7 +731,8 @@ class MediaRxWindow(QtWidgets.QMainWindow):
 
     def _refresh_audio_devices(self):
         try:
-            devices = list_audio_output_devices()
+            # a fresh scan (devices plugged in since) only while nothing plays
+            devices = list_audio_output_devices(rescan=getattr(self, "_audio_worker", None) is None)
         except Exception as e:
             self._append_log(f"[error] listing audio devices: {e}")
             return
@@ -900,6 +950,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
             device_arg = None
         elif device_arg.isdigit():
             device_arg = int(device_arg)
+        set_output_full_volume(device_arg)
         LOW_BUFFER_WARNING_S = 0.2
         audio_worker = media_rx_player.AudioPlaybackWorker(
             self.audio_latency.value(), device_arg, LOW_BUFFER_WARNING_S)

@@ -35,7 +35,7 @@ from media_source import build_video_args, list_devices
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", choices=["device", "test"], default="device",
+    ap.add_argument("--source", choices=["device", "test", "image"], default="device",
                      help="'device' (default): capture from real hardware (--video-device). "
                           "'test': synthetic test pattern, no hardware needed.")
     ap.add_argument("--list-devices", action="store_true",
@@ -94,7 +94,7 @@ def main():
     cmd += build_video_args(args)
     if args.duration:
         cmd += ["-t", str(args.duration)]
-    if args.source == "device":
+    if args.source in ("device", "image"):
         w, h = args.resolution.split("x")
         cmd += ["-vf",
                 f"scale={w}:{h}:force_original_aspect_ratio=decrease,"

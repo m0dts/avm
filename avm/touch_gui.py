@@ -218,6 +218,10 @@ class TouchWindow(QtWidgets.QWidget):
         # Config: radios, devices, content, callsign... (the pages' own
         # widgets, placed there) -- built after the TX and RX pages
         self.config = ConfigPage(self.settings, self.tx, self.rx)
+        # small web page for settings from a phone/PC on the network (avm_web.py)
+        import avm_web
+        self._web = avm_web.start(lambda: tw.KIWI_SERVER, self._web_set_kiwi, title=avm_version.SHORT_TITLE,
+                                  grab=self._web_screenshot)
         self.pages.addWidget(self.config)
         self.pages.addWidget(self.tx)
         self.pages.addWidget(self.rx)
@@ -601,7 +605,21 @@ class TouchWindow(QtWidgets.QWidget):
                 return
         self.close()
 
+    def _web_screenshot(self):
+        """The window as PNG bytes, for the web page (GUI thread)."""
+        buf = QtCore.QBuffer()
+        buf.open(QtCore.QIODevice.WriteOnly)
+        self.grab().save(buf, "PNG")
+        return bytes(buf.data())
+
+    def _web_set_kiwi(self, server):
+        """From the web page (GUI thread): as tapping Config, KiwiSDR."""
+        self.config.kiwi.set_text(server)
+        self.config._kiwi_changed(server)
+
     def closeEvent(self, event):
+        if getattr(self, "_web", None) is not None:
+            self._web.shutdown()
         self.tx.shutdown()
         self.rx.shutdown()
         import warm_pool

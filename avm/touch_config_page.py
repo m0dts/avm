@@ -8,9 +8,10 @@ widgets, placed here: everything behind them (saved settings, live gain,
 radio checks, the Lime port / RTL ppm rows that show for their radio)
 works exactly as before. Content and spectrum averaging are new here and
 go through TxPage.set_content / RxPage.set_spectrum_averages."""
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 import touch_widgets as tw
+import touch_tx_page
 from touch_tx_page import s_get
 
 CONTENT = [("auto", "Auto"), ("audio", "Audio only"), ("video", "Video only")]
@@ -31,17 +32,13 @@ class ConfigPage(QtWidgets.QWidget):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(5)
 
-        # mode family: not yet -- shown so it's clear where it will go
-        self.mode_type = tw.Segmented(MODE_TYPES)  # none selected: not available yet
-        self.mode_type.setEnabled(False)
-        mode_row = QtWidgets.QWidget()
-        mode_row.setObjectName("seg")
-        ml = QtWidgets.QHBoxLayout(mode_row)
-        ml.setContentsMargins(0, 0, 0, 0)
-        ml.addWidget(self.mode_type, 1)
-        tbc = QtWidgets.QLabel("TBC")
-        tbc.setObjectName("dim")
-        ml.addWidget(tbc)
+        # mode family: what the TX and RX pages offer (tw.MODE_TYPE_SETS) --
+        # HF: A-D, VHF/UHF: VU, SAT: S; the rest of their buttons are hidden
+        if "mode_type" not in settings:
+            settings["mode_type"] = tw.mode_type_of(s_get(settings, "tx_mode", "A"))
+        self.mode_type = tw.Segmented(MODE_TYPES, settings["mode_type"])
+        self.mode_type.changed.connect(self._mode_type_changed)
+        mode_row = self.mode_type
 
         self.content = tw.Segmented(CONTENT, s_get(settings, "tx_content", "auto"))
         self.content.changed.connect(lambda v: self.tx.set_content(v))
@@ -101,7 +98,7 @@ class ConfigPage(QtWidgets.QWidget):
         more.setHorizontalSpacing(8)
         more.setVerticalSpacing(5)
         for r, (label, w) in enumerate((("Video", self.mono), ("KiwiSDR", self.kiwi),
-                                        ("RX spectrum", self.invert), ("TX peak reduce", self.papr))):
+                                        ("RX spectrum", self.invert))):
             more.addWidget(tw.row_label(label), r, 0)
             more.addWidget(w, r, 1)
         more.setColumnStretch(1, 1)
@@ -111,13 +108,24 @@ class ConfigPage(QtWidgets.QWidget):
         root.addStretch(1)
 
         self._refresh_duplex()
+        self._apply_experimental()
+        self._mode_type_changed(self.s["mode_type"])
 
         # the saved choices take effect from the start
         self.tx.set_content(self.content.value())
         self.rx.set_spectrum_averages(int(self.averages.value()))
         self.rx.engine.invert_spectrum = self.invert.value() == "inverted"
-        self.tx.engine.papr_db = float(self.papr.value() or 0)
+        self.tx.engine.papr_db = float(self.papr.value() or 0) if self.experimental() else 0.0
         self.tx.engine.mono = self.mono.value() == "bw"
+
+    def _mode_type_changed(self, value):
+        self.s["mode_type"] = value
+        for page in (self.tx, self.rx):
+            if tw.apply_mode_type(page, value):
+                page._changed()          # a hidden setting moved: apply (and save) it
+            else:
+                page._apply_to_engine()  # widths/modulations greyed per mode again
+        self._refresh_duplex()
 
     def _mono_changed(self, value):
         self.s["tx_mono"] = value == "bw"
@@ -125,7 +133,8 @@ class ConfigPage(QtWidgets.QWidget):
 
     def _papr_changed(self, value):
         self.s["tx_papr"] = value
-        self.tx.set_papr(value)
+        if self.experimental():
+            self.tx.set_papr(value)
 
     def _invert_changed(self, value):
         self.s["rx_invert"] = value == "inverted"
@@ -138,27 +147,93 @@ class ConfigPage(QtWidgets.QWidget):
             self.rx._apply_to_engine()  # next start uses it
 
     def _experimental_column(self):
-        """Right-hand column: features that work in tests but aren't
-        finished -- same-channel duplex (TDD) so far."""
-        col = QtWidgets.QVBoxLayout()
+        """Right-hand column: features that can badly distort a transmission
+        if misused -- duplex (TDD), TX peak reduction and predistortion
+        (DPD). All off and greyed until "Experimental" is switched on, which
+        asks first."""
+        outer = QtWidgets.QVBoxLayout()
+        outer.setSpacing(5)
+        # the experimental settings in an orange box
+        box = QtWidgets.QFrame()
+        box.setObjectName("experimental")
+        box.setStyleSheet(f"QFrame#experimental {{ border: 2px solid {EXPERIMENTAL_COLOUR}; border-radius: 6px; }}")
+        col = QtWidgets.QVBoxLayout(box)
+        col.setContentsMargins(6, 6, 6, 6)
         col.setSpacing(5)
-        head = QtWidgets.QLabel("Very Experimental!")
-        head.setStyleSheet(f"color: {EXPERIMENTAL_COLOUR}; font-weight: bold;")
-        col.addWidget(head)
+        outer.addWidget(box)
         grid = QtWidgets.QGridLayout()
         grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(5)
+        self.exp_switch = tw.Segmented([("off", "Off"), ("on", "On")],
+                                       "on" if self.s.get("experimental", False) else "off")
+        self.exp_switch.changed.connect(self._experimental_changed)
         self.duplex = tw.Segmented(tw.DUPLEX_ROLES, self.s.get("duplex", "off"))
         self.duplex.changed.connect(self._duplex_changed)
-        grid.addWidget(tw.row_label("Duplex (TDD)"), 0, 0)
-        grid.addWidget(self.duplex, 0, 1)
+        # TX predistortion: its own popup (touch_dpd); the button shows on/off
+        self.dpd_btn = QtWidgets.QPushButton()
+        self.dpd_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.dpd_btn.clicked.connect(self._open_dpd)
+        for r, (label, w) in enumerate((("Experimental", self.exp_switch), ("Duplex (TDD)", self.duplex),
+                                        ("TX peak reduce", self.papr), ("TX DPD", self.dpd_btn))):
+            grid.addWidget(tw.row_label(label), r, 0)
+            grid.addWidget(w, r, 1)
         grid.setColumnStretch(1, 1)
         col.addLayout(grid)
         self.duplex_note = QtWidgets.QLabel()
         self.duplex_note.setObjectName("dim")
         self.duplex_note.setWordWrap(True)
         col.addWidget(self.duplex_note)
-        col.addStretch(1)
-        return col
+        outer.addStretch(1)
+        return outer
+
+    def experimental(self):
+        return bool(self.s.get("experimental", False))
+
+    def _experimental_changed(self, value):
+        if value == "on" and not self.experimental():
+            if not tw.ask_yes_no(self, "Enable experimental features?", "These settings can severely distort transmissions if used incorrectly.\n\nDon't use them unless you understand how to monitor your transmissions before use on air.",
+                                 yes="Enable", no="Cancel"):
+                self.exp_switch.set_value("off")
+                return
+        self.s["experimental"] = value == "on"
+        self._apply_experimental()
+
+    def _apply_experimental(self):
+        """Experimental off: duplex, peak reduction and DPD all switched Off
+        (DPD keeps its curve, switched off) and their controls greyed. Each
+        has to be switched on again by hand after re-enabling."""
+        on = self.experimental()
+        for w in (self.duplex, self.papr, self.dpd_btn):
+            w.setEnabled(on)
+        if not on:
+            if self.s.get("duplex", "off") != "off":
+                self.duplex.set_value("off")
+                self._duplex_changed("off")
+            self.papr.set_value("0")
+            self.s["tx_papr"] = "0"
+            import dpd
+            enabled, gains, phases = dpd.load()
+            if enabled:
+                try:
+                    dpd.save(False, gains, phases)   # a running TX drops it at its next fragment
+                except OSError as e:
+                    tw.notices().add("TX", f"DPD could not be switched off: {e}")
+        self.tx.set_papr((self.papr.value() or 0) if on else 0)
+        self.tx.engine.dpd_allowed = on
+        self._show_dpd()
+        if on:
+            self._refresh_duplex()   # its own per-role greying
+
+    def _show_dpd(self):
+        import dpd
+        on = self.experimental() and dpd.load()[0]
+        self.dpd_btn.setText("On -- adjust..." if on else "Off -- adjust...")
+        self.dpd_btn.setStyleSheet(f"background: {EXPERIMENTAL_COLOUR}; color: #111;" if on else "")
+
+    def _open_dpd(self):
+        import touch_dpd
+        touch_dpd.DpdDialog(self, rms=touch_tx_page.TX_AMPLITUDE).exec_()
+        self._show_dpd()
 
     def _duplex_changed(self, role):
         """Both ends on one frequency, taking turns: Master keeps its own
@@ -189,16 +264,16 @@ class ConfigPage(QtWidgets.QWidget):
         # Off always selectable: greying the whole control locked it on
         # Master/Slave whenever duplex couldn't run (e.g. mode A)
         for role_key, button in self.duplex._buttons.items():
-            button.setEnabled(role_key == "off" or not why)
+            button.setEnabled(role_key == "off" or (not why and self.experimental()))
         role = self.s.get("duplex", "off")
         if why:
-            self.duplex_note.setText(f"Not available: {why}.")
+            self.duplex_note.setText(f"TDD: not available: {why}.")
         elif role == "off":
-            self.duplex_note.setText("Both stations on one frequency, taking turns "
+            self.duplex_note.setText("TDD: both stations on one frequency, taking turns "
                                      f"({tw.TDD_SLOT_S:g} s slots every {tw.TDD_CYCLE_S:g} s). "
                                      "One end Master, the other Slave; same mode and width both ends.")
         else:
-            self.duplex_note.setText(f"{role.capitalize()}: TX starts RX too (the receiver drives the "
+            self.duplex_note.setText(f"TDD {role.capitalize()}: TX starts RX too (the receiver drives the "
                                      "radio for both). Each way gets under half the normal rate, "
                                      "with about a second more delay. Tested: VU 160 kHz 16QAM.")
 

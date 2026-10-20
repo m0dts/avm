@@ -3,6 +3,19 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.20 (2026-10-20)
+- Compatible over the air with 1.0.19 in modes A-D and VU
+- the new modes S and SH need 1.0.20 at both ends
+- Mode type in Config: HF (modes A-D and SH), VHF/UHF (VU) or SAT (S) -- the TX and RX pages offer only that type's modes, widths and modulations
+- New mode SH for HF: a single-carrier signal, 10/20/40 kHz, QPSK or 8PSK. About 8 kbit/s in 10 kHz with 8PSK, and decodes at lower signal levels than mode A 16QAM
+- New mode S for satellite and other steady paths: single carrier, 10/20/40 kHz, QPSK or 8PSK
+- Experimental settings in Config, off by default: TX peak reduce, duplex, and new TX predistortion (DPD) to reduce an amplifier's splatter, adjusted in its own popup
+- Received audio plays at full volume on the output device (use your own volume control)
+- audio devices plugged in later (e.g. a BH001A) now show up
+- KiwiSDR: recently used servers remembered, the server's name shown, and the spectrum no longer garbled in narrow modes
+- Image file as a TX source
+- Fixes: a gap between transmitted fragments, PlutoSDR TX phase jumps between buffers, PlutoSDR not always released on TX stop
+
 ## 1.0.19 (2026-10-17)
 - Compatible over the air with 1.0.18 except video: the video format is new, so both ends need 1.0.19 for pictures (audio and data still work with 1.0.18)
 - Better video at low bitrates (about 2-3.5 dB at 5 kbps on camera video), with motion compensation, and a B/W option in Config

@@ -1001,6 +1001,13 @@ def receive_one_fragment(cfg, args, reader, state):
     start (see try_decode's docstring for why). Returns a try_decode-style
     result dict, plus {"status": "eof"} if stdin closed with nothing more
     to try."""
+    if ofdm.single_carrier(cfg):
+        # single carrier (S, SH): its own burst search and decoder, on the
+        # same received stream at cfg.fs (the front end resamples to it)
+        raw_cache = state.setdefault("rx_raw_cache", {})
+        return ofdm.single_carrier(cfg).receive_one_fragment(
+            cfg, args, reader, state,
+            lambda: get_rx_raw_incremental(reader, raw_cache, trim_reference=state["native_search_start"]))
     live_native_fs = args.sample_rate or cfg.fs
     live_L = max(4, int(round(cfg.n_fft / 2 * live_native_fs / cfg.fs)))
     live_tail = np.zeros(0, dtype=np.complex64)
@@ -1376,8 +1383,16 @@ def _build_spectrum_computer(cfg, args, reader):
     # Decimation is by a whole number, so the display rate can overshoot the
     # requested span (550 kS/s / 4 = 137.5 kHz for 120): trim to the span.
     keep = slice(None)
-    if lo_shift is not None:
-        idx = np.nonzero(np.abs(freqs) <= span / 2)[0]
+    limit = span / 2 if lo_shift is not None else None
+    # A radio slower than the mode's own rate (a ~12 kS/s KiwiSDR under mode
+    # S's 32 kS/s): the front end upsamples, and everything past the radio's
+    # own band is filter skirt and interpolation images, not signal -- show
+    # only what the radio delivers.
+    capture = getattr(args, "capture_sample_rate", None)
+    if lo_shift is None and capture and capture < fs:
+        limit = 0.47 * capture
+    if limit is not None:
+        idx = np.nonzero(np.abs(freqs) <= limit)[0]
         if len(idx) > 1:
             keep = slice(int(idx[0]), int(idx[-1]) + 1)
             freqs = freqs[keep]
@@ -1847,13 +1862,13 @@ def _tdd_skip_gap(tdd, state, cfg):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", choices=list(ofdm.DRM_MODES), default="B")
+    ap.add_argument("--mode", choices=list(ofdm.DRM_MODES) + ["S", "SH"], default="B")
     ap.add_argument("--occupancy", type=float, default=20,
                      help="Spectrum occupancy in kHz (default 20); must match the transmitter's "
                           "--occupancy. One of DRM's official values (4.5, 5, 9, 10, 18, 20) uses "
                           "its exact spec'd carrier range; anything else (e.g. 40, 80) falls back "
                           "to a symmetric carrier-count scaling instead.")
-    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam"], default="qpsk",
+    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam", "8psk"], default="qpsk",
                      help="PAYLOAD modulation (default qpsk) -- must match whatever hf_ofdm_tx.py "
                           "was given, or every payload symbol will decode to noise (the preamble/"
                           "pilots/header stay QPSK either way, so sync itself won't be affected, "

@@ -43,7 +43,21 @@ import subprocess
 import sys
 
 
+# The TX picture for the "image" source (uploaded on the settings web page,
+# avm_web.py): one file, looped as video at the chosen frame rate.
+TX_IMAGE_PATH = os.path.join(os.path.expanduser("~"), ".config", "hfmodem", "tx_image")
+
+
 def build_video_args(args):
+    if args.source == "image":
+        path = getattr(args, "image_path", None) or TX_IMAGE_PATH
+        if os.path.isfile(path):
+            # -re: real-time pace, as the test source; -loop 1: the still
+            # repeated as frames (scaled/padded by the caller's -vf)
+            return ["-re", "-loop", "1", "-framerate", str(args.framerate), "-i", path]
+        print(f"[media_source] no TX image at {path} (upload one on AVM's settings web page) "
+              f"-- sending the test pattern instead", file=sys.stderr)
+        args.source = "test"
     if args.source == "test":
         # -re: without it, ffmpeg generates+encodes a synthetic lavfi
         # source as fast as the CPU allows, not paced to real time --
@@ -256,7 +270,7 @@ def list_devices():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", choices=["device", "test"], default="device",
+    ap.add_argument("--source", choices=["device", "test", "image"], default="device",
                      help="'device' (default): capture from real hardware (--video-device/"
                           "--audio-device). 'test': synthetic test pattern + tone, no hardware "
                           "needed -- see --tone-hz.")

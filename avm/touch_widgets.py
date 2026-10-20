@@ -899,12 +899,50 @@ def write_freq_offset_file(hz):
 
 
 BANDWIDTHS_KHZ = ("10", "20", "40", "80", "160", "250")
-MODES = ("A", "B", "C", "D", "VU")  # VU: VHF/UHF (144/432 MHz) mobile + troposcatter, not DRM
+MODES = ("A", "B", "C", "D", "SH", "VU", "S")  # VU: VHF/UHF (144/432 MHz) mobile + troposcatter, not DRM;
+                                         # SH: single carrier for HF, 8-10 kbit/s in 10 kHz (hf_sch);
+                                         # S: single carrier for fixed / satellite paths (hf_sc)
+# modes that only run at some widths / modulations (others: all)
+MODE_WIDTHS = {"S": ("10", "20", "40"), "SH": ("10", "20", "40")}
+MODE_MODULATIONS = {"S": ("qpsk", "8psk"), "SH": ("qpsk", "8psk")}
+SINGLE_CARRIER_MODES = ("S", "SH")
+OFDM_MODULATIONS = ("qpsk", "16qam", "32qam")      # every other mode
+# Config's Mode type: which modes / widths / modulations the TX and RX pages
+# offer (the rest of the buttons are hidden)
+MODE_TYPE_SETS = {
+    "hf": {"modes": ("A", "B", "C", "D", "SH"), "widths": BANDWIDTHS_KHZ, "mods": OFDM_MODULATIONS + ("8psk",)},
+    "vu": {"modes": ("VU",), "widths": ("80", "160", "250"), "mods": OFDM_MODULATIONS},
+    "sat": {"modes": ("S",), "widths": ("10", "20", "40"), "mods": ("qpsk", "8psk")},
+}
+
+
+def mode_type_of(mode):
+    """The Mode type a mode belongs to (a first start: from the saved mode)."""
+    return next((t for t, v in MODE_TYPE_SETS.items() if mode in v["modes"]), "hf")
+
+
+def apply_mode_type(page, mode_type):
+    """Show only the type's modes / widths / modulations on a TX or RX page;
+    a setting outside it moves to the type's nearest (mode: its first).
+    True if anything had to change (the caller applies it)."""
+    sets = MODE_TYPE_SETS.get(mode_type, MODE_TYPE_SETS["hf"])
+    changed = False
+    for seg, allowed in ((page.mode, sets["modes"]), (page.bw, sets["widths"]), (page.mod, sets["mods"])):
+        for value, button in seg._buttons.items():
+            button.setVisible(value in allowed)
+        cur = seg.value()
+        if cur not in allowed:
+            if seg is page.bw and cur is not None:
+                seg.set_value(min(allowed, key=lambda v: abs(float(v) - float(cur))))
+            else:
+                seg.set_value(allowed[0])
+            changed = True
+    return changed
 
 
 def saved_mode(value):
     """A saved mode from an older option set (V was renamed VU)."""
-    value = {"V": "VU"}.get(str(value), str(value))
+    value = {"V": "VU", "S2": "S"}.get(str(value), str(value))
     return value if value in MODES else "A"
 
 
@@ -923,6 +961,7 @@ def lo_offset_hz(bw_khz):
     if bw > 100:
         return 130000.0
     return 100000.0
+
 
 
 def sdr_rate(bw_khz):
@@ -984,17 +1023,29 @@ def cpu_warning(mode, khz, modulation, duplex):
     return ""
 
 
-def enforce_mode_bandwidth(mode_seg, bw_seg, only_khz=None):
+def enforce_mode_bandwidth(mode_seg, bw_seg, only_khz=None, mod_seg=None):
     """Bandwidths a mode can't use are greyed out (and left if selected):
-    mode VU needs at least its min_occupancy_khz (see hf_ofdm_common).
-    only_khz: the radio takes just this width (a KiwiSDR: "10") -- every
-    other width is greyed out, and so is any mode that can't run at it."""
+    mode VU needs at least its min_occupancy_khz (see hf_ofdm_common), S
+    runs at MODE_WIDTHS only. only_khz: the radio takes just this width (a
+    KiwiSDR: "10") -- every other width is greyed out, and so is any mode
+    that can't run at it. mod_seg: modulations the mode doesn't have
+    (MODE_MODULATIONS) greyed too."""
     import hf_ofdm_common as ofdm
+    if mod_seg is not None:
+        allowed = MODE_MODULATIONS.get(mode_seg.value(), OFDM_MODULATIONS)
+        for value, button in mod_seg._buttons.items():
+            button.setEnabled(value in allowed)
+        if allowed and mod_seg.value() not in allowed:
+            mod_seg.set_value(allowed[0])
     if only_khz is not None:
         for m, button in mode_seg._buttons.items():
-            button.setEnabled(ofdm.DRM_MODES.get(m, {}).get("min_occupancy_khz", 0) <= float(only_khz))
+            button.setEnabled(ofdm.DRM_MODES.get(m, {}).get("min_occupancy_khz", 0) <= float(only_khz)
+                              and only_khz in MODE_WIDTHS.get(m, (only_khz,)))
         if mode_seg.value() not in mode_seg._buttons or not mode_seg._buttons[mode_seg.value()].isEnabled():
-            mode_seg.set_value("A")
+            # the first mode that's shown and can run at this width, if any
+            ok = [m for m, b in mode_seg._buttons.items() if b.isEnabled() and not b.isHidden()]
+            if ok:
+                mode_seg.set_value(ok[0])
         for value, button in bw_seg._buttons.items():
             button.setEnabled(value == only_khz)
         if bw_seg.value() != only_khz:
@@ -1003,10 +1054,14 @@ def enforce_mode_bandwidth(mode_seg, bw_seg, only_khz=None):
     for button in mode_seg._buttons.values():
         button.setEnabled(True)
     min_khz = ofdm.DRM_MODES.get(mode_seg.value(), {}).get("min_occupancy_khz", 0)
+    widths = MODE_WIDTHS.get(mode_seg.value())
+    ok = lambda v: float(v) >= min_khz and (widths is None or v in widths)
     for value, button in bw_seg._buttons.items():
-        button.setEnabled(float(value) >= min_khz)
-    if bw_seg.value() is not None and float(bw_seg.value()) < min_khz:
-        bw_seg.set_value(next(v for v in BANDWIDTHS_KHZ if float(v) >= min_khz))
+        button.setEnabled(ok(value))
+    if bw_seg.value() is not None and not ok(bw_seg.value()):
+        usable = [v for v in BANDWIDTHS_KHZ if ok(v) and not bw_seg._buttons[v].isHidden()] or             [v for v in BANDWIDTHS_KHZ if ok(v)]
+        # the nearest width the mode has (S from 80 kHz -> 40)
+        bw_seg.set_value(min(usable, key=lambda v: abs(float(v) - float(bw_seg.value()))))
 
 
 def saved_bandwidth(value):

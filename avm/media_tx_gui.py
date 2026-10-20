@@ -141,7 +141,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
 
         # --- media_source.py fields ---
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItems(["test", "device"])
+        self.source_combo.addItems(["test", "device", "image"])   # image: a still + the mic
         self.source_combo.currentTextChanged.connect(self._update_source_fields)
 
         self.video_device = QtWidgets.QComboBox()
@@ -300,7 +300,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         form.addRow(QtWidgets.QLabel("--- link/RF settings ---"))
 
         self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(["A", "B", "C", "D", "VU"])  # VU: VHF/UHF mobile + tropo (not DRM)
+        self.mode.addItems(["A", "B", "C", "D", "VU", "S", "SH"])  # VU: VHF/UHF mobile + tropo (not DRM)
 
         self.occupancy = QtWidgets.QComboBox()
         self.occupancy.setEditable(True)
@@ -309,7 +309,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         form.addPair("Mode", self.mode, "kHz", self.occupancy)
 
         self.modulation = QtWidgets.QComboBox()
-        self.modulation.addItems(["qpsk", "16qam", "32qam"])
+        self.modulation.addItems(["qpsk", "16qam", "32qam", "8psk"])   # 8psk: mode S
 
         self.fec = QtWidgets.QComboBox()
         self.fec.addItems(["viterbi", "ldpc"])
@@ -630,10 +630,11 @@ class MediaTxWindow(QtWidgets.QMainWindow):
             return
 
         AUDIO_SHARE = 0.30
-        # Opus share scales with the link (and so with video's rate), 8-16
+        # Opus share scales with the link (and so with video's rate), 5-16
         # kbps: mono speech gains little above 16, and on the slow links
-        # every kbps under 10 goes to video instead.
-        AUDIO_MIN_KBPS, AUDIO_MAX_KBPS = 8.0, 16.0
+        # every kbps under 10 goes to video instead (5 kbps: narrowband
+        # speech, still intelligible; libopus encodes it, measured on a Pi).
+        AUDIO_MIN_KBPS, AUDIO_MAX_KBPS = 5.0, 16.0
         # Audio only (forced, or no room for video): the whole link is
         # audio's, so allow Opus up to its full-quality range
         AUDIO_ONLY_MAX_KBPS = 48.0
@@ -769,7 +770,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         whole fragments that fit this station's slot, once a cycle (as
         hf_ofdm_tx.py's run_tdd sends them)."""
         bps = ofdm.estimate_effective_bitrate(cfg, fragment_size, fragment_gap_ms=self.fragment_gap_ms.value(),
-                                              out_fs=self._tx_out_fs())
+                                              out_fs=self._tx_out_fs(), pad_on_air=bool(self.tdd))
         if not self.tdd or bps <= 0:
             return bps
         per_slot = max(1, int(self.tdd["slot"] / (fragment_size * 8 / bps)))
@@ -1252,7 +1253,9 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         return cmd
 
     def _build_audio_source_cmd(self):
-        cmd = [PYTHON, "media_source_audio.py", "--source", self.source_combo.currentText(),
+        # an image source sends the microphone with it
+        audio_src = "device" if self.source_combo.currentText() == "image" else self.source_combo.currentText()
+        cmd = [PYTHON, "media_source_audio.py", "--source", audio_src,
                "--audio-codec", self.audio_codec.currentText()]
         if self.audio_codec.currentText() == "codec2":
             cmd += ["--codec2-mode", self.codec2_mode.currentText()]

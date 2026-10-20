@@ -140,9 +140,16 @@ class KiwiRxSource:
         self._error = None
         self._user = user
 
-        self.ws = _WebSocket(self.host, self.port, f"/{int(time.time())}/SND")
+        # "/ws/kiwi/<ts>/SND": what the KiwiSDR web page itself uses. Some
+        # Kiwis (seen: DL1RF, behind a proxy) accept the old "/<ts>/SND" but
+        # then never send a byte -- the stream just stalled; others take both.
+        self.ws = _WebSocket(self.host, self.port, f"/ws/kiwi/{int(time.time())}/SND")
         self.ws.sock.settimeout(STALL_S)
         self.ws.send("SET auth t=kiwi p=")
+        # name the listener (as kiwirecorder and the web page do): Kiwis that
+        # enforce limits (seen: DL1RF) drop an unnamed client after ~10 s
+        # with "too_busy=0"
+        self.ws.send(f"SET ident_user={user}")
         threading.Thread(target=self._run, daemon=True, name="kiwi-read").start()
         if not self._rate_ready.wait(connect_timeout_s):
             self.close()
@@ -150,6 +157,12 @@ class KiwiRxSource:
                                                  f"within {connect_timeout_s:g} s")
         if self._error:
             raise ConnectionError(self._error)
+        if not self.sample_rate_hz:
+            # the stream ended before it ever started (e.g. "no data for 10 s"):
+            # say so plainly -- formatting the missing rate below crashed instead
+            self.close()
+            raise ConnectionError(f"KiwiSDR {self.host}:{self.port} accepted the connection but sent no "
+                                  f"audio -- it may be busy; try again or another KiwiSDR")
         print(f"KiwiSDR RX active: {self.host}:{self.port} freq={self.freq_hz / 1e6:.4f}MHz "
               f"rate={self.sample_rate_hz:.2f} S/s gain={self.rx_gain_db:g}dB (Kiwi AGC off)",
               file=sys.stderr)
@@ -213,7 +226,9 @@ class KiwiRxSource:
                 self.sample_rate_hz = float(val)
             elif key == "audio_rate":
                 self._configure(val)
-            elif key == "too_busy":
+            elif key == "too_busy" and val not in ("0", ""):
+                # (too_busy=0 is only a notice -- DL1RF sends it ~10 s into a
+                # good stream; treating it as "full" ended the session)
                 self._fail(f"KiwiSDR {self.host} is full (all {val} channels in use) -- try later or another Kiwi")
             elif key == "badp" and val not in ("0", ""):
                 # (also sent when the channels open without one are all in use)

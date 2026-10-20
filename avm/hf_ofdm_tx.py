@@ -121,11 +121,32 @@ def run_stream(cfg, args, sink, fixed_peak=None):
     comment for why."""
     frag_idx = 0
     clipped_count = 0
+    # Fragments back to back: the resampler's speed padding (see
+    # ofdm.fft_resample_rate) was sent as silence after each one -- up to
+    # ~5% of airtime (B 250 kHz 13 ms, D 10 kHz 77 ms a fragment). Instead
+    # each fragment is cut at its true end, plus one cyclic prefix of its
+    # last symbol continued, and joined to the next with a raised-cosine
+    # crossfade over that length (over the next preamble's cyclic prefix).
+    # A plain cut raised the emission beyond the TX cut 10-20 dB at the
+    # joins, and adding the padded tail onto the next fragment ~20 dB (it
+    # holds the Fourier method's wrap-around); the crossfade measured
+    # -57..-64 dB, as good as the gaps were (-52..-64). Duplex keeps the
+    # gap: its slot timing counts it.
+    # (S: a single-carrier burst starts and ends on its own filter tails --
+    # nothing to crossfade)
+    overlap_tail = not args.tdd_cycle_s and not args.fragment_gap_ms and not ofdm.single_carrier(cfg)
+    carry = None
+    # amplitude predistortion on the final samples (dpd.py; live from its file)
+    predistort = None
+    if args.dpd_file:
+        import dpd
+        predistort = dpd.Predistorter(args.dpd_file)
+    ramp = None
     # Started BEFORE warmup so input produced meanwhile is drained, not queued.
     backlog = _LiveInput(args.fragment_size, 1) if args.max_input_backlog else None
 
     def transmit_fragment(data: bytes, tag: str = "", total_field: int = 0, len_field: int = 0):
-        nonlocal frag_idx, clipped_count
+        nonlocal frag_idx, clipped_count, carry, ramp
         # total_field: FRAG_HEADER's total_frags, unused (0) in stream mode;
         # TDD puts the fragment's slot position there (see TDD_HEADER_FLAG)
         # len_field: FRAG_HEADER's total_len, unused (0) in stream mode; TDD's
@@ -136,6 +157,11 @@ def run_stream(cfg, args, sink, fixed_peak=None):
             waveform = ofdm.reduce_papr(cfg, waveform, args.papr_db)
 
         out_fs = cfg.fs
+        n_native = len(waveform)
+        joined = overlap_tail and args.sample_rate is not None and args.sample_rate != cfg.fs
+        if joined:
+            # the last symbol continued for one cyclic prefix (periodic in n_fft)
+            waveform = np.concatenate([waveform, waveform[n_native - cfg.n_fft:][:cfg.n_cp]])
         if args.sample_rate is not None and args.sample_rate != cfg.fs:
             # Single precision from here on: both sinks send complex64 anyway
             # (a 12-bit DAC on the Pluto), and the resample's large FFTs run
@@ -177,11 +203,25 @@ def run_stream(cfg, args, sink, fixed_peak=None):
         if fixed_peak is not None and args.amplitude != 1.0:
             waveform = waveform * args.amplitude
 
+        if joined:
+            n_keep = int(round(n_native * out_fs / cfg.fs))
+            n_fade = int(round(cfg.n_cp * out_fs / cfg.fs))
+            if ramp is None or len(ramp) != n_fade:
+                ramp = (0.5 - 0.5 * np.cos(np.pi * (np.arange(n_fade) + 0.5) / n_fade)).astype(np.float32)
+            tail = waveform[n_keep:n_keep + n_fade] * ramp[::-1]
+            waveform = waveform[:n_keep].copy()
+            waveform[:n_fade] *= ramp
+            if carry is not None:
+                waveform[:n_fade] += carry
+            carry = tail
+
         if args.fragment_gap_ms > 0:
             gap_len = int(round(out_fs * args.fragment_gap_ms / 1000))
             if gap_len > 0:
                 waveform = np.concatenate([waveform, np.zeros(gap_len, dtype=waveform.dtype)])
 
+        if predistort is not None:
+            waveform = predistort(waveform)
         sink.write(waveform)
         print(f"{tag}Streamed fragment seq={frag_idx % 65536} ({len(data)} bytes, "
               f"{len(waveform) / out_fs * 1000:.1f} ms)", file=sys.stderr)
@@ -241,6 +281,11 @@ def run_stream(cfg, args, sink, fixed_peak=None):
             print(f"Dropped {backlog.dropped} stale input fragment(s) in total (--max-input-backlog).",
                   file=sys.stderr)
 
+    if carry is not None:
+        # the last fragment's fade-out, then a little silence: a receiver's
+        # filters need a few samples past the frame to finish decoding it
+        end = np.concatenate([carry, np.zeros(len(carry) * 4, carry.dtype)])
+        sink.write(predistort(end) if predistort is not None else end)
     print(f"Stream ended: sent {frag_idx} fragment(s).", file=sys.stderr)
 
 
@@ -478,7 +523,7 @@ class _LiveInput:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", choices=list(ofdm.DRM_MODES), default="B")
+    ap.add_argument("--mode", choices=list(ofdm.DRM_MODES) + ["S", "SH"], default="B")
     ap.add_argument("--occupancy", type=float, default=20,
                      help="Spectrum occupancy in kHz (default 20). One of DRM's official values "
                           "(4.5, 5, 9, 10, 18, 20) uses its exact spec'd carrier range; anything "
@@ -489,7 +534,7 @@ def main():
                      help="Peak reduction (clip and filter, receiver-transparent): limit peaks to this "
                           "many dB above the average, e.g. 7. 0 = off. More average power from the same "
                           "amplifier peak, for a little in-band distortion (a ceiling on MER).")
-    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam"], default="qpsk",
+    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam", "8psk"], default="qpsk",
                      help="PAYLOAD modulation (default qpsk). 16qam doubles payload bits/carrier "
                           "(roughly double throughput at a given occupancy) but needs about "
                           "6-7dB more SNR for the same error rate -- an explicit per-link choice, "
@@ -525,6 +570,9 @@ def main():
                           "Default: send as one frame no matter the size.")
     ap.add_argument("--fragment-gap-ms", type=float, default=300,
                      help="Silence gap in ms between fragments (default 300).")
+    ap.add_argument("--dpd-file", type=str, default=None,
+                     help="--stream: amplitude predistortion settings (dpd.py's JSON; the TX "
+                          "page's DPD popup writes it), re-read whenever the file changes.")
     ap.add_argument("--stream", action="store_true",
                      help="Continuous streaming mode for an indefinite source (e.g. live audio) "
                           "instead of reading all of stdin before transmitting anything -- the "

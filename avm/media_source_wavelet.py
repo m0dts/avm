@@ -35,7 +35,9 @@ MOTION_PIXEL_RATE = 1.1e6   # pixels/s up to which --motion auto turns it on
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", choices=["device", "test"], default="device")
+    ap.add_argument("--source", choices=["device", "test", "image"], default="device")
+    ap.add_argument("--image-path", type=str, default=None,
+                    help="--source image: the picture to send (default: the uploaded one)")
     ap.add_argument("--list-devices", action="store_true")
     ap.add_argument("--video-device", type=str, default="Integrated Camera")
     ap.add_argument("--resolution", type=str, default="256x144",
@@ -109,7 +111,7 @@ def main():
     cmd += build_video_args(args)
     if args.duration:
         cmd += ["-t", str(args.duration)]
-    if args.source == "device":
+    if args.source in ("device", "image"):
         cmd += ["-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
                        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps={args.framerate}"]
     cmd += ["-pix_fmt", "yuv420p", "-f", "rawvideo", "-"]

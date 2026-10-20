@@ -53,6 +53,7 @@ MANUAL_DB_PER_DIV = 2.5
 # (10 and 20 only when 5 can't: a very strong signal shouldn't run off the top)
 AUTOSCALE_DIVS = (1.0, 2.0, 4.0, 5.0, 10.0, 20.0)
 AUTOSCALE_NOISE_LIFT_DB = 1.0   # the noise mean this far above the bottom line
+AUTOSCALE_STEP_DB = 0.5         # the scale's bottom (and so its top) moves in these steps
 
 
 def _station_text(engine_text):
@@ -125,6 +126,7 @@ class _RxEngine(media_rx_gui.MediaRxWindow):
 
 class RxPage(QtWidgets.QWidget):
     running_changed = QtCore.pyqtSignal(bool)
+    _kiwi_info_ready = QtCore.pyqtSignal(str, str)   # server, text (from a worker thread)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -218,7 +220,8 @@ class RxPage(QtWidgets.QWidget):
         self.freq = tw.FreqButton("RX frequency", s_get(settings, "rx_freq", 145500000))
         self.mode = tw.Segmented([(m, m) for m in tw.MODES], tw.saved_mode(s_get(settings, "rx_mode", "A")))
         self.bw = tw.Segmented([(b, b) for b in tw.BANDWIDTHS_KHZ], tw.saved_bandwidth(s_get(settings, "rx_bw", "80")))
-        self.mod = tw.Segmented([("qpsk", "QPSK"), ("16qam", "16QAM"), ("32qam", "32QAM")], s_get(settings, "rx_mod", "qpsk"))
+        self.mod = tw.Segmented([("qpsk", "QPSK"), ("8psk", "8PSK"), ("16qam", "16QAM"), ("32qam", "32QAM")],
+                              s_get(settings, "rx_mod", "qpsk"))   # 8PSK: mode S only
         self.gain = tw.Stepper(0, 73, 1, s_get(settings, "rx_gain", 40), " dB")
         self.audio_out = tw.Picker("Audio output", self._audio_outputs,
                                    s_get(settings, "rx_audio", self.engine.audio_device.currentText()))
@@ -273,6 +276,16 @@ class RxPage(QtWidgets.QWidget):
         grid.setVerticalSpacing(4)
         right.addLayout(grid)
         right.addStretch(1)
+        # KiwiSDR only: which receiver this is (its /status page's name), so
+        # it is obvious whose Kiwi the RX uses
+        self.kiwi_info = QtWidgets.QLabel()
+        self.kiwi_info.setWordWrap(True)
+        self.kiwi_info.setAlignment(QtCore.Qt.AlignCenter)
+        self.kiwi_info.setStyleSheet(f"color: #f0c040; font-size: {max(10, round(13 * tw.SCALE))}px;")
+        self.kiwi_info.hide()
+        self._kiwi_info = {}   # server -> text
+        self._kiwi_info_ready.connect(self._kiwi_info_got)
+        right.addWidget(self.kiwi_info)
         self.run = tw.RunButton("RX")
         self.run.clicked.connect(self._run_clicked)
         right.addWidget(self.run)
@@ -336,7 +349,8 @@ class RxPage(QtWidgets.QWidget):
     # ------------------------------------------------------------------
     def _apply_to_engine(self):
         # a KiwiSDR's ~12 kS/s stream carries 10 kHz only
-        tw.enforce_mode_bandwidth(self.mode, self.bw, only_khz="10" if self.engine.sdr == "kiwi" else None)
+        tw.enforce_mode_bandwidth(self.mode, self.bw, only_khz="10" if self.engine.sdr == "kiwi" else None,
+                                  mod_seg=self.mod)
         # after the width check: it can change the width (e.g. VU needs 80 kHz+)
         self._update_tuning_bar()
         e = self.engine
@@ -355,6 +369,7 @@ class RxPage(QtWidgets.QWidget):
         e.span_hz = SPECTRUM_SPAN_X * float(self.bw.value()) * 1000
         if e.sdr == "kiwi":
             e.span_hz = min(e.span_hz, 11000.0)  # all of a ~12 kS/s Kiwi stream, no more
+        self._show_kiwi_info()
         # the Config tab's choice (was reset to the default here, and RX start
         # then wrote that default to the live file: the choice never stuck)
         e.spectrum_averages.setValue(getattr(self, "_spec_avg", SPECTRUM_AVERAGES))
@@ -457,18 +472,27 @@ class RxPage(QtWidgets.QWidget):
     @classmethod
     def _tuning_geometry(cls, mode, khz):
         """(signal low Hz, signal high Hz, pull-in Hz) relative to the tuned
-        frequency. Pull-in: the integer-CFO search (+-30 carriers, plus the
-        +-1 carrier fractional estimate) or the room left before the front
-        end's filter edge (fs/2), whichever is smaller -- beyond it the outer
-        carriers start to be cut and decoding degrades."""
+        frequency: how far off tune a signal is still found and decoded (the
+        AFC then brings it back to centre). Measured through the real TX and
+        RX at 550/800 kS/s, 30 dB SNR (2026-10-19):
+          OFDM: the integer-CFO search (+-30 carriers) -- A 10 kHz decodes at
+                0.8 kHz off, not 1.3 (= 31 x 41.7 Hz) -- or a quarter of the
+                width, whichever is less: VU 80 at 20 kHz but not 30, VU 160
+                at 40, VU 250 at 60. (The old limit, the room left inside the
+                mode's own rate, was ~10x too strict: VU 80 showed +-1.25 kHz;
+                losing an outer carrier's edge is shrugged off by the FEC.)
+          S:    the preamble's frequency estimate, +-half the symbol rate."""
         key = (mode, khz)
         if key not in cls._tuning_cache:
             cfg = ofdm.build_config(mode, float(khz), fec_scheme="ldpc")
             sp = cfg.carrier_spacing
             bins = [b if b < cfg.n_fft // 2 else b - cfg.n_fft for b in cfg.fft_bins]
             lo, hi = (min(bins) - 0.5) * sp, (max(bins) + 0.5) * sp
-            room = min(cfg.fs / 2 - hi, cfg.fs / 2 + lo)
-            cls._tuning_cache[key] = (lo, hi, max(0.0, min(31 * sp, room)))
+            if ofdm.single_carrier(cfg):
+                pull = cfg.symbol_rate / 2
+            else:
+                pull = min(29 * sp, (hi - lo) / 4)
+            cls._tuning_cache[key] = (lo, hi, pull)
         return cls._tuning_cache[key]
 
     def _update_tuning_bar(self):
@@ -478,6 +502,16 @@ class RxPage(QtWidgets.QWidget):
             lo, hi, pull = self._tuning_geometry(self.mode.value(), self.bw.value())
         except Exception:
             return  # an invalid combination being switched through: keep the last bar
+        if self.mode.value() in tw.SINGLE_CARRIER_MODES:
+            # single carrier: its pull-in (+-half the symbol rate) is most of
+            # its own width, so edge guides overlapped into a muddle -- one
+            # band instead: anywhere in it, the signal is found and decoded
+            self._tune_inner.setRegion((lo - pull, hi + pull))
+            for zone in self._tune_zones:
+                zone.setVisible(False)
+            return
+        for zone in self._tune_zones:
+            zone.setVisible(True)
         # the band shading stops where the edge guides start: overlapping
         # half of each, it tinted them unequally (the two looked different)
         self._tune_inner.setRegion((lo + pull, hi - pull))
@@ -533,18 +567,66 @@ class RxPage(QtWidgets.QWidget):
         y = y[np.isfinite(y)]
         if len(y) < 16:
             return
-        # the view is 1.5x the signal's width: its outer ~8% each side is band
+        # the view is 1.5x the signal's width: its outer ~4% each side is band
         # noise (power mean, not dB mean -- a dB mean sits ~2.5 dB low)
-        k = max(2, len(y) * 8 // 100)
+        k = max(2, len(y) * 4 // 100)   # outer 4% (KiwiSDR: 8% reached the signal)
         edges = np.concatenate([y[:k], y[-k:]])
         noise = 10 * np.log10(np.mean(10 ** (edges / 10)))
+        # ...unless the edges aren't clean noise: a narrow view (the
+        # KiwiSDR's ~11 kHz) catches the signal's skirts and other stations
+        # there, reading the floor too high -- the real floor then sat below
+        # the bottom line. The quietest quarter of all bins is a floor that
+        # can't be fooled that way; take the lower of the two.
+        quiet = y[y <= np.percentile(y, 10)]   # quietest tenth: a quarter included signal (KiwiSDR)
+        if len(quiet):
+            noise = min(noise, 10 * np.log10(np.mean(10 ** (quiet / 10))))
         peak = float(np.max(y))    # the real peak, narrow carriers and spurs too
         bottom = noise - AUTOSCALE_NOISE_LIFT_DB   # the noise mean just above the bottom line
+        bottom = round(bottom / AUTOSCALE_STEP_DB) * AUTOSCALE_STEP_DB   # moves in whole steps only
         span = peak + 1.0 - bottom  # a little headroom over the peak
         div = next((d for d in AUTOSCALE_DIVS if 10 * d >= span), AUTOSCALE_DIVS[-1])
+        # while RX runs, dB/div only ever widens (peak hold): a scale that
+        # jumped back down between bursts made the picture pump; reset at
+        # each RX start
+        if self.is_running():
+            div = max(div, getattr(self, "_held_div", 0.0))
+            self._held_div = div
         top = bottom + 10 * div
         self.ref.set_value(int(round(top)))   # display only (no emit: stays on Auto)
         self._set_scale(top, div)
+
+    def _show_kiwi_info(self):
+        server = tw.KIWI_SERVER if self.engine.sdr == "kiwi" else ""
+        if not server:
+            self.kiwi_info.hide()
+            return
+        self.kiwi_info.setText(self._kiwi_info.get(server, f"KiwiSDR {server}"))
+        self.kiwi_info.show()
+        if server not in self._kiwi_info:
+            self._kiwi_info[server] = f"KiwiSDR {server}"   # one fetch per server
+            import threading
+            threading.Thread(target=self._fetch_kiwi_info, args=(server,), daemon=True).start()
+
+    def _fetch_kiwi_info(self, server):
+        """Worker thread: the Kiwi's public /status page (name=, antenna=...)."""
+        import urllib.request
+        host = server if ":" in server else server + ":8073"
+        try:
+            with urllib.request.urlopen(f"http://{host}/status", timeout=6) as r:
+                txt = r.read(8192).decode("utf-8", "replace")
+        except Exception:
+            self._kiwi_info_ready.emit(server, f"KiwiSDR {server}\n(no status page)")
+            return
+        st = dict(l.split("=", 1) for l in txt.splitlines() if "=" in l)
+        name = st.get("name", "").strip() or server
+        extra = " · ".join(x for x in (
+            f"users {st['users']}/{st['users_max']}" if st.get("users") and st.get("users_max") else "",
+            "OFFLINE" if st.get("offline") == "yes" else "") if x)
+        self._kiwi_info_ready.emit(server, "KiwiSDR: " + name + (f"\n{extra}" if extra else ""))
+
+    def _kiwi_info_got(self, server, text):
+        self._kiwi_info[server] = text
+        self._show_kiwi_info()
 
     def set_radio(self, sdr, force=False):
         """'pluto', 'lime', 'rtlsdr', 'airspy', 'airspyhf' or 'sdrplay' -- from the Radio
@@ -701,6 +783,7 @@ class RxPage(QtWidgets.QWidget):
         self.running_tdd = self.engine.tdd if self.is_running() else None
         if self.is_running():
             self.run.set_state("running")
+            self._held_div = 0.0   # the spectrum's held dB/div starts afresh (see _autoscale)
             self.status.setText("Searching...")
             self.stages.set_states(["busy", "todo", "todo"])
             self.running_changed.emit(True)

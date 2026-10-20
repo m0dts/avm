@@ -854,9 +854,10 @@ class AudioPlaybackWorker:
                 raise
             self._stream = sd.OutputStream(samplerate=rate, channels=self._channels,
                                             dtype="int16", latency="high", device=self.device)
+            # (no message: a device with its own fixed rate is normal -- USB
+            # headsets take 48 kHz only -- and the conversion just works; it
+            # showed as a warning every RX start)
             self._conv = _RateConverter(self._sample_rate, rate, self._channels)
-            _log(f"[audio] the device doesn't take {self._sample_rate} Hz ({e}): "
-                 f"playing at its {rate} Hz, converted")
         self._stream.start()
 
     def _write(self, pcm):

@@ -821,9 +821,10 @@ def fft_resample_rate(x, fs_in, fs_out, cut_hz=None, taper_hz=0.0):
     pad = resample_pad(len(x), fs_in, fs_out)
     if pad:
         x = np.concatenate([x, np.zeros(pad, dtype=x.dtype)])
-    # The pad stays on air (cutting it back off raised out-of-band emission
-    # 20-35 dB at the fragment joins): fragment timing that must match the
-    # radio uses resample_pad() / estimate_effective_bitrate(out_fs=...).
+    # The pad's samples are returned (cutting them off raised out-of-band
+    # emission 20-35 dB at the fragment joins): streaming TX adds them onto
+    # the start of the next fragment instead of sending them as silence;
+    # duplex (TDD) still sends them (resample_pad() / pad_on_air=True).
     return fft_resample(x, int(round(len(x) * fs_out / fs_in)), fs_in, cut_hz, taper_hz)
 
 
@@ -841,8 +842,20 @@ TX_CUT_SPACINGS = 2.0
 TX_TAPER_SPACINGS = 1.5
 
 
+def single_carrier(cfg):
+    """The module of a single-carrier mode (S: hf_sc, SH: hf_sch), which
+    builds, sizes and decodes its frames; None for the OFDM modes."""
+    name = getattr(cfg, "sc_module", None)
+    if not name:
+        return None
+    import importlib
+    return importlib.import_module(name)
+
+
 def tx_spectrum_cut(cfg):
     """(cut_hz, taper_hz) for fft_resample_rate on the transmit side."""
+    if single_carrier(cfg):
+        return single_carrier(cfg).spectrum_cut(cfg)
     last = float(np.max(np.abs(np.asarray(cfg.data_bins)))) * cfg.carrier_spacing
     return last + TX_CUT_SPACINGS * cfg.carrier_spacing, TX_TAPER_SPACINGS * cfg.carrier_spacing
 
@@ -1225,6 +1238,12 @@ def build_config(mode, spectrum_occupancy_khz=20, edge_guard_frac=0.03, data_mod
     useful with a wideband SDR and no DRM-compatibility requirement),
     fall back to build_config_scaled's symmetric extension instead of a
     table lookup, since there's no official Kmin/Kmax to look up."""
+    if mode == "S":
+        import hf_sc
+        return hf_sc.SCConfig(spectrum_occupancy_khz, data_modulation, fec_scheme)
+    if mode == "SH":
+        import hf_sch
+        return hf_sch.SHConfig(spectrum_occupancy_khz, data_modulation, fec_scheme)
     min_khz = DRM_MODES.get(mode, {}).get("min_occupancy_khz")
     if min_khz and spectrum_occupancy_khz < min_khz:
         raise ValueError(f"mode {mode} needs at least {min_khz:g} kHz occupancy "
@@ -1286,6 +1305,14 @@ def build_config_scaled(mode, target_bandwidth_hz, edge_guard_frac=0.03, data_mo
 
 
 def print_config(cfg, file=None, fragment_size_bytes=None, fragment_gap_ms=0.0):
+    if single_carrier(cfg):
+        import sys
+        file = file or sys.stderr     # never stdout: that's the TX's IQ stream
+        print(f"Mode {cfg.mode} (single carrier, RRC {__import__('hf_sc').ALPHA:g}): {cfg.symbol_rate:.0f} Bd {cfg.data_modulation.upper()}, "
+              f"LDPC 1/2, {cfg.fs:.0f} S/s, ceiling {estimate_payload_bitrate(cfg) / 1e3:.2f} kbps"
+              + (f", effective {estimate_effective_bitrate(cfg, fragment_size_bytes, fragment_gap_ms) / 1e3:.2f} kbps "
+                 f"at --fragment-size {fragment_size_bytes}" if fragment_size_bytes else ""), file=file)
+        return
     import sys
     file = file or sys.stderr
     print(f"Mode {cfg.mode} ({DRM_MODES[cfg.mode]['note']})", file=file)
@@ -2794,12 +2821,14 @@ def estimate_payload_bitrate(cfg):
     overhead -- see HEADER_MIN_REPEATS/_header_symbol_plan -- since that
     amortizes differently depending on --fragment-size, which this
     function doesn't know about."""
+    if single_carrier(cfg):
+        return single_carrier(cfg).payload_bitrate(cfg)
     window = max(40, 4 * cfg.time_int)
     avg_cap_bits = sum(_payload_bits_capacity(cfg, k) for k in range(window)) / window
     return (avg_cap_bits / 2) / (cfg.symbol_len / cfg.fs)
 
 
-def estimate_effective_bitrate(cfg, fragment_size_bytes, fragment_gap_ms=0.0, out_fs=None):
+def estimate_effective_bitrate(cfg, fragment_size_bytes, fragment_gap_ms=0.0, out_fs=None, pad_on_air=False):
     """Real end-to-end payload bitrate for a given --fragment-size (and,
     if known, --fragment-gap-ms): fragment bytes divided by the ACTUAL
     on-air time one fragment costs, header symbols and FEC/interleaver
@@ -2827,10 +2856,16 @@ def estimate_effective_bitrate(cfg, fragment_size_bytes, fragment_gap_ms=0.0, ou
     lower still. That's a flat-out capacity overestimate, not timing
     jitter -- distinct from (and on top of) TIMING_MARGIN_FRAC's own
     real-world-jitter margin in media_tx_gui.py."""
+    if single_carrier(cfg):
+        pad_on_air = True     # S bursts aren't crossfaded (hf_ofdm_tx): the resample pad is sent
     n_symbols = frame_symbol_count(cfg, fragment_size_bytes)
     n_frame = n_symbols * cfg.symbol_len + cfg.preamble_len  # preamble: one symbol_len for 2 halves
     frame_time_s = n_frame / cfg.fs
-    if out_fs and out_fs != cfg.fs:
+    if out_fs and out_fs != cfg.fs and not pad_on_air:
+        # streaming TX overlaps the resample pad onto the next fragment
+        # (hf_ofdm_tx.py): on air exactly the frame, at the radio's rate
+        frame_time_s = int(round(n_frame * out_fs / cfg.fs)) / out_fs
+    elif out_fs and out_fs != cfg.fs:
         # sent at the radio's rate: fft_resample_rate's speed padding goes
         # out on air too (VU 160 kHz -> 550 kS/s: 51.2 ms, not 50.4 -- left
         # out, the framer ran 1.6% fast and the transmitter dropped the excess)
@@ -2884,6 +2919,8 @@ def frame_symbol_count(cfg, payload_len_bytes):
     caller that already knows a decoded payload's length (e.g. to advance
     a stream reader past exactly this frame, for a multi-frame/fragmented
     transfer) doesn't have to duplicate this logic or guess."""
+    if single_carrier(cfg):
+        return single_carrier(cfg).frame_symbol_count(cfg, payload_len_bytes)
     header_symbol_indices = _header_symbol_plan(cfg)
     is_ldpc = getattr(cfg, "fec_scheme", "viterbi").lower() == "ldpc"
     if is_ldpc:
@@ -2894,6 +2931,8 @@ def frame_symbol_count(cfg, payload_len_bytes):
 
 
 def build_frame(cfg, payload: bytes):
+    if single_carrier(cfg):
+        return single_carrier(cfg).build_frame(cfg, payload)
     payload_bits = bytes_to_bits(payload)
     crc = zlib.crc32(payload) & 0xFFFFFFFF
     is_ldpc = getattr(cfg, "fec_scheme", "viterbi").lower() == "ldpc"
@@ -3004,6 +3043,8 @@ def reduce_papr(cfg, frame, target_db, iterations=PAPR_ITERATIONS):
     ~14 ms a VU 160 fragment (91 ms on air) -- the first version (4x,
     complex np.where every pass) took 57 ms there and, on top of the
     modulator's own ~54%, ran the transmitter out of real time. 0/None: off."""
+    if single_carrier(cfg):
+        return frame          # one carrier: ~3 dB peak to average already
     if not target_db:
         return frame
     n, L, cp = cfg.n_fft, cfg.symbol_len, cfg.n_cp

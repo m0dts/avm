@@ -42,32 +42,64 @@ BOARDS = {0: "Atlas", 1: "Hermes", 2: "Hermes II", 3: "Angelia", 4: "Orion", 5: 
           6: "Hermes Lite", 10: "Saturn"}
 
 
+def _local_ipv4():
+    """This machine's IPv4 addresses (not loopback)."""
+    addrs = []
+    try:
+        import subprocess
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=2).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if "inet" in parts:
+                addrs.append(parts[parts.index("inet") + 1].split("/")[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        try:
+            addrs = socket.gethostbyname_ex(socket.gethostname())[2]
+        except OSError:
+            pass
+    return [a for a in dict.fromkeys(addrs) if not a.startswith("127.")]
+
+
 def discover(host=None, timeout=0.6, sock=None):
     """Protocol 2 radios answering discovery: [(ip, board name, busy)].
-    host: ask that address only (still broadcast if it doesn't answer)."""
-    own = sock is None
-    if own:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.bind(("", 0))
+    host: ask that address too. The broadcast goes out of EVERY interface,
+    from each one's own address: an unbound broadcast only leaves by the
+    default route, so a radio on a second network adapter (a radio-only
+    link, 169.254.x.x when nothing hands out addresses) was never asked.
+    (sock: ignored, kept for callers.)"""
     pkt = bytes([0, 0, 0, 0, 0x02]) + bytes(55)
+    socks = []
+    for src in [""] + _local_ipv4():
+        try:
+            sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sk.bind((src, 0))
+            socks.append(sk)
+        except OSError:
+            continue
     found = {}
     try:
-        for dest in ([host] if host else []) + ["255.255.255.255"]:
-            sock.sendto(pkt, (dest, DISCOVERY_PORT))
+        for sk in socks:
+            for dest in ([host] if host else []) + ["255.255.255.255"]:
+                try:
+                    sk.sendto(pkt, (dest, DISCOVERY_PORT))
+                except OSError:
+                    pass
         t_end = time.monotonic() + timeout
-        while time.monotonic() < t_end:
-            r, _, _ = select.select([sock], [], [], max(0.0, t_end - time.monotonic()))
-            if not r:
+        while socks and time.monotonic() < t_end:
+            ready, _, _ = select.select(socks, [], [], max(0.0, t_end - time.monotonic()))
+            if not ready:
                 break
-            d, (ip, port) = sock.recvfrom(2048)
-            if port == DISCOVERY_PORT and len(d) >= 12 and d[4] in (2, 3) and d[:4] == b"\0\0\0\0":
-                found[ip] = (ip, BOARDS.get(d[11], f"board {d[11]}"), d[4] == 3)
-    except OSError:
-        pass
+            for sk in ready:
+                try:
+                    d, (ip, port) = sk.recvfrom(2048)
+                except OSError:
+                    continue
+                if port == DISCOVERY_PORT and len(d) >= 12 and d[4] in (2, 3) and d[:4] == b"\0\0\0\0":
+                    found[ip] = (ip, BOARDS.get(d[11], f"board {d[11]}"), d[4] == 3)
     finally:
-        if own:
-            sock.close()
+        for sk in socks:
+            sk.close()
     return list(found.values())
 
 
@@ -116,7 +148,7 @@ class HpsdrRxSource:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
         self.sock.bind(("", 0))
         host = str(server or "").replace("ip:", "").split(":")[0].strip() or None
-        radios = discover(host, sock=self.sock)
+        radios = discover(host)
         if host:
             radios = [r for r in radios if r[0] == host] or radios
         if not radios:
