@@ -56,157 +56,6 @@ with LNB drift), but it isn't what it's designed for. That said, we're radio
 amateurs and we're allowed to experiment! A single-carrier satellite mode
 may be added later.
 
-## The screens
-
-The tabs along the top switch between **CONFIG**, **TX** and **RX**. TX and
-RX both run at once; the tabs only change what you see. The title bar also
-shows the version, the ⚠ errors list, CPU use and **✕** to quit.
-
-### Config
-
-![AVM config page](docs/config.png)
-
-The set-up choices, which rarely change once a station is running:
-
-1. **Mode type:** HF, VHF/UHF or SAT. Not available yet (TBC).
-2. **TX radio:** Pluto or LimeSDR. A LimeSDR also gets an antenna-port button
-   (Auto, BAND1 or BAND2); on a LimeSDR Mini, try the other band if there's
-   no RF output.
-3. **RX radio:** Pluto, LimeSDR, RTL-SDR, Airspy or SDRplay, from the radios connected now. A
-   Pluto shows how it's connected (**USB** or **IP**), and AVM uses the one
-   you pick. An RTL-SDR also gets a **PPM** setting to correct its crystal,
-   and a LimeSDR a port button (Auto, LNAL, LNAW or LNAH).
-4. **Camera** and **Mic:** the capture devices (when TX's source is "Camera +
-   mic").
-5. **Audio out:** where received audio plays.
-6. **Content:** what TX sends. **Auto** sends video whenever the link has room
-   for it, otherwise audio only; **Audio only** and **Video only** force it.
-7. **Callsign:** your callsign or a short message, sent with the picture.
-8. **Spectrum avg:** how many measurements the RX spectrum averages (4, 8,
-   16 or 32): higher is smoother, lower reacts faster. Applies live.
-
-Changing any of these except Spectrum avg while transmitting or receiving
-turns that tab's button to **RESTART TO APPLY**. Settings are saved as you
-go.
-
-### Transmit
-
-![AVM transmit page](docs/tx.png)
-
-1. **Preview:** exactly what's being sent (here the built-in test pattern).
-   The first start on a new machine shows "Preparing video codec..." here
-   instead, while the codec compiles.
-2. **Rates:** video and audio bitrates, the link capacity, resolution and
-   frame rate, the radio, and fragments sent.
-3. **Source and resolution:** camera and mic, or the test pattern. Video sizes
-   go from 192×112 up to 384×224.
-4. **Audio:** Codec2 (3.2 kbps, leaves more room for video) or Opus (better
-   quality).
-5. **FPS:** video frame rate.
-6. **Freq:** the transmit frequency.
-7. **TX gain:** output level. It changes live while on air.
-8. **Mode, kHz and Modul.:** how the signal is built. A–D are robust
-   DRM-style modes, and VU is for VHF/UHF mobile and tropo. Widths go from
-   20 to 250 kHz, with QPSK (robust) or 16QAM (faster). Narrow widths that a
-   mode can't use are greyed out.
-9. **TX button:** start and stop transmitting. It checks the radio is
-   connected first, and shows **RESTART TO APPLY** if you change a setting
-   that needs a restart.
-
-### Receive
-
-![AVM receive page](docs/rx.png)
-
-1. **Station:** the received callsign or message. It's shown with \*stars\*
-   until it has been received intact.
-2. **Video:** the received picture; tap it for full screen. A receiver
-   tuning in mid-transmission sees the picture fill in as a mosaic within a
-   few seconds.
-3. **Lock lamps and status line:**
-   - **Header** and **Frame** lamps, over the last 2 seconds: **green** when
-     every fragment's header (or whole frame) decoded, **orange** when some
-     did, **red** when none did.
-   - **MER:** signal quality in dB; higher is better.
-   - **CFO:** how far the transmitter is off frequency.
-   - **fps:** received frame rate.
-   - **Q:** video frames queued for display.
-4. **Spectrum:** the live received band. Here it's a real mode VU, 80 kHz
-   signal. The small notch in the middle is deliberate (an empty centre
-   carrier), and it's handy for tuning. The **tuning indicator** behind the
-   trace shows where the signal should sit for the selected mode and width:
-   - **light blue band:** the signal's width, with a dashed centre line;
-   - **green zones at each edge:** how far the signal can drift (the
-     frequency-offset pull-in) and still lock without losing sensitivity.
-     Tune so the signal's edges sit inside them.
-5. **Freq and Offset:** the receive frequency, and a **−/+ offset** in 1 kHz
-   steps (±100 kHz). The offset applies live, to pull an off-frequency
-   signal (e.g. a drifting LNB on a satellite path) back into the green
-   zones.
-6. **Mode, kHz and Modul.:** these must match the transmitter.
-7. **RX gain:** changes live.
-8. **Ref level:** the spectrum's top line, or **Auto**.
-9. **RX button:** start and stop receiving. It checks the radio is
-   connected first, and says so if it isn't.
-
-## How it works
-
-```
-camera ─► wavelet video codec ─┐                                  ┌─► video decoder ─► screen
-                               ├─► framer ─► OFDM modem ─► SDR ~~► SDR ─► OFDM demodulator ─► deframer ─┤
-mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync)                                  └─► audio decoder ─► speaker
-```
-
-- **OFDM modem:** many closely spaced carriers, with pilots for tracking,
-  LDPC error correction, and a preamble so a receiver can lock on at any
-  time. Its timings are modelled on DRM's robustness modes, plus the
-  VHF/UHF mode VU.
-- **Video codec:** a wavelet codec written for AVM. It produces a fixed
-  number of bytes per frame, so it fits the radio's capacity exactly, and it
-  gets blurrier, not blocky, as the rate drops. A rolling refresh lets late
-  joiners and lost data recover within a few seconds.
-- **Receiver:** plays video and audio in step, at low latency. It skips ahead
-  instead of falling behind if it's ever delayed.
-
-## What you need
-
-- **A computer:** see [Computers](#computers) below.
-- **A radio (SDR):** see [Radios](#radios) below. Add filters and an
-  amplifier as needed for your band.
-- **A camera and microphone:** any USB webcam works (e.g. a Logitech C920,
-  whose focus AVM can control). The test pattern needs no camera.
-- **A licence to transmit:** see the note under [Use](#use).
-
-## Supported hardware
-
-AVM is an experimental release: "tested" below means it has been used with
-AVM, not that every setting has been tried on it.
-
-### Computers
-
-| Computer | Notes |
-|---|---|
-| **Raspberry Pi 4** with 64-bit Raspberry Pi OS (Trixie, desktop) | What AVM is developed and tested on. Best with the 7" touch screen. |
-
-### Radios
-
-| Radio | TX | RX | Tuning range | Status | Notes |
-|---|:-:|:-:|---|---|---|
-| **ADALM-Pluto** | ✓ | ✓ | 70-6000 MHz* | Tested | TX and RX at once from one Pluto. On USB, or on the network at 192.168.2.1 / pluto.local. |
-| **LibreSDR** (and other boards running Pluto firmware) | ✓ | ✓ | 70-6000 MHz | Untested | Works as a Pluto. On Ethernet, AVM checks both 192.168.2.1 and 192.168.1.10 (LibreSDR's default) and uses whichever answers. |
-| **LimeSDR-USB / LimeSDR Mini** | ✓ | ✓ | 0.1-3800 MHz | Tested | TX **or** RX, not both at once from one Lime (it can only be opened by one program). To do both, add a second radio for RX, e.g. an RTL-SDR. AVM says "LimeSDR busy" otherwise. Antenna port selectable. |
-| **RTL-SDR dongle** (RTL2832U + R820T) | | ✓ | 24-1766 MHz | Tested | Cheap RX. PPM setting to correct its crystal. |
-| **Airspy R2 / Mini** | | ✓ | 24-1800 MHz | Found by AVM, receive not yet tested | Samples at 2.5 MS/s (R2) or 3 MS/s (Mini): more CPU on a Pi than an RTL-SDR. |
-| **Airspy HF+ Discovery / Dual** | | ✓ | 0.01-31 and 60-260 MHz | Untested | Runs its own AGC: AVM's RX gain setting doesn't apply. |
-| **SDRplay RSP1, RSP1A, RSP1B, RSP2, RSPduo, RSPdx, RSPdx-R2** | | ✓ | 0.001-2000 MHz | RSPduo found and opened by AVM, receive not yet tested | Needs SDRplay's API, which you download yourself: see [SDRplay RSPs](#sdrplay-rsps). Runs its own AGC. RSPduo used as a single tuner. |
-
-\* 70-6000 MHz with the common Pluto firmware change; a stock Pluto covers
-325-3800 MHz.
-
-Radios are listed in AVM by what's plugged in now; a radio that isn't
-connected isn't offered. AVM checks the chosen radio is there before TX or RX
-starts, and pauses TX/RX if a USB radio disappears, carrying on when it's
-back.
-
 ## Install
 
 AVM runs on a **Raspberry Pi 4**. If you already have a Portsdown DATV
@@ -320,6 +169,177 @@ when the file is newer than what's installed, and rebuilds the driver.
   RSP. If not, check SDRplay's service is running with
   `systemctl status sdrplay`, and restart it with
   `sudo systemctl restart sdrplay`.
+
+## The screens
+
+The tabs along the top switch between **CONFIG**, **TX** and **RX**. TX and
+RX both run at once; the tabs only change what you see. The title bar also
+shows the version, the ⚠ errors list, CPU use and **✕** to quit.
+
+### Config
+
+![AVM config page](docs/config.png)
+
+The set-up choices, which rarely change once a station is running:
+
+1. **Mode type:** HF, VHF/UHF or SAT. This picks which modes, widths and
+   modulations the TX and RX pages offer, and hides the rest:
+   - **HF:** modes A–D and SH, 10 to 40 kHz;
+   - **VHF/UHF:** mode VU, 80 to 250 kHz;
+   - **SAT:** mode S, 10 to 40 kHz.
+2. **TX radio:** Pluto or LimeSDR. A LimeSDR also gets an antenna-port button
+   (Auto, BAND1 or BAND2); on a LimeSDR Mini, try the other band if there's
+   no RF output.
+3. **RX radio:** Pluto, LimeSDR, RTL-SDR, Airspy, SDRplay or a KiwiSDR on
+   the internet, from the radios connected now. A
+   Pluto shows how it's connected (**USB** or **IP**), and AVM uses the one
+   you pick. An RTL-SDR also gets a **PPM** setting to correct its crystal,
+   and a LimeSDR a port button (Auto, LNAL, LNAW or LNAH).
+4. **Camera** and **Mic:** the capture devices (when TX's source is "Camera +
+   mic").
+5. **Audio out:** where received audio plays.
+6. **Content:** what TX sends. **Auto** sends video whenever the link has room
+   for it, otherwise audio only; **Audio only** and **Video only** force it.
+7. **Callsign:** your callsign or a short message, sent with the picture.
+8. **Spectrum avg:** how many measurements the RX spectrum averages (none,
+   4, 8, 16 or 32): higher is smoother, lower reacts faster. Applies live.
+9. **Experimental** (orange box): off by default. Turning it on unlocks
+   **TX peak reduce** and **TX DPD** (predistortion, to clean up an
+   amplifier's splatter, set in its own popup). Both can badly distort your
+   signal if set wrong, so only use them when you can watch your
+   transmission on another receiver.
+10. **Video:** send in colour, or black and white, which leaves the
+    bits for a little more picture detail.
+11. **KiwiSDR:** the address of the KiwiSDR to receive with, when it's the
+    RX radio.
+12. **RX spectrum:** **Inverted** if your receive chain flips the spectrum
+    (e.g. some converters).
+
+Changing any of these except Spectrum avg while transmitting or receiving
+turns that tab's button to **RESTART TO APPLY**. Settings are saved as you
+go.
+
+### Transmit
+
+![AVM transmit page](docs/tx.png)
+
+1. **Preview:** exactly what's being sent (here the built-in test pattern).
+   The first start on a new machine shows "Preparing video codec..." here
+   instead, while the codec compiles.
+2. **Rates:** video and audio bitrates, the link capacity, resolution and
+   frame rate, the radio, and fragments sent.
+3. **Source and resolution:** camera and mic, or the test pattern. Video sizes
+   go from 192×112 up to 384×224.
+4. **Audio:** Codec2 (3.2 kbps, leaves more room for video) or Opus (better
+   quality).
+5. **FPS:** video frame rate.
+6. **Freq:** the transmit frequency.
+7. **TX gain:** output level. It changes live while on air.
+8. **Mode, kHz and Modul.:** how the signal is built; the choices depend on
+   the mode type set in Config.
+   - **A–D** are robust DRM-style modes for HF, **SH** is a single-carrier
+     mode for HF, **VU** is for VHF/UHF mobile and tropo, and **S** is a
+     single-carrier mode for satellite and other steady paths.
+   - Widths go from 10 to 250 kHz.
+   - Modulation: QPSK (most robust), 8PSK (S and SH only), 16QAM or 32QAM
+     (fastest, needs the strongest signal).
+   - Choices a mode can't use are greyed out.
+9. **TX button:** start and stop transmitting. It checks the radio is
+   connected first, and shows **RESTART TO APPLY** if you change a setting
+   that needs a restart.
+
+### Receive
+
+![AVM receive page](docs/rx.png)
+
+1. **Station:** the received callsign or message. It's shown with \*stars\*
+   until it has been received intact.
+2. **Video:** the received picture; tap it for full screen. A receiver
+   tuning in mid-transmission sees the picture fill in as a mosaic within a
+   few seconds.
+3. **Lock lamps and status line:**
+   - **Header** and **Frame** lamps, over the last 2 seconds: **green** when
+     every fragment's header (or whole frame) decoded, **orange** when some
+     did, **red** when none did.
+   - **MER:** signal quality in dB; higher is better.
+   - **CFO:** how far the transmitter is off frequency.
+   - **fps:** received frame rate.
+   - **Q:** video frames queued for display.
+4. **Spectrum:** the live received band. Here it's a real mode VU, 80 kHz
+   signal. The **tuning indicator** behind the
+   trace shows where the signal should sit for the selected mode and width:
+   - **light blue band:** the signal's width, with a dashed centre line;
+   - **green zones at each edge:** how far the signal can drift (the
+     frequency-offset pull-in) and still lock without losing sensitivity.
+     Tune so the signal's edges sit inside them.
+5. **Freq and Offset:** the receive frequency, and a **−/+ offset** in 1 kHz
+   steps (±100 kHz). The offset applies live, to pull an off-frequency
+   signal (e.g. a drifting LNB on a satellite path) back into the green
+   zones.
+6. **Mode, kHz and Modul.:** these must match the transmitter.
+7. **RX gain:** changes live.
+8. **Ref level:** the spectrum's top line, or **Auto**.
+9. **RX button:** start and stop receiving. It checks the radio is
+   connected first, and says so if it isn't.
+
+## How it works
+
+```
+camera ─► wavelet video codec ─┐                                  ┌─► video decoder ─► screen
+                               ├─► framer ─► OFDM modem ─► SDR ~~► SDR ─► OFDM demodulator ─► deframer ─┤
+mic ────► Opus / Codec2 ───────┘   (callsign, A/V sync)                                  └─► audio decoder ─► speaker
+```
+
+- **OFDM modem:** many closely spaced carriers, with pilots for tracking,
+  LDPC error correction, and a preamble so a receiver can lock on at any
+  time. Its timings are modelled on DRM's robustness modes, plus the
+  VHF/UHF mode VU.
+- **Video codec:** a wavelet codec written for AVM. It produces a fixed
+  number of bytes per frame, so it fits the radio's capacity exactly, and it
+  gets blurrier, not blocky, as the rate drops. A rolling refresh lets late
+  joiners and lost data recover within a few seconds.
+- **Receiver:** plays video and audio in step, at low latency. It skips ahead
+  instead of falling behind if it's ever delayed.
+
+## What you need
+
+- **A computer:** see [Computers](#computers) below.
+- **A radio (SDR):** see [Radios](#radios) below. Add filters and an
+  amplifier as needed for your band.
+- **A camera and microphone:** any USB webcam works (e.g. a Logitech C920,
+  whose focus AVM can control). The test pattern needs no camera.
+- **A licence to transmit:** see the note under [Use](#use).
+
+## Supported hardware
+
+AVM is an experimental release: "tested" below means it has been used with
+AVM, not that every setting has been tried on it.
+
+### Computers
+
+| Computer | Notes |
+|---|---|
+| **Raspberry Pi 4** with 64-bit Raspberry Pi OS (Trixie, desktop) | What AVM is developed and tested on. Best with the 7" touch screen. |
+
+### Radios
+
+| Radio | TX | RX | Tuning range | Status | Notes |
+|---|:-:|:-:|---|---|---|
+| **ADALM-Pluto** | ✓ | ✓ | 70-6000 MHz* | Tested | TX and RX at once from one Pluto. On USB, or on the network at 192.168.2.1 / pluto.local. |
+| **LibreSDR** (and other boards running Pluto firmware) | ✓ | ✓ | 70-6000 MHz | Untested | Works as a Pluto. On Ethernet, AVM checks both 192.168.2.1 and 192.168.1.10 (LibreSDR's default) and uses whichever answers. |
+| **LimeSDR-USB / LimeSDR Mini** | ✓ | ✓ | 0.1-3800 MHz | Tested | TX **or** RX, not both at once from one Lime (it can only be opened by one program). To do both, add a second radio for RX, e.g. an RTL-SDR. AVM says "LimeSDR busy" otherwise. Antenna port selectable. |
+| **RTL-SDR dongle** (RTL2832U + R820T) | | ✓ | 24-1766 MHz | Tested | Cheap RX. PPM setting to correct its crystal. |
+| **Airspy R2 / Mini** | | ✓ | 24-1800 MHz | Found by AVM, receive not yet tested | Samples at 2.5 MS/s (R2) or 3 MS/s (Mini): more CPU on a Pi than an RTL-SDR. |
+| **Airspy HF+ Discovery / Dual** | | ✓ | 0.01-31 and 60-260 MHz | Untested | Runs its own AGC: AVM's RX gain setting doesn't apply. |
+| **SDRplay RSP1, RSP1A, RSP1B, RSP2, RSPduo, RSPdx, RSPdx-R2** | | ✓ | 0.001-2000 MHz | RSPduo found and opened by AVM, receive not yet tested | Needs SDRplay's API, which you download yourself: see [SDRplay RSPs](#sdrplay-rsps). Runs its own AGC. RSPduo used as a single tuner. |
+
+\* 70-6000 MHz with the common Pluto firmware change; a stock Pluto covers
+325-3800 MHz.
+
+Radios are listed in AVM by what's plugged in now; a radio that isn't
+connected isn't offered. AVM checks the chosen radio is there before TX or RX
+starts, and pauses TX/RX if a USB radio disappears, carrying on when it's
+back.
 
 ## Use
 
