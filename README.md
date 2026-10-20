@@ -172,6 +172,8 @@ when the file is newer than what's installed, and rebuilds the driver.
 
 ## The screens
 
+Not sure which mode to pick? See **[AVM modes: which one to use](docs/MODES.md)**.
+
 The tabs along the top switch between **CONFIG**, **TX** and **RX**. TX and
 RX both run at once; the tabs only change what you see. The title bar also
 shows the version, the ⚠ errors list, CPU use and **✕** to quit.
@@ -244,6 +246,8 @@ go.
    - Modulation: QPSK (most robust), 8PSK (S and SH only), 16QAM or 32QAM
      (fastest, needs the strongest signal).
    - Choices a mode can't use are greyed out.
+   - **[Which mode to use](docs/MODES.md)** explains every mode: what it's
+     good for, the echoes and fading it handles, and the MER it needs.
 9. **TX button:** start and stop transmitting. It checks the radio is
    connected first, and shows **RESTART TO APPLY** if you change a setting
    that needs a restart.
