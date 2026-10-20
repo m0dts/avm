@@ -169,3 +169,94 @@ Notes:
 - The RX status line shows both numbers, as "MER measured/required" for
   your mode, width and modulation. Aim for a few dB above the required
   figure on a fading path.
+
+## Video: picture size and frame rate
+
+When you change mode, width or modulation, the TX page sets a picture size
+and frame rate to suit that link's video bitrate. You can change them
+afterwards; your choice is kept until the mode, width or modulation changes
+again.
+
+- **10 and 20 kHz:** the sharpest picture for the bits, at 1-4 fps. These
+  links carry only a few kbit/s of video, so each frame needs all the bits
+  it can get.
+- **Wider than 20 kHz:** **10 fps**, for smooth movement, with the
+  largest picture size that still looks good at 10 fps. At the lower
+  bitrates that means a small picture; it's a deliberate trade of detail
+  for movement.
+
+These come from tests of AVM's video codec on real camera footage, at
+every size, frame rate and bitrate:
+
+- **Below about 20 kbit/s, 256×144 or smaller looks best.** Bigger frames
+  spread too few bits over too many pixels and come out blurrier.
+- **From about 20-25 kbit/s, 384×224** is sharper, and keeps improving up
+  to about 130 kbit/s.
+- **More frames per second always cost sharpness**, because each frame
+  gets fewer bits. Going from 1 to 10 fps costs about 3-4 dB of picture
+  quality at low bitrates, and about 1-2 dB at high ones.
+- A scene with lots of fine detail may look better at a lower frame rate,
+  and constant movement at a smaller size.
+
+**10 and 20 kHz** (sharpest for the bits):
+
+| Video bitrate | Default |
+|---|---|
+| under 4 kbit/s | 192×112 @ 1 fps |
+| 4-12 kbit/s | 256×144 @ 2 fps |
+| 12-20 kbit/s | 256×144 @ 4 fps |
+| 20 kbit/s and over | 384×224 @ 4 fps |
+
+**Wider than 20 kHz** (10 fps):
+
+| Video bitrate | Default |
+|---|---|
+| under 6 kbit/s | 128×80 @ 10 fps |
+| 6-12 kbit/s | 224×128 @ 10 fps |
+| 12-25 kbit/s | 256×144 @ 10 fps |
+| 25 kbit/s and over | 384×224 @ 10 fps |
+
+The video bitrate is what's left of the link after audio: Codec2 takes
+3.2 kbit/s, and Opus up to 16 kbit/s. The TX page shows it. Audio also
+gets a default when the link changes: **Codec2 on links slower than
+16 kbit/s**, leaving the most for video, and **Opus from 16 kbit/s up**,
+for better sound. With those audio defaults, each mode's default is (picture size @ fps,
+then audio):
+
+| Mode | Width | QPSK | 8PSK / 16QAM | 16PSK / 32QAM |
+|---|---|---|---|---|
+| A | 10 kHz | 192×112 @ 1, Codec2 | 256×144 @ 2, Codec2 | 256×144 @ 2, Codec2 |
+| A | 20 kHz | 256×144 @ 2, Codec2 | 256×144 @ 4, Opus | 256×144 @ 4, Opus |
+| A | 40 kHz | 256×144 @ 10, Opus | 256×144 @ 10, Opus | 384×224 @ 10, Opus |
+| B | 10 kHz | 192×112 @ 1, Codec2 | 192×112 @ 1, Codec2 | 256×144 @ 2, Codec2 |
+| B | 20 kHz | 192×112 @ 1, Codec2 | 256×144 @ 2, Codec2 | 256×144 @ 2, Codec2 |
+| B | 40 kHz | 224×128 @ 10, Codec2 | 256×144 @ 10, Opus | 256×144 @ 10, Opus |
+| C, D | 10 kHz | 192×112 @ 1, Codec2 | 192×112 @ 1, Codec2 | 192×112 @ 1, Codec2 |
+| C, D | 20 kHz | 192×112 @ 1, Codec2 | 256×144 @ 2, Codec2 | 256×144 @ 2, Codec2 |
+| C, D | 40 kHz | 224×128 @ 10, Codec2 | 256×144 @ 10, Opus | 256×144 @ 10, Opus |
+| SH | 10 kHz | 192×112 @ 1, Codec2 | 192×112 @ 1, Codec2 (8PSK) | 256×144 @ 2, Codec2 (16PSK) |
+| SH | 20 kHz | 256×144 @ 2, Codec2 | 256×144 @ 2, Codec2 (8PSK) | 256×144 @ 2, Opus (16PSK) |
+| SH | 40 kHz | 224×128 @ 10, Opus | 256×144 @ 10, Opus (8PSK) | 256×144 @ 10, Opus (16PSK) |
+| S | 10 kHz | 192×112 @ 1, Codec2 | 256×144 @ 2, Codec2 (8PSK) | |
+| S | 20 kHz | 256×144 @ 2, Codec2 | 256×144 @ 4, Opus (8PSK) | |
+| S | 40 kHz | 256×144 @ 10, Opus | 384×224 @ 10, Opus (8PSK) | |
+| VU | 80-250 kHz | 384×224 @ 10, Opus | 384×224 @ 10, Opus | 384×224 @ 10, Opus |
+
+Notes:
+
+- At 10 kHz, B, C and D in QPSK leave only about 1 kbit/s for video, so
+  the TX sends audio only; mode A QPSK is borderline (about 2 kbit/s).
+- VU has bitrate to spare at 10 fps. Up to 15 fps works too, if CPU allows
+  (see below).
+
+### CPU use on the Raspberry Pi
+
+Encoding and decoding video gets heavier with picture size and frame rate.
+On a Raspberry Pi 4:
+
+- **Transmit only, or receive only:** every setting above is fine,
+  including 384×224 at 15 fps.
+- **Duplex (transmit and receive on the same Pi at once):** the two
+  together can run out of CPU at the top settings, for example VU 250 kHz
+  with 384×224 at 10-15 fps. If the picture stutters or the ⚠ list shows
+  the TX or RX falling behind, lower the frame rate first, then the size.
