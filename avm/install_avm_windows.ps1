@@ -13,14 +13,24 @@
 #   3. ffmpeg: uses one already on PATH or in C:\ffmpeg\bin, else downloads it
 #   4. AVM.bat launcher in the AVM folder + Desktop and Start-menu shortcuts
 # Safe to re-run: done steps are skipped. "install_avm.bat -Check" only reports.
-param([switch]$Check, [switch]$Update, [switch]$Restart)
+# It first shows what it would install and where, and asks (not with -Yes,
+# or -Restart from AVM's Update button). Everything it prints also goes to a
+# log, %LOCALAPPDATA%\AVM\install.log.
+param([switch]$Check, [switch]$Update, [switch]$Restart, [switch]$Yes)
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with the progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Say($m)  { Write-Host "`n== $m" -ForegroundColor Cyan }
 function Warn($m) { Write-Host "!! $m" -ForegroundColor Yellow }
-function Die($m)  { Write-Host "XX $m" -ForegroundColor Red; exit 1 }
+function Die($m)  {
+    Write-Host "XX $m" -ForegroundColor Red
+    if ($script:log) { Write-Host "Install log: $script:log"; try { Stop-Transcript | Out-Null } catch { } }
+    exit 1
+}
+# What an install would add, collected by -Check for its summary
+$script:plan = @()
+function Plan($what, $where, $mb = 0) { $script:plan += [pscustomobject]@{ What = $what; Where = $where; MB = $mb } }
 
 # ---------------------------------------------------------------- where things are
 $repo = if ($env:AVM_REPO) { $env:AVM_REPO } else { "m0dts/avm" }
@@ -40,15 +50,39 @@ if (-not [Environment]::Is64BitOperatingSystem) { Die "AVM needs 64-bit Windows 
 $home_ = Join-Path $env:LOCALAPPDATA "AVM"
 $envDir = Join-Path $home_ "env"
 $py = Join-Path $envDir "python.exe"
+New-Item -ItemType Directory -Force $home_ | Out-Null
+# Everything an install prints also goes to a log (the updated installer this
+# one may start appends to it); -Check only reports
+$script:log = $null
+if (-not $Check) {
+    $script:log = Join-Path $home_ "install.log"
+    $append = [bool]$env:AVM_INSTALL_LOG
+    $env:AVM_INSTALL_LOG = $script:log
+    try { Start-Transcript -Path $script:log -Append:$append | Out-Null } catch { $script:log = $null }
+}
+# Look before touching anything: this script's own -Check survey, then ask
+if (-not $Check -and -not $Yes -and -not $Restart) {
+    Write-Host "AVM installer: checking this PC first (nothing is changed yet)..." -ForegroundColor White
+    $chk = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path, "-Check")
+    if ($Update) { $chk += "-Update" }
+    & powershell @chk | Out-Host
+    $ans = Read-Host "`nInstall / change what is listed above? [y/N]"
+    if ($ans -notmatch '^(y|yes)$') {
+        Write-Host "Nothing changed."
+        try { Stop-Transcript | Out-Null } catch { }
+        exit 0
+    }
+    Write-Host "Installing (log: $script:log)"
+}
 Write-Host "AVM folder : $avm"
 Write-Host "Installs to: $home_"
-New-Item -ItemType Directory -Force $home_ | Out-Null
 
 # ---------------------------------------------------------------- 0. AVM from GitHub
 Say "0. AVM program files"
 if ($fromLocal -and -not $Update) {
     if ($Check) {
         Write-Host "would copy AVM from $local into $avm"
+        Plan "AVM program files (copied)" $avm 3
     } else {
         # this copy's files into the user folder (its logs and launcher left
         # out: step 4 writes the launcher for the user folder)
@@ -61,6 +95,7 @@ if ($fromLocal -and -not $Update) {
     Write-Host "present ($avm); -Update fetches the latest from GitHub"
 } elseif ($Check) {
     Write-Host "would download github.com/$repo ($branch) into $avm"
+    Plan "AVM program files (from GitHub)" $avm 3
 } else {
     $url = if ($env:AVM_URL) { $env:AVM_URL } else { "https://github.com/$repo/archive/refs/heads/$branch.zip" }
     $zip = Join-Path $env:TEMP "avm-download.zip"
@@ -83,8 +118,9 @@ if ($fromLocal -and -not $Update) {
     $newer = Join-Path $avm "install_avm_windows.ps1"
     if (Test-Path $newer) {
         Write-Host "continuing with the updated installer..."
+        try { Stop-Transcript | Out-Null } catch { }   # it appends to the same log
         if ($Restart) { & powershell -NoProfile -ExecutionPolicy Bypass -File $newer -Restart }
-        else { & powershell -NoProfile -ExecutionPolicy Bypass -File $newer }
+        else { & powershell -NoProfile -ExecutionPolicy Bypass -File $newer -Yes }
         exit $LASTEXITCODE
     }
 }
@@ -108,6 +144,7 @@ if ($condaRoot) {
     Write-Host "using $condaRoot"
 } elseif ($Check) {
     Write-Host "none found (Miniforge would be installed)"
+    Plan "Miniforge (conda, just for this user)" "$home_\miniforge3" 400
 } else {
     $mf = Join-Path $home_ "miniforge3"
     $exe = Join-Path $env:TEMP "Miniforge3-Windows-x86_64.exe"
@@ -140,12 +177,15 @@ if (Test-Env) {
     Write-Host "present, all modules import"
 } elseif ($Check) {
     Write-Host "missing or incomplete"
+    Plan "Python environment (packages listed below)" $envDir 1500
+    $script:envPkgs = ($pkgs -join ", ") -replace "=\*=headless\*", ""
+    Plan "conda's download cache" "$home_\pkgs" 600
 } else {
     # package cache in our own folder: a radioconda in ProgramData isn't writable without admin
     $env:CONDA_PKGS_DIRS = Join-Path $home_ "pkgs"
     $verb = if (Test-Path $py) { "install" } else { "create" }
     Write-Host "conda $verb (downloads ~0.5-1 GB the first time; several minutes)..."
-    & $solver $verb -y -p $envDir -c conda-forge --override-channels @pkgs
+    & $solver $verb -y -p $envDir -c conda-forge --override-channels @pkgs | Out-Host
     if ($LASTEXITCODE -ne 0) { Die "conda $verb failed (see above)." }
     if (-not (Test-Env)) {
         & $py -c "import $($imports -replace ' ', ', ')"
@@ -179,6 +219,7 @@ if ($ffDir) {
 } elseif ($Check) {
     if ($partial) { Write-Host "$partial\ffmpeg.exe has no Codec2: the full build would be downloaded" }
     else { Write-Host "not found: the full build would be downloaded" }
+    Plan "ffmpeg full build (gyan.dev)" "$home_\ffmpeg" 450
 } else {
     if ($partial) { Write-Host "$partial\ffmpeg.exe has no Codec2 -- getting the full build" }
     $arc = Join-Path $env:TEMP "ffmpeg-avm-full.7z"
@@ -240,6 +281,8 @@ start "AVM" "$envDir\pythonw.exe" touch_gui.py %*
 "@
 if ($Check) {
     if (Test-Path $bat) { Write-Host "present: $bat" } else { Write-Host "missing" }
+    Plan "AVM.bat launcher" $bat
+    Plan "'AVM' shortcuts" "Desktop and Start menu"
 } else {
     Set-Content -Path $bat -Value $launcher -Encoding ascii
     # AVM itself puts this ffmpeg first on its PATH however it's started
@@ -260,6 +303,33 @@ if ($Check) {
 }
 
 # ---------------------------------------------------------------- summary
+if ($Check) {
+    Say "What installing will add or change"
+    if (-not $script:plan) {
+        Write-Host "  nothing: everything AVM needs is already here"
+    } else {
+        Write-Host ("  {0,-46} {1,-38} {2}" -f "WHAT", "WHERE", "SIZE")
+        foreach ($p in $script:plan) {
+            $size = if ($p.MB) { "~$($p.MB) MB" } else { "" }
+            Write-Host ("  {0,-46} {1,-38} {2}" -f $p.What, $p.Where, $size)
+        }
+        $total = ($script:plan | Measure-Object -Property MB -Sum).Sum
+        Write-Host "  ------------------------------------------------------------"
+        if ($script:envPkgs) {
+            # wrapped to the console: the list is long
+            $line = "  conda-forge packages:"
+            foreach ($w in ($script:envPkgs -split ", ")) {
+                if (($line.Length + $w.Length) -gt 96) { Write-Host $line; $line = "   " }
+                $line += " $w,"
+            }
+            Write-Host $line.TrimEnd(",")
+        }
+        Write-Host "  about $total MB of disk space in total (approximate)"
+        $drive = (Get-Item $env:LOCALAPPDATA).PSDrive
+        Write-Host ("  free now: {0:N0} MB on {1}:" -f ($drive.Free / 1MB), $drive.Name)
+        Write-Host "  No admin rights are needed; nothing is installed outside your user folders."
+    }
+}
 Say "Radios SoapySDR can see now"
 if (Test-Path $py) {
     $env:PATH = "$envDir;$envDir\Library\bin;$env:PATH"
@@ -269,6 +339,7 @@ if (Test-Path $py) {
 }
 Say "Done"
 Write-Host "Start AVM from the 'AVM' shortcut (or AVM.bat in $avm)."
+if ($script:log) { Write-Host "Install log (everything above): $script:log" }
 if ($Restart -and (Test-Path $bat)) {
     # run from AVM's Update button: start AVM again, now fully up to date
     Write-Host "restarting AVM..."
@@ -278,3 +349,4 @@ if ($Restart -and (Test-Path $bat)) {
 }
 Write-Host "The first TX/RX start compiles the modem and codec (a minute or two); later starts are quick."
 Write-Host "RTL-SDR on Windows needs the WinUSB driver (Zadig, zadig.akeo.ie) before it shows up."
+if ($script:log) { try { Stop-Transcript | Out-Null } catch { } }

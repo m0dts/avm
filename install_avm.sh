@@ -57,7 +57,27 @@ VENV="${AVM_VENV:-$HOME/venv}"
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*"; }
-die()  { printf '\033[31mXX %s\033[0m\n' "$*"; exit 1; }
+die()  { printf '\033[31mXX %s\033[0m\n' "$*"; [ -n "${LOG:-}" ] && echo "Install log: $LOG"; exit 1; }
+# What an install would add, collected by --check for its summary:
+# plan "what" "where" "approx MB"
+PLAN=""
+PLAN_MB=0
+plan() { PLAN="${PLAN}$(printf '  %-44s %-30s %s' "$1" "$2" "${3:+~$3 MB}")\n"; PLAN_MB=$((PLAN_MB + ${3:-0})); }
+
+# Everything an install prints also goes to a log file (colours stripped),
+# kept after the install; a re-run of the updated installer appends to it
+# (the updated installer, started by this one, inherits the same log and the
+# same output, already going to it)
+if [ $CHECK_ONLY = 0 ]; then
+    if [ -n "${AVM_INSTALL_LOG:-}" ]; then
+        LOG="$AVM_INSTALL_LOG"
+    else
+        LOG="$HOME/avm_install.log"
+        export AVM_INSTALL_LOG="$LOG"
+        echo "AVM install $(date '+%Y-%m-%d %H:%M:%S')" > "$LOG"
+        exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >> "$LOG")) 2>&1
+    fi
+fi
 
 # Look before touching anything: run this script's own --check survey, show
 # it, and ask. (Skipped with --yes, or when this script isn't a file, e.g.
@@ -65,11 +85,11 @@ die()  { printf '\033[31mXX %s\033[0m\n' "$*"; exit 1; }
 if [ $CHECK_ONLY = 0 ] && [ $ASSUME_YES = 0 ] && [ -n "$SCRIPT_DIR" ]; then
     printf '\033[1mAVM installer: checking this machine first (nothing is changed yet)...\033[0m\n'
     bash "${BASH_SOURCE[0]}" --check $([ $UPDATE = 1 ] && echo --update) || exit 1
-    printf '\n\033[1mInstall / change what is listed above as missing? [y/N] \033[0m'
+    printf '\n\033[1mInstall / change what is listed above? [y/N] \033[0m'
     ans=""
     { read -r ans </dev/tty; } 2>/dev/null || true
     case "$ans" in
-        y|Y|yes|YES) echo ;;
+        y|Y|yes|YES) echo "Installing (log: $LOG)" ;;
         *) echo "Nothing changed."; exit 0 ;;
     esac
 fi
@@ -107,6 +127,7 @@ if [ -f "$AVM_DIR/touch_gui.py" ] && [ $UPDATE = 0 ]; then
     [ -f "$AVM_DIR/avm_update.py" ] && python3 "$AVM_DIR/avm_update.py" 2>/dev/null | head -n 1
 elif [ $CHECK_ONLY = 1 ]; then
     echo "would download github.com/$AVM_REPO ($AVM_BRANCH) into $AVM_DIR"
+    plan "AVM program files (from GitHub)" "$AVM_DIR" 3
 else
     URL="${AVM_URL:-https://github.com/$AVM_REPO/archive/refs/heads/$AVM_BRANCH.tar.gz}"
     TMP="$(mktemp -d)"
@@ -256,6 +277,15 @@ if [ -z "$MISSING" ]; then
     echo "nothing to install"
 elif [ $CHECK_ONLY = 1 ]; then
     echo "to install:$MISSING"
+    # with what apt would pull in alongside them, and their installed size
+    ALL="$(apt-get -s install $MISSING 2>/dev/null | awk '/^Inst /{print $2}')"
+    KB="$(apt-cache show --no-all-versions $ALL 2>/dev/null | awk '/^Installed-Size:/{s+=$2} END{print s+0}')"
+    NDEP=$(( $(echo $ALL | wc -w) - $(echo $MISSING | wc -w) ))
+    [ $NDEP -lt 0 ] && NDEP=0
+    echo "  (+ $NDEP package(s) they need; about $((KB / 1024)) MB once installed)"
+    for p in $MISSING; do plan "apt: $p" "system (/usr)"; done
+    [ $NDEP -gt 0 ] && plan "apt: $NDEP other package(s) these need" "system (/usr)"
+    plan "  apt packages in total" "" $((KB / 1024))
 else
     $SUDO apt-get install -y $MISSING || die "apt install failed"
 fi
@@ -267,6 +297,8 @@ if pluto_ok; then
     echo "present"
 elif [ $CHECK_ONLY = 1 ]; then
     echo "missing (will be built from source)"
+    plan "PlutoSDR driver (SoapyPlutoSDR) source" "$HOME/src/SoapyPlutoSDR" 5
+    plan "PlutoSDR driver, built" "/usr/local/lib" 1
 else
     SRC="$HOME/src/SoapyPlutoSDR"
     mkdir -p "$HOME/src"
@@ -333,6 +365,8 @@ elif [ ! -f /usr/local/include/sdrplay_api.h ]; then
     echo "  API for Linux from sdrplay.com, then run this installer again)"
 elif [ $CHECK_ONLY = 1 ]; then
     echo "SDRplay driver: missing (will be built from source)"
+    plan "SDRplay driver (SoapySDRPlay3) source" "$HOME/src/SoapySDRPlay3" 5
+    plan "SDRplay driver, built" "/usr/local/lib" 1
 else
     SRC="$HOME/src/SoapySDRPlay3"
     mkdir -p "$HOME/src"
@@ -363,7 +397,13 @@ export PIP_CONSTRAINT="$NP_PIN"
 if [ $CHECK_ONLY = 0 ]; then
     [ -x "$VENV/bin/python" ] || python3 -m venv --system-site-packages "$VENV" || die "venv creation failed"
     "$VENV/bin/pip" install -q --upgrade pyqtgraph sounddevice || die "pip install failed"
+else
+    [ -x "$VENV/bin/python" ] || plan "Python environment (venv)" "$VENV" 1
+    plan "pip: pyqtgraph, sounddevice (latest)" "$VENV" 7
 fi
+# approximate installed size (MB) of what pip may have to supply
+pip_mb() { case "$1" in numpy) echo 70;; scipy) echo 120;; numba) echo 130;; opencv-python-headless) echo 140;;
+                        av) echo 110;; PyQt5) echo 160;; *) echo 5;; esac; }
 # repair a venv where an earlier run let pip switch numpy's major version
 VENV_NP="$("$VENV/bin/python" -c 'import numpy; print(numpy.__version__.split(".")[0])' 2>/dev/null)"
 if [ -n "$SYS_NP" ] && [ -n "$VENV_NP" ] && [ "$VENV_NP" != "$SYS_NP" ]; then
@@ -386,6 +426,8 @@ for spec in "numpy numpy" "scipy scipy" "numba numba" "cv2 opencv-python-headles
         warn "$1 won't import: needs python3-soapysdr (apt) and a venv with --system-site-packages"
     elif [ $CHECK_ONLY = 1 ]; then
         printf '  %-12s MISSING\n' "$1"
+        # apt may still supply it (step 1); if not, pip does
+        case "$1" in pyqtgraph|sounddevice) ;; *) plan "pip (if apt lacks it): $2" "$VENV" "$(pip_mb "$2")" ;; esac
     else
         echo "  $1: installing $2 from pip"
         "$VENV/bin/pip" install -q "$2" || warn "pip install $2 failed"
@@ -395,6 +437,7 @@ done
 if ! "$PY" -c 'import numba, sys; v = tuple(map(int, numba.__version__.split(".")[:2])); sys.exit(v < (0, 57))' 2>/dev/null; then
     if [ $CHECK_ONLY = 1 ]; then
         echo "  numba older than 0.57 (would be upgraded from pip)"
+        plan "pip: numba (newer than apt's)" "$VENV" 130
     else
         echo "  numba: upgrading from pip (apt's is too old)"
         "$VENV/bin/pip" install -q "numba>=0.59" || warn "pip install numba failed"
@@ -476,6 +519,7 @@ if ls /lib/modprobe.d/*rtl* /etc/modprobe.d/*rtl* >/dev/null 2>&1 \
     echo "RTL-SDR TV driver already blacklisted"
 elif [ $CHECK_ONLY = 1 ]; then
     echo "RTL-SDR TV driver (dvb_usb_rtl28xxu) not blacklisted"
+    plan "RTL-SDR: block the TV driver" "$BL"
 else
     printf 'blacklist dvb_usb_rtl28xxu\nblacklist rtl2832\nblacklist rtl2830\n' | $SUDO tee $BL >/dev/null
     $SUDO modprobe -r dvb_usb_rtl28xxu 2>/dev/null
@@ -484,7 +528,7 @@ fi
 for g in plugdev dialout audio video; do
     getent group $g >/dev/null || continue
     if id -nG | grep -qw $g; then continue; fi
-    if [ $CHECK_ONLY = 1 ]; then echo "not in group $g"
+    if [ $CHECK_ONLY = 1 ]; then echo "not in group $g"; plan "add $USER to group $g (USB/audio access)" "/etc/group"
     else $SUDO usermod -aG $g "$USER" && echo "added $USER to $g (log out and back in)"; fi
 done
 
@@ -499,6 +543,7 @@ elif [ -f "$PLUTO_RULE" ]; then
     echo "Pluto network: udev rule present"
 elif [ $CHECK_ONLY = 1 ]; then
     echo "Pluto network: no network manager -- a udev rule would be added"
+    plan "Pluto USB network rule" "$PLUTO_RULE"
 else
     printf '%s\n' '# AVM: bring up an ADALM-Pluto'"'"'s USB network link (the Pluto is 192.168.2.1)' \
         'ACTION=="add", SUBSYSTEM=="net", ATTRS{idVendor}=="0456", ATTRS{idProduct}=="b673", RUN+="/bin/sh -c '"'"'ip addr add 192.168.2.10/24 dev %k; ip link set %k up'"'"'"' \
@@ -531,6 +576,8 @@ if [ -n "$OLD" ]; then
     echo "existing launcher kept: $OLD"
 elif [ $CHECK_ONLY = 1 ]; then
     [ -f "$HOME/.local/share/applications/avm.desktop" ] && echo "present" || echo "missing"
+    plan "menu entry + desktop icon" "~/.local/share/applications, Desktop"
+    plan "'avm' command" "$HOME/.local/bin/avm"
 else
     mkdir -p "$HOME/.local/share/applications"
     echo "$DESK" > "$HOME/.local/share/applications/avm.desktop"
@@ -558,6 +605,19 @@ fi
 
 
 # ---------------------------------------------------------------- summary
+if [ $CHECK_ONLY = 1 ]; then
+    say "What installing will add or change"
+    if [ -z "$PLAN" ]; then
+        echo "  nothing: everything AVM needs is already here"
+    else
+        printf '  %-44s %-30s %s\n' "WHAT" "WHERE" "SIZE"
+        printf '%b' "$PLAN"
+        echo "  ------------------------------------------------------------"
+        echo "  about $PLAN_MB MB of disk space in total (approximate)"
+        echo "  free now: $(df -BM --output=avail "$HOME" 2>/dev/null | tail -n 1 | tr -d ' ') in $HOME"
+        echo "  Settings go in ~/.config/hfmodem; logs in $AVM_DIR/gui_logs"
+    fi
+fi
 say "Radios Soapy can see now"
 timeout 20 SoapySDRUtil --find 2>/dev/null | grep -E 'driver|label' | sed 's/^ */  /' || echo "  (none found)"
 say "Done"
@@ -565,5 +625,6 @@ echo "Start AVM from the menu / desktop icon, or:  cd $AVM_DIR && $VENV/bin/pyth
 echo "(use $VENV/bin/python, not plain python3: some modules, e.g. numba on Ubuntu 24.04, are only in the venv)"
 echo "The first TX/RX start compiles the modem and codec (a minute or two); later starts are quick."
 echo "If this run added you to any groups, log out and back in first."
+[ -n "${LOG:-}" ] && echo "Install log (everything above): $LOG"
 exit 0
 }
