@@ -123,14 +123,22 @@ the modem and codec are compiled for the Pi. The TX preview shows
 AVM also runs on a 64-bit Windows 10 or 11 PC. **The setup uses about
 5 GB of disk space**, most of it for the Python environment AVM runs in.
 
-1. Download **install_avm.bat** from
-   [github.com/m0dts/avm](https://github.com/m0dts/avm) (open the file,
-   then **Download raw file**), and double-click it.
-2. It checks the PC first and lists what it will install, where, and
+1. Download AVM as a zip file:
+   [**avm-main.zip**](https://github.com/m0dts/avm/archive/refs/heads/main.zip)
+   (or, on [github.com/m0dts/avm](https://github.com/m0dts/avm): the green
+   **Code** button, then **Download ZIP**). Browsers often block a `.bat`
+   file downloaded on its own; a zip is fine.
+2. Right-click the zip, **Extract All...**, and open the extracted
+   **avm-main** folder. (Running it from inside the zip, without
+   extracting, doesn't work.)
+3. Double-click **install_avm.bat**. If Windows shows "Windows protected
+   your PC", choose **More info**, then **Run anyway**.
+4. It checks the PC first and lists what it will install, where, and
    roughly how big, with the free disk space. Nothing is changed until you
    answer **y**.
-3. It then installs, which takes several minutes (most of it downloading):
-   - **AVM's files** into `%USERPROFILE%\avm`.
+5. It then installs, which takes several minutes (most of it downloading):
+   - **AVM's files**, copied from the extracted folder into
+     `%USERPROFILE%\avm` (the extracted folder can be deleted afterwards).
    - **conda**, the tool that builds the Python environment. It uses
      radioconda, Miniforge or Anaconda if one is already installed;
      otherwise it installs **Miniforge**, just for your user.
@@ -145,7 +153,7 @@ AVM also runs on a 64-bit Windows 10 or 11 PC. **The setup uses about
      if it has both; otherwise it downloads the "full" build (about 450 MB)
      into `%LOCALAPPDATA%\AVM\ffmpeg`.
    - An **AVM** shortcut on the Desktop and in the Start menu.
-4. Start AVM from the **AVM** shortcut.
+6. Start AVM from the **AVM** shortcut.
 
 No administrator rights are needed: everything goes into your own user
 folders. Everything the installer printed is saved to
