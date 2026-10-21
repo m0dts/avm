@@ -213,13 +213,16 @@ SOAPY_ABI=0.8
 have_pkg soapysdr0.8-module-lms7 || { have_pkg soapysdr0.7-module-lms7 && SOAPY_ABI=0.7; }
 
 # ---------------------------------------------------------------- 1. apt
-PKGS="python3 python3-venv python3-pip python3-numpy python3-scipy python3-numba
+# What AVM uses at run time (the venv's own pip comes with python3-venv).
+# The tools to build a radio driver from source are added below, only when
+# one has to be built.
+PKGS="python3 python3-venv python3-numpy python3-scipy python3-numba
       python3-opencv python3-av python3-pyqt5 python3-pyqtgraph python3-sounddevice libportaudio2
-      python3-soapysdr soapysdr-tools libsoapysdr-dev
+      python3-soapysdr soapysdr-tools
       soapysdr${SOAPY_ABI}-module-lms7 soapysdr${SOAPY_ABI}-module-rtlsdr rtl-sdr
-      libiio0 libiio-utils libiio-dev libad9361-dev
-      ffmpeg alsa-utils pipewire-bin v4l-utils
-      git cmake g++ pkg-config"
+      libiio0 libiio-utils
+      ffmpeg alsa-utils pipewire-bin v4l-utils"
+BUILD_PKGS="git cmake g++ pkg-config libsoapysdr-dev libiio-dev libad9361-dev"
 # libiio0 was renamed on newer releases
 have_pkg libiio0 || PKGS="${PKGS/libiio0/libiio1}"
 have_pkg limesuite-udev && PKGS="$PKGS limesuite-udev"
@@ -254,6 +257,13 @@ if echo "$SOAPY_MODS" | grep -q plutosdrsupport; then
     drop "$PLUTO_PKG"
     KEPT="${KEPT}PlutoSDR driver already installed (from this system) -- keeping it\n"
 fi
+
+# A driver built from source (step 2: PlutoSDR when apt has no module for
+# it; SDRplay when its API is installed): then the build tools too
+NEED_BUILD=0
+if ! echo "$SOAPY_MODS" | grep -q plutosdrsupport && ! have_pkg "$PLUTO_PKG"; then NEED_BUILD=1; fi
+if [ -f /usr/local/include/sdrplay_api.h ] && ! echo "$SOAPY_MODS" | grep -q sdrplaysupport; then NEED_BUILD=1; fi
+[ $NEED_BUILD = 1 ] && PKGS="$PKGS $BUILD_PKGS"
 
 MISSING=""
 PRESENT=0
@@ -358,7 +368,7 @@ if [ -n "$SDRPLAY_RUN" ]; then
 fi
 
 sdrplay_ok() { SoapySDRUtil --info 2>/dev/null | grep -qi 'sdrPlaySupport'; }
-if sdrplay_ok && [ -z "$SDRPLAY_REBUILD" ]; then
+if sdrplay_ok && [ -z "${SDRPLAY_REBUILD:-}" ]; then
     echo "SDRplay driver: present"
 elif [ ! -f /usr/local/include/sdrplay_api.h ]; then
     echo "SDRplay driver: not set up (only needed for an SDRplay RSP: install SDRplay's"
@@ -369,6 +379,8 @@ elif [ $CHECK_ONLY = 1 ]; then
     plan "SDRplay driver, built" "/usr/local/lib" 1
 else
     SRC="$HOME/src/SoapySDRPlay3"
+    # the build tools (step 1 only added them if a build was known to be needed then)
+    [ $NEED_BUILD = 1 ] || $SUDO apt-get install -y $BUILD_PKGS >/dev/null || warn "couldn't install the build tools"
     mkdir -p "$HOME/src"
     [ -d "$SRC" ] || git clone --depth 1 https://github.com/pothosware/SoapySDRPlay3.git "$SRC" \
         || warn "git clone SoapySDRPlay3 failed"
