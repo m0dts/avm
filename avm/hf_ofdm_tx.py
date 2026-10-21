@@ -72,6 +72,10 @@ def make_sink(args, out_fs):
     # Lazy import: SoapySDR (and the PlutoSDR support module) is only
     # needed when actually asked for -- most uses of this script are the
     # pipe-based path, which shouldn't require it to be installed at all.
+    if args.sdr == "virtual":
+        # no radio: to hf_ofdm_rx.py --sdr virtual on this machine (virtual_radio.py)
+        from virtual_radio import VirtualTxSink
+        return VirtualTxSink(freq_hz=args.rf_freq, sample_rate_hz=out_fs)
     from pluto_soapy_sink import PlutoTxSink
     return PlutoTxSink(freq_hz=args.rf_freq, sample_rate_hz=out_fs,
                         tx_gain_db=args.tx_gain, uri=args.pluto_uri,
@@ -534,7 +538,7 @@ def main():
                      help="Peak reduction (clip and filter, receiver-transparent): limit peaks to this "
                           "many dB above the average, e.g. 7. 0 = off. More average power from the same "
                           "amplifier peak, for a little in-band distortion (a ceiling on MER).")
-    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam", "8psk"], default="qpsk",
+    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam", "8psk", "16psk"], default="qpsk",
                      help="PAYLOAD modulation (default qpsk). 16qam doubles payload bits/carrier "
                           "(roughly double throughput at a given occupancy) but needs about "
                           "6-7dB more SNR for the same error rate -- an explicit per-link choice, "
@@ -637,7 +641,7 @@ def main():
                      help="Center frequency in Hz for --output pluto (required with it).")
     ap.add_argument("--tx-gain", type=float, default=-10.0,
                      help="PlutoSDR TX gain/attenuation in dB for --output pluto (default -10).")
-    ap.add_argument("--sdr", choices=["pluto", "lime"], default="pluto",
+    ap.add_argument("--sdr", choices=["pluto", "lime", "virtual"], default="pluto",
                     help="Radio for --output pluto: 'pluto' (PlutoSDR, default) or 'lime' "
                          "(LimeSDR-USB or LimeSDR Mini). --tx-gain keeps its meaning (dB re full "
                          "power) on either.")

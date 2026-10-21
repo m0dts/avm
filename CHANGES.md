@@ -3,6 +3,22 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.0.21 (2026-10-21)
+- Compatible over the air with 1.0.20: older versions simply don't show the new text messages
+- Text messages: the envelope button beside TX sends a short message (up to 80 characters), repeated until you clear or change it, in the space left over in each fragment. Beside RX, the envelope button lights up with a count when messages arrive
+- tap it for the list. On a link full with video they can be slow to get through
+- The callsign confirms much sooner (often within a couple of fragments), and stays on screen until RX restarts or another station is received
+- Mode SH adds 16PSK (about 12 kbit/s in 10 kHz, needs about 8.5 dB MER)
+- Changing mode, width or modulation now sets the picture size, frame rate and audio codec to suit the link: Codec2 on links under 16 kbit/s, Opus above, and 10 fps on links wider than 20 kHz
+- Mode S: the MER shown now compares directly with SH's (it read about 2 dB high), and an occasional lost frame on a good signal is fixed
+- Virtual radio: pick it as the TX and RX radio to test AVM on one machine with no radio hardware
+- RX tuning offset steps of 100 Hz on HF, 500 Hz on VHF/UHF and 1 kHz on SAT
+- START and STOP buttons respond at once
+- Only one copy of AVM can run at a time
+- Windows: CPU display works, and microphones with symbols in their names (e.g. Intel(R)) now open
+- The error list shows one plain line per problem
+- Installer: shows what it will install, where and roughly how big before asking, shows progress, and saves a log (~/avm_install.log)
+
 ## 1.0.20 (2026-10-20)
 - Compatible over the air with 1.0.19 in modes A-D and VU
 - the new modes S and SH need 1.0.20 at both ends

@@ -5,6 +5,7 @@ video pane and spectrum plot are moved into this page, so decoding, playback
 and display are exactly those of the full GUI. Input is always the PlutoSDR.
 """
 import collections
+import json
 import math
 import os
 import stat
@@ -70,6 +71,9 @@ def _station_text(engine_text):
         return ""
     return f"*{sid}*" if m.group(2) else sid
 
+
+
+MESSAGE_RE = re.compile(r"^\[player\] Message: (\{.*\})$")   # media_rx_player
 
 class _RxEngine(media_rx_gui.MediaRxWindow):
     """The full RX window, never shown; adds a wider spectrum span and the
@@ -220,8 +224,8 @@ class RxPage(QtWidgets.QWidget):
         self.freq = tw.FreqButton("RX frequency", s_get(settings, "rx_freq", 145500000))
         self.mode = tw.Segmented([(m, m) for m in tw.MODES], tw.saved_mode(s_get(settings, "rx_mode", "A")))
         self.bw = tw.Segmented([(b, b) for b in tw.BANDWIDTHS_KHZ], tw.saved_bandwidth(s_get(settings, "rx_bw", "80")))
-        self.mod = tw.Segmented([("qpsk", "QPSK"), ("8psk", "8PSK"), ("16qam", "16QAM"), ("32qam", "32QAM")],
-                              s_get(settings, "rx_mod", "qpsk"))   # 8PSK: mode S only
+        self.mod = tw.Segmented([("qpsk", "QPSK"), ("8psk", "8PSK"), ("16psk", "16PSK"), ("16qam", "16QAM"), ("32qam", "32QAM")],
+                              s_get(settings, "rx_mod", "qpsk"))   # 8PSK: modes S/SH; 16PSK: SH
         self.gain = tw.Stepper(0, 73, 1, s_get(settings, "rx_gain", 40), " dB")
         self.audio_out = tw.Picker("Audio output", self._audio_outputs,
                                    s_get(settings, "rx_audio", self.engine.audio_device.currentText()))
@@ -260,7 +264,8 @@ class RxPage(QtWidgets.QWidget):
         # the radio on its own row (the RX column is too narrow to share Freq's),
         # with the radio's own extra: the LimeSDR port or the RTL-SDR's PPM
         # receive offset, live: nudges the receiver onto an off-frequency signal
-        self.offset = tw.Stepper(-100, 100, 1, s_get(settings, "rx_offset_khz", 0), " kHz")
+        # (its step follows the mode type: tw.RX_OFFSET_STEP_KHZ, set by apply_mode_type)
+        self.offset = tw.Stepper(-100, 100, 0.1, s_get(settings, "rx_offset_khz", 0), " kHz")
         self.offset.signed = True
         self.offset.set_value(self.offset.value())
         self.offset.changed.connect(self._offset_changed)
@@ -287,8 +292,19 @@ class RxPage(QtWidgets.QWidget):
         self._kiwi_info_ready.connect(self._kiwi_info_got)
         right.addWidget(self.kiwi_info)
         self.run = tw.RunButton("RX")
+        # received text messages (tw.messages): always here, grey until one arrives
+        self.msg_btn = QtWidgets.QPushButton("✉")
+        self.msg_btn.setObjectName("msg")      # its big symbol (tw's stylesheet)
+        self.msg_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.msg_btn.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.msg_btn.clicked.connect(lambda: tw.MessagesDialog(self).exec_())
+        tw.messages().changed.connect(self._show_messages)
         self.run.clicked.connect(self._run_clicked)
-        right.addWidget(self.run)
+        run_row = QtWidgets.QHBoxLayout()   # RX button, then the message button (a fifth of the row)
+        run_row.addWidget(self.run, 4)
+        run_row.addWidget(self.msg_btn, 1)
+        right.addLayout(run_row)
+        self._show_messages()
         root.addLayout(right, 2)
 
         for w in (self.mode, self.bw, self.mod, self.freq, self.audio_out):
@@ -687,6 +703,9 @@ class RxPage(QtWidgets.QWidget):
         return bool(self.engine.procs)
 
     def _run_clicked(self):
+        self.run.run_pressed(self._run_clicked_now)
+
+    def _run_clicked_now(self):
         tx = self.peer
         if self.duplex():
             # duplex: this button is TX+RX (TX's own is hidden). (Asked
@@ -830,11 +849,26 @@ class RxPage(QtWidgets.QWidget):
         if self.is_running() and self.stages.states[2] != "done":
             self.stages.set(2, "done")
 
+    def _show_messages(self):
+        m = tw.messages()
+        self.msg_btn.setText(f"✉ {m.unread}" if m.unread else "✉")
+        self.msg_btn.setEnabled(bool(m.items))      # grey (and nothing to open) with none
+        tw.set_style(self.msg_btn, f"background: {tw.RX_ACCENT}; color: white;" if m.unread else "")
+
     def _on_log(self, line):
         self._stage_from_log(line)
+        m = MESSAGE_RE.match(line)
+        if m:   # a text message (reported once per session by the player)
+            try:
+                msg = json.loads(m.group(1))
+                tw.messages().add(msg["ts"], msg["text"],
+                                  getattr(self.engine, "_confirmed_station_id", None) or "")
+            except (ValueError, KeyError, TypeError):
+                pass
+            return
         err = tw.error_line(line)
         if err:
-            tw.notices().add("RX", err)
+            tw.notices().add("RX", err, exception=tw.is_exception_line(line))
         # KiwiSDR trouble (refused, full, password, dropped...): to the errors
         # list, and kept as the reason if RX then stops
         tag = next((t for t in ("KiwiSDR", "ANAN/HPSDR") if t in line), None)

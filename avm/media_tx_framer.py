@@ -131,6 +131,70 @@ STATION_ID_TYPE = 0x0B  # next free record type after AUDIO_PACKET_FIXED_TYPE (0
 # happens to all be current, not on every single cycle.
 STATION_ID_LEN = 20
 
+# Spare space: a fragment that would go out with padding at its end carries
+# one of these instead (never at audio's or video's expense -- only the
+# room left when the fragment is sent). Receivers that don't know them skip
+# them (a TLV record of an unknown type), so they're compatible with older
+# receivers.
+MESSAGE_TYPE = 0x0C       # a piece of the current text message, repeated until cleared
+STATION_ID_FULL_TYPE = 0x0D  # the whole 24-byte station ID + CRC at once (no message to send)
+MESSAGE_MAX_CHARS = 80
+# A message is [4-byte UTC timestamp][UTF-8 text][4-byte CRC32 of both],
+# sent in pieces: [msg id][total length][offset][bytes...]. The receiver
+# keeps the pieces by (id, length) and shows the message once the CRC holds.
+MESSAGE_PIECE_HEADER = 3
+MESSAGE_MIN_PIECE = 4     # don't send a piece smaller than this (header cost)
+
+
+def build_message(ts, text):
+    """The message bytes for a timestamp (s, UTC) and text (trimmed to
+    MESSAGE_MAX_CHARS characters), or None for no message."""
+    text = (text or "").strip()[:MESSAGE_MAX_CHARS]
+    if not text:
+        return None
+    body = struct.pack(">I", int(ts) & 0xFFFFFFFF) + text.encode("utf-8")
+    return body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+class MessageFile:
+    """The TX's current message, from a file the GUI writes: one line,
+    "<unix time> <text>"; empty or missing = no message. Re-read when it
+    changes, so a new message needs no TX restart."""
+
+    def __init__(self, path):
+        self.path, self._mtime = path, None
+        self.data, self.msg_id, self.pos = None, int(time.time()) & 0xFF, 0
+
+    def poll(self):
+        try:
+            mtime = os.stat(self.path).st_mtime
+        except OSError:
+            mtime = 0
+        if mtime == self._mtime:
+            return
+        self._mtime = mtime
+        data = None
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                ts, _, text = f.read().strip().partition(" ")
+            data = build_message(int(ts), text)
+        except (OSError, ValueError):
+            pass
+        if data != self.data:
+            self.data, self.pos = data, 0
+            self.msg_id = (self.msg_id + 1) & 0xFF
+
+    def piece(self, room):
+        """The next piece of the message as a whole record, fitting room
+        bytes (None if no message or too little room). Pieces cycle round
+        the message for as long as it's set."""
+        n = min(room - RECORD_HEADER_LEN - MESSAGE_PIECE_HEADER, len(self.data or b"") - self.pos)
+        if self.data is None or n < min(MESSAGE_MIN_PIECE, len(self.data) - self.pos):
+            return None
+        payload = bytes([self.msg_id, len(self.data), self.pos]) + self.data[self.pos:self.pos + n]
+        self.pos = (self.pos + n) % len(self.data)
+        return struct.pack(">BH", MESSAGE_TYPE, len(payload)) + payload
+
 
 def _build_station_id_payload(station_id: str) -> bytes:
     """Encode a station ID string into the fixed 24-byte [20-byte ASCII
@@ -346,6 +410,9 @@ def main():
                      help="Codec2 mode, for --audio-codec codec2 -- must match --audio-source-cmd's "
                           "own --codec2-mode, and have a matching AUDIO_PROFILES entry here (and in "
                           "media_rx_player.py's table) for this exact mode string (default 3200).")
+    ap.add_argument("--message-file", type=str, default=None, metavar="PATH",
+                    help="Text message to send in spare fragment space: one line '<unix time> <text>' "
+                         f"(up to {MESSAGE_MAX_CHARS} characters), re-read when it changes; empty = none")
     ap.add_argument("--station-id", type=str, default=None, metavar="STR",
                      help="Optional station/operator identification (e.g. a callsign), up to "
                           f"{STATION_ID_LEN} ASCII characters (space-padded/truncated to exactly "
@@ -514,10 +581,27 @@ def main():
     # (2-byte payload) + audio config record (3-byte payload).
     FRESH_BLOCK_MAX_BYTES = (RECORD_HEADER_LEN + 2) + (RECORD_HEADER_LEN + 3)
 
+    messages = MessageFile(args.message_file) if args.message_file else None
+
+    def fill_spare():
+        """Room left in the block: a piece of the text message, else the
+        whole station ID (a receiver confirms it from one fragment)."""
+        room = budget - len(block)
+        if messages is not None:
+            messages.poll()
+            rec = messages.piece(room)
+            if rec is not None:
+                block.extend(rec)
+                return
+        id_payload = state["station_id_payload"]
+        if id_payload is not None and room >= RECORD_HEADER_LEN + len(id_payload):
+            block.extend(struct.pack(">BH", STATION_ID_FULL_TYPE, len(id_payload)) + id_payload)
+
     def flush_block():
         nonlocal block, fragments_sent
         if not block:
             return
+        fill_spare()
         out = bytearray(struct.pack(">H", len(block)))
         out.extend(block)
         out.extend(b"\x00" * (args.fragment_size - len(out)))

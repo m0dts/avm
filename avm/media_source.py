@@ -204,8 +204,11 @@ def list_dshow_devices():
         return list_linux_devices()
     if sys.platform != "win32" or shutil.which("ffmpeg") is None:
         return {"video": [], "audio": []}
+    # ffmpeg writes UTF-8; text=True alone decoded it with the Windows code
+    # page, turning e.g. "Intel(R) Smart Sound" with a real (R) sign into
+    # "IntelÂ®..." -- a name ffmpeg then couldn't open (no TX audio)
     result = subprocess.run(["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-                             capture_output=True, text=True, timeout=15)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
     devices = {"video": [], "audio": []}
     # Newer ffmpeg builds print one flat line per device, no section
     # headers: `"Device Name" (audio, video)` / `(video)` / `(audio)` /

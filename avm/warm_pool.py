@@ -111,13 +111,16 @@ def prewarm(kind, driver=None, uri=None):
             _pool.pop(kind, None)
 
 
-def take(kind):
-    """A warm process (removed from the pool), or None."""
+def take(kind, driver=None):
+    """A warm process (removed from the pool), or None. driver: the radio
+    this start uses -- a process that opened another radio in advance (made
+    before the radio was changed) isn't used: it would have tried, and
+    failed, to open a radio that may not be there ("no device context")."""
     with _lock:
         w = _pool.pop(kind, None)
     if w is None:
         return None
-    if not w.alive():
+    if not w.alive() or (w.radio is not None and driver is not None and w.radio[0] != driver):
         w.discard()
         return None
     return w

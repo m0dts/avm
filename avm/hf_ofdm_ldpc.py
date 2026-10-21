@@ -20,7 +20,6 @@ Features:
     code with soft Viterbi decoding in AWGN and HF multipath channels.
 """
 
-import sys
 import numpy as np
 
 try:

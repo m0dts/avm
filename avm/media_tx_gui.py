@@ -309,7 +309,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         form.addPair("Mode", self.mode, "kHz", self.occupancy)
 
         self.modulation = QtWidgets.QComboBox()
-        self.modulation.addItems(["qpsk", "16qam", "32qam", "8psk"])   # 8psk: mode S
+        self.modulation.addItems(["qpsk", "16qam", "32qam", "8psk", "16psk"])   # 8psk: S/SH, 16psk: SH
 
         self.fec = QtWidgets.QComboBox()
         self.fec.addItems(["viterbi", "ldpc"])
@@ -1061,6 +1061,8 @@ class MediaTxWindow(QtWidgets.QMainWindow):
             station_id = self.station_id.text().strip()
             if station_id:
                 framer_cmd += ["--station-id", station_id]
+            if getattr(self, "message_file", None):   # the touch GUI's text message
+                framer_cmd += ["--message-file", self.message_file]
             tx_cmd = self._build_tx_cmd()
         except ValueError as e:
             self._append_log(f"[error] {e}")
@@ -1097,7 +1099,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         # a preloaded modulator (warm_pool.py) skips its ~3.5 s of imports;
         # its stdin is a pipe made in advance, which the framer writes to.
         # Only for the usual output (duplex / a file output: a fresh process)
-        warm = warm_pool.take("tx") if tdd_fd is None and tx_stdout is subprocess.DEVNULL else None
+        warm = warm_pool.take("tx", getattr(self, "sdr", "pluto")) if tdd_fd is None and tx_stdout is subprocess.DEVNULL else None
         p_framer = subprocess.Popen(framer_cmd, stdin=subprocess.DEVNULL,
                                     stdout=warm.stdin_w if warm is not None else subprocess.PIPE,
                                     stderr=subprocess.PIPE, **avm_threads.die_with_parent())

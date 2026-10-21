@@ -70,6 +70,7 @@ def stylesheet(scale, accent):
     QPushButton:checked {{ background: {accent}; color: #111; font-weight: bold; }}
     QPushButton:disabled {{ color: #666; }}
     QPushButton#run {{ font-size: {f(20)}px; font-weight: bold; min-height: {f(56)}px; }}
+    QPushButton#msg {{ font-size: {f(32)}px; min-height: {f(56)}px; }}
     QPushButton#toggle {{ font-size: {f(18)}px; font-weight: bold; min-width: {f(90)}px; }}
     QListWidget {{ background: {PANEL}; border: none; font-size: {f(18)}px; }}
     QListWidget::item {{ min-height: {f(52)}px; padding-left: {f(12)}px; border-bottom: 1px solid {BG}; }}
@@ -144,12 +145,25 @@ class Notices(QtCore.QObject):
     def __init__(self):
         super().__init__()
         self.items = []  # [time, source, text, count], oldest first
+        self._exc_at = {}  # source -> when its last entry was an exception (chained tracebacks)
 
-    def add(self, source, text):
+    def add(self, source, text, exception=False):
+        """exception: text is the last line of a Python traceback. A
+        chained one ("During handling of the above exception, another
+        exception occurred") ends twice within moments: only the final
+        exception -- the one that says what went wrong -- is kept."""
         text = " ".join(str(text).split())[:300]
         if not text:
             return
         now = time.strftime("%H:%M:%S")
+        t = time.monotonic()
+        if (exception and self.items and self.items[-1][1] == source
+                and t - self._exc_at.get(source, -1e9) < 2.0):
+            self.items.pop()           # the earlier exception of the same traceback
+        if exception:
+            self._exc_at[source] = t
+        else:
+            self._exc_at.pop(source, None)
         if self.items and self.items[-1][1] == source and self.items[-1][2] == text:
             self.items[-1][0] = now
             self.items[-1][3] += 1
@@ -196,11 +210,121 @@ _ERROR_IGNORE = ("Broken pipe", "Error muxing", "Error writing trailer", "Error 
                  "MCU error 5 (Loopback signal weak")
 
 
+# A process's log line: "[tag] text" (the GUI tags each process's output)
+_TAG_RE = re.compile(r"^\[[\w-]+\] ?")
+# The last line of a Python traceback: "SomeError: what went wrong"
+_EXCEPTION_RE = re.compile(r"^(?:[\w.]+\.)?\w*(?:Error|Exception|Interrupt)(?:: (.*))?$")
+
+
 def error_line(line):
-    """The message to report if this log line is an error, else None."""
+    """The message to report if this log line is an error, else None.
+    Traceback detail (its "File ..." and source-code lines, indented) isn't
+    reported, only the exception it ends with, without its "XxxError: "
+    prefix when it has a message (the list already says which process)."""
     if not _ERROR_RE.search(line) or any(x in line for x in _ERROR_IGNORE):
         return None
-    return line.strip()
+    body = _TAG_RE.sub("", line.rstrip(), count=1)
+    if body[:1].isspace():
+        return None                   # inside a traceback: code / "File ..." lines
+    m = _EXCEPTION_RE.match(body.strip())
+    if m and m.group(1):
+        return m.group(1).strip()
+    return body.strip()
+
+
+def is_exception_line(line):
+    """Is this log line the end of a Python traceback ("XxxError: ...")?"""
+    return bool(_EXCEPTION_RE.match(_TAG_RE.sub("", line.rstrip(), count=1).strip()))
+
+
+# Text messages (media_tx_framer MESSAGE_TYPE): the TX's current message is
+# this file, which the framer re-reads when it changes ("<unix time> <text>",
+# empty = none); received ones are kept for the session in messages()
+TX_MESSAGE_PATH = os.path.join(os.path.expanduser("~"), ".config", "hfmodem", "tx_message.txt")
+MESSAGE_MAX_CHARS = 80
+
+
+def tx_message():
+    """The TX's current message text ("" if none)."""
+    try:
+        with open(TX_MESSAGE_PATH, encoding="utf-8") as f:
+            return f.read().strip().partition(" ")[2]
+    except OSError:
+        return ""
+
+
+def set_tx_message(text):
+    """Send text (stamped now) until cleared or replaced; "" stops it."""
+    text = (text or "").strip()[:MESSAGE_MAX_CHARS]
+    try:
+        os.makedirs(os.path.dirname(TX_MESSAGE_PATH), exist_ok=True)
+        with open(TX_MESSAGE_PATH, "w", encoding="utf-8") as f:
+            f.write(f"{int(time.time())} {text}\n" if text else "")
+    except OSError:
+        pass
+
+
+class Messages(QtCore.QObject):
+    """Text messages received this session, for the title bar's message
+    button: (received at, sent at (unix), callsign, text), oldest first."""
+    changed = QtCore.pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.items, self.unread = [], 0
+
+    def add(self, ts, text, callsign=""):
+        # the player reports each message once, but starts afresh with RX
+        if any(i[1] == int(ts) and i[3] == text for i in self.items):
+            return
+        self.items.append((time.strftime("%H:%M:%S"), int(ts), callsign.strip(), text))
+        self.unread += 1
+        self.changed.emit()
+
+    def mark_read(self):
+        if self.unread:
+            self.unread = 0
+            self.changed.emit()
+
+
+_messages = None
+
+
+def messages():
+    """The session's one Messages store."""
+    global _messages
+    if _messages is None:
+        _messages = Messages()
+    return _messages
+
+
+class MessagesDialog(QtWidgets.QDialog):
+    """Full-window list of the messages received this session, newest first."""
+
+    def __init__(self, parent):
+        super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        self.setModal(True)
+        lay = QtWidgets.QVBoxLayout(self)
+        top = QtWidgets.QHBoxLayout()
+        t = QtWidgets.QLabel("Messages received")
+        t.setObjectName("big")
+        top.addWidget(t, 1)
+        close = QtWidgets.QPushButton("Close")
+        close.clicked.connect(self.accept)
+        top.addWidget(close)
+        lay.addLayout(top)
+        self.list = QtWidgets.QListWidget()
+        self.list.setWordWrap(True)
+        self.list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        QtWidgets.QScroller.grabGesture(self.list.viewport(), QtWidgets.QScroller.LeftMouseButtonGesture)
+        lay.addWidget(self.list, 1)
+        items = messages().items
+        if not items:
+            self.list.addItem("No messages received.")
+        for got, ts, call, text in reversed(items):
+            self.list.addItem(f"{got}  {call or '?'}  {text}")   # one line: received, callsign, text
+        messages().mark_read()
+        self.setGeometry(dialog_geometry(parent))
 
 
 class NoticesDialog(QtWidgets.QDialog):
@@ -588,8 +712,10 @@ class KeyboardDialog(QtWidgets.QDialog):
     ROWS = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM-. "]
 
     HOST_ROWS = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM-.:"]  # host:port (no space)
+    # text messages: a wide space bar of their own under these (space_bar=True)
+    MESSAGE_ROWS = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM-.,", "?!'()@:#=+"]
 
-    def __init__(self, title, text, max_len, parent, rows=None):
+    def __init__(self, title, text, max_len, parent, rows=None, space_bar=False):
         super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
         self.setModal(True)
         self._max = max_len
@@ -601,6 +727,7 @@ class KeyboardDialog(QtWidgets.QDialog):
         self.display = QtWidgets.QLabel()
         self.display.setObjectName("big")
         self.display.setStyleSheet(f"background: {PANEL}; padding: 4px 8px; font-family: monospace;")
+        self.display.setWordWrap(True)   # an 80-character message takes two lines
         lay.addWidget(self.display)
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(4)
@@ -611,6 +738,14 @@ class KeyboardDialog(QtWidgets.QDialog):
                 b.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
                 b.clicked.connect(lambda _=False, k=k: self._key(k))
                 grid.addWidget(b, r, c)
+        if space_bar:
+            # a phone-style space bar: bottom middle, six keys wide
+            r = len(rows or self.ROWS)
+            b = QtWidgets.QPushButton("space")
+            b.setFocusPolicy(QtCore.Qt.NoFocus)
+            b.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            b.clicked.connect(lambda: self._key(" "))
+            grid.addWidget(b, r, 2, 1, 6)
         lay.addLayout(grid, 1)
         row = QtWidgets.QHBoxLayout()
         for label, slot in (("⌫", lambda: self._set(self._text[:-1])), ("Clear", lambda: self._set("")),
@@ -670,7 +805,7 @@ class TextButton(QtWidgets.QPushButton):
 # SDRplay RSP: 1 kHz-2 GHz.
 FREQ_RANGE_MHZ = {"pluto": (70.0, 6000.0), "lime": (0.1, 3800.0), "rtlsdr": (24.0, 1766.0),
                   "airspy": (24.0, 1800.0), "airspyhf": (0.01, 260.0), "kiwi": (0.01, 32.0),
-                  "sdrplay": (0.001, 2000.0), "hpsdr": (0.01, 55.0)}
+                  "sdrplay": (0.001, 2000.0), "hpsdr": (0.01, 55.0), "virtual": (0.001, 6000.0)}
 
 
 class FreqButton(QtWidgets.QPushButton):
@@ -754,7 +889,8 @@ class Stepper(QtWidgets.QWidget):
         return self._value
 
     def set_value(self, v, emit=False):
-        v = min(self.hi, max(self.lo, round(v / self.step) * self.step))
+        # (rounded again: a fractional step, e.g. 0.1, left 0.30000000000000004)
+        v = min(self.hi, max(self.lo, round(round(v / self.step) * self.step, 6)))
         if v == self._value:
             return
         self._value = v
@@ -782,11 +918,30 @@ class RunButton(QtWidgets.QPushButton):
 
     def set_state(self, state):
         self.state = state
+        self._busy = False
         text, colour = {"stopped": (f"START {self._what}", GO),
                         "running": (f"STOP {self._what}", STOP),
                         "pending": ("RESTART TO APPLY", WARN)}[state]
         self.setText(text)
         self.setStyleSheet(f"QPushButton#run {{ background: {colour}; color: #111; }}")
+
+    def run_pressed(self, action):
+        """Calls action() (the page's start / stop / restart), showing
+        "STARTING..." or "STOPPING..." the moment it's pressed: the radio
+        check and process starts take a second or two, and the button used
+        to sit unchanged meanwhile. Whatever state action() leaves is shown
+        after; if it set none (a start that didn't happen), the old one."""
+        word = "STARTING" if self.state == "stopped" else "STOPPING" if self.state == "running" \
+            else "RESTARTING"
+        self.setText(f"{word} {self._what}...")
+        self.setStyleSheet(f"QPushButton#run {{ background: {BUTTON}; color: {TEXT}; }}")
+        self._busy = True
+        self.repaint()          # now, before action() holds the GUI thread
+        try:
+            action()
+        finally:
+            if self._busy:
+                self.set_state(self.state)
 
 
 # Same-channel duplex (TDD, Config tab, very experimental): this station
@@ -904,21 +1059,49 @@ MODES = ("A", "B", "C", "D", "SH", "VU", "S")  # VU: VHF/UHF (144/432 MHz) mobil
                                          # S: single carrier for fixed / satellite paths (hf_sc)
 # modes that only run at some widths / modulations (others: all)
 MODE_WIDTHS = {"S": ("10", "20", "40"), "SH": ("10", "20", "40")}
-MODE_MODULATIONS = {"S": ("qpsk", "8psk"), "SH": ("qpsk", "8psk")}
+MODE_MODULATIONS = {"S": ("qpsk", "8psk"), "SH": ("qpsk", "8psk", "16psk")}
 SINGLE_CARRIER_MODES = ("S", "SH")
 OFDM_MODULATIONS = ("qpsk", "16qam", "32qam")      # every other mode
 # Config's Mode type: which modes / widths / modulations the TX and RX pages
 # offer (the rest of the buttons are hidden)
 MODE_TYPE_SETS = {
-    "hf": {"modes": ("A", "B", "C", "D", "SH"), "widths": BANDWIDTHS_KHZ, "mods": OFDM_MODULATIONS + ("8psk",)},
+    "hf": {"modes": ("A", "B", "C", "D", "SH"), "widths": BANDWIDTHS_KHZ, "mods": OFDM_MODULATIONS + ("8psk", "16psk")},
     "vu": {"modes": ("VU",), "widths": ("80", "160", "250"), "mods": OFDM_MODULATIONS},
     "sat": {"modes": ("S",), "widths": ("10", "20", "40"), "mods": ("qpsk", "8psk")},
 }
 
 
+# Default picture size and frame rate for a video bitrate (kbit/s), set when
+# the TX mode / width / modulation changes: the best measured quality for the
+# bits (wavelet codec, real camera scenes; see docs/MODES.md). (min kbps, res, fps)
+VIDEO_PRESETS = ((150, "384x224", "15"), (80, "384x224", "10"), (40, "384x224", "6"),
+                 (20, "384x224", "4"), (12, "256x144", "4"), (4, "256x144", "2"),
+                 (0, "192x112", "1"))
+
+
+# Over 20 kHz: 10 fps always (smooth movement first), with the size that's
+# sharpest at 10 fps for the bitrate (measured at 6 and 12 fps, see above)
+VIDEO_PRESETS_10FPS = ((25, "384x224", "10"), (12, "256x144", "10"), (6, "224x128", "10"),
+                       (0, "128x80", "10"))
+
+
+def video_preset(kbps, width_khz=0):
+    """(resolution, fps) suggested for kbps of video on a link width_khz wide."""
+    table = VIDEO_PRESETS_10FPS if float(width_khz or 0) > 20 else VIDEO_PRESETS
+    for lo, res, fps in table:
+        if kbps >= lo:
+            return res, fps
+    return table[-1][1:]
+
+
 def mode_type_of(mode):
     """The Mode type a mode belongs to (a first start: from the saved mode)."""
     return next((t for t, v in MODE_TYPE_SETS.items() if mode in v["modes"]), "hf")
+
+
+# The RX page's Offset stepper (kHz) per mode type: fine on HF's narrow
+# signals, coarser on VHF/UHF and satellite paths where the drift is larger
+RX_OFFSET_STEP_KHZ = {"hf": 0.1, "vu": 0.5, "sat": 1.0}
 
 
 def apply_mode_type(page, mode_type):
@@ -927,6 +1110,8 @@ def apply_mode_type(page, mode_type):
     True if anything had to change (the caller applies it)."""
     sets = MODE_TYPE_SETS.get(mode_type, MODE_TYPE_SETS["hf"])
     changed = False
+    if hasattr(page, "offset"):   # the RX page's tuning offset step
+        page.offset.step = RX_OFFSET_STEP_KHZ.get(mode_type, 0.1)
     for seg, allowed in ((page.mode, sets["modes"]), (page.bw, sets["widths"]), (page.mod, sets["mods"])):
         for value, button in seg._buttons.items():
             button.setVisible(value in allowed)
@@ -1071,7 +1256,8 @@ def saved_bandwidth(value):
 
 
 RADIO_NAMES = {"pluto": "PlutoSDR", "lime": "LimeSDR", "rtlsdr": "RTL-SDR",
-               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay", "kiwi": "KiwiSDR", "hpsdr": "ANAN (HPSDR)"}
+               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay", "kiwi": "KiwiSDR", "hpsdr": "ANAN (HPSDR)",
+               "virtual": "Virtual radio"}   # TX to RX on this machine, no hardware (virtual_radio.py)
 # USB vendor:product IDs per radio, for the USB watchdog (touch_gui). A radio
 # that isn't on USB at all (e.g. a Pluto on the network) simply isn't watched.
 USB_IDS = {
@@ -1136,7 +1322,9 @@ RX_ONLY_RADIOS = ("rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi", "hpsdr")
 # KiwiSDR to receive from, host:port (the Config tab's KiwiSDR row sets it)
 KIWI_SERVER = ""
 # radios whose live gain goes via a file the RX process watches (no iio_attr)
-GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi", "hpsdr")
+GAIN_FILE_RADIOS = ("lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi", "hpsdr", "virtual")
+# the virtual radio's entry in the radio lists (always there)
+VIRTUAL_LABEL = "Virtual radio (this machine, no hardware)"
 # ANAN / openHPSDR receive antenna inputs
 ANAN_ANTENNAS = ["ANT1", "ANT2", "ANT3"]
 RTL_SAMPLE_RATE = 1024000  # an RTL-SDR rate (0.9-3.2 MS/s) that fits every bandwidth + LO offset
@@ -1150,8 +1338,9 @@ def radio_present(sdr, uri=None):
     at its network address (iiod, port 30431, 0.5 s). Elsewhere: SoapySDR
     asked for that driver (~1 s). If the check itself can't run, True --
     never block a start just because the check failed."""
-    import socket
     name = RADIO_NAMES.get(sdr, sdr)
+    if sdr == "virtual":
+        return True, "virtual radio (TX to RX on this machine)"
     if sdr == "kiwi":
         import kiwi_source
         server = uri or KIWI_SERVER
@@ -1301,7 +1490,8 @@ def detect_radios():
     finally:
         if gui_thread:
             QtWidgets.QApplication.restoreOverrideCursor()
-    return found or ["(no radios found -- check USB / power)"]
+    # always offered: TX and RX joined on this machine, for testing without a radio
+    return found + [VIRTUAL_LABEL]
 
 
 class RadioPicker(Picker):
@@ -1313,7 +1503,7 @@ class RadioPicker(Picker):
     search_in_background = True  # the radio search takes ~1.7 s on a Pi 4
 
     SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL", "airspy": "Airspy", "airspyhf": "HF+",
-             "sdrplay": "SDRplay", "kiwi": "Kiwi", "hpsdr": "ANAN"}  # fits beside the frequency
+             "sdrplay": "SDRplay", "kiwi": "Kiwi", "hpsdr": "ANAN", "virtual": "Virtual"}  # fits beside the frequency
 
     def __init__(self, title, sdr, rx=False, pluto_uri=""):
         allowed = RADIO_NAMES if rx else {k: v for k, v in RADIO_NAMES.items() if k not in RX_ONLY_RADIOS}
@@ -1342,7 +1532,8 @@ class RadioPicker(Picker):
                else "airspy" if label.startswith("Airspy")
                else "sdrplay" if label.startswith("SDRplay")
                else "kiwi" if label.startswith("KiwiSDR")
-               else "hpsdr" if label.startswith("ANAN") else None)
+               else "hpsdr" if label.startswith("ANAN")
+               else "virtual" if label.startswith("Virtual") else None)
         if sdr == "pluto":
             self.pluto_uri = PLUTO_URIS.get(label, "")
         self.set_sdr(sdr or self.sdr)  # "(no radios found)" keeps the previous choice

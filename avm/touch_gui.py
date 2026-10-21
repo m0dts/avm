@@ -90,8 +90,19 @@ USB_RESUME_S = 4.0    # a device must be back this long before TX/RX restarts
 
 
 def _cpu_times():
-    """(busy, total) jiffies over all cores from /proc/stat; None where
-    there's no /proc (Windows)."""
+    """(busy, total) CPU time over all cores, in any unit (only differences
+    are used): /proc/stat on Linux, GetSystemTimes on Windows; None if
+    neither can be read."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        idle, kernel, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+        if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel),
+                                                     ctypes.byref(user)):
+            return None
+        val = [(t.dwHighDateTime << 32) | t.dwLowDateTime for t in (idle, kernel, user)]
+        total = val[1] + val[2]               # kernel time includes the idle time
+        return total - val[0], total
     try:
         with open("/proc/stat") as f:
             v = [int(x) for x in f.readline().split()[1:]]
@@ -651,6 +662,23 @@ def main():
         f"uncaught in thread {a.thread.name if a.thread else '?'}", a.exc_type, a.exc_value, a.exc_traceback)
     sys.excepthook = lambda t, v, tb: _log_uncaught("uncaught", t, v, tb)
     app = QtWidgets.QApplication(sys.argv)
+    # One AVM at a time: a second copy started its own TX/RX alongside the
+    # first one's -- two transmitters, and the camera held by the first
+    # ("Error during demuxing: I/O error"). A lock file, which Qt clears if
+    # the copy holding it has died. AVM_ALLOW_SECOND=1 allows another
+    # (two stations on one machine, for testing).
+    lock = QtCore.QLockFile(os.path.join(os.path.expanduser("~"), ".config", "hfmodem", "avm.lock"))
+    lock.setStaleLockTime(0)              # only a dead process's lock is stale
+    os.makedirs(os.path.join(os.path.expanduser("~"), ".config", "hfmodem"), exist_ok=True)
+    if not os.environ.get("AVM_ALLOW_SECOND") and not lock.tryLock(100):
+        QtWidgets.QMessageBox.warning(None, "AVM", "AVM is already running.\n\n"
+                                      "Use the AVM window that's open (it may be behind other "
+                                      "windows or minimised), or close it first.")
+        sys.exit(0)
+    # no text message carried over from a previous session (only here, once
+    # this copy holds the lock: a TX page built elsewhere -- a test, the
+    # README screenshots -- must not clear a running AVM's message)
+    tw.set_tx_message("")
     import avm_threads
     avm_threads.install(main_name="avm-gui")  # thread names visible in top -H
     gui_layout.set_app_id("hfmodem-touch")

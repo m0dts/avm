@@ -46,6 +46,9 @@ TX_AMPLITUDE = 0.2
 TX_AMPLITUDE_SC = 0.3
 
 
+
+LOW_LINK_KBPS = 16   # TX audio default: Codec2 on links slower than this, else Opus
+
 class _TxEngine(media_tx_gui.MediaTxWindow):
     """The full TX window, never shown; adds the live camera preview and
     the radio choice (PlutoSDR or LimeSDR)."""
@@ -71,6 +74,8 @@ class _TxEngine(media_tx_gui.MediaTxWindow):
         if getattr(self, "dpd_allowed", False):
             # predistortion (Config: experimental features, TX DPD), live
             cmd += ["--dpd-file", dpd.DPD_PATH]
+        if self.sdr == "virtual":
+            cmd += ["--sdr", "virtual"]   # to the RX on this machine (virtual_radio.py)
         if self.sdr == "lime":
             cmd += ["--sdr", "lime", "--gain-file", tw.gain_file_path("tx")]
             if self.lime_port != "Auto":
@@ -82,6 +87,17 @@ class _TxEngine(media_tx_gui.MediaTxWindow):
         if any("media_source_wavelet.py" in c for c in cmd):
             cmd += ["--preview", PREVIEW_PATH]
         return cmd
+
+
+def _unmangle(name):
+    """A device name saved while the Windows device list was read with the
+    wrong text encoding (UTF-8 taken as the code page: "IntelÂ®" for
+    "Intel" + the (R) sign): put back as the device really is called."""
+    try:
+        fixed = name.encode("cp1252").decode("utf-8")
+        return fixed if fixed != name else name
+    except (UnicodeError, AttributeError):
+        return name
 
 
 def _is_c920(device):
@@ -146,6 +162,9 @@ class TxPage(QtWidgets.QWidget):
         self.s = settings
         self.engine = _TxEngine()
         self.engine.hide()
+        # text message: sent in spare fragment space until cleared or replaced
+        # (the framer re-reads this file; touch_gui.main clears it at start)
+        self.engine.message_file = tw.TX_MESSAGE_PATH
         self.engine.log_stream.line_received.connect(self._on_log)
         self.live_gain = tw.LiveGain("tx")
         self._sent = 0
@@ -205,7 +224,7 @@ class TxPage(QtWidgets.QWidget):
         self.focus.changed.connect(self._focus_changed)
         # camera and mic under the preview
         self.camera = tw.Picker("Camera", _video_devices, s_get(settings, "tx_camera", "/dev/video0"))
-        self.mic = tw.Picker("Microphone", _audio_devices, s_get(settings, "tx_mic", "default"))
+        self.mic = tw.Picker("Microphone", _audio_devices, _unmangle(s_get(settings, "tx_mic", "default")))
         # camera and mic pickers live on the Config tab (touch_config_page)
         labels = [self.focus_row.layout().itemAt(0).widget()]
         self._left_labels = labels
@@ -232,8 +251,8 @@ class TxPage(QtWidgets.QWidget):
         self.freq = tw.FreqButton("TX frequency", s_get(settings, "tx_freq", 145500000))
         self.mode = tw.Segmented([(m, m) for m in tw.MODES], tw.saved_mode(s_get(settings, "tx_mode", "A")))
         self.bw = tw.Segmented([(b, b) for b in tw.BANDWIDTHS_KHZ], tw.saved_bandwidth(s_get(settings, "tx_bw", "80")))
-        self.mod = tw.Segmented([("qpsk", "QPSK"), ("8psk", "8PSK"), ("16qam", "16QAM"), ("32qam", "32QAM")],
-                              s_get(settings, "tx_mod", "qpsk"))   # 8PSK: mode S only
+        self.mod = tw.Segmented([("qpsk", "QPSK"), ("8psk", "8PSK"), ("16psk", "16PSK"), ("16qam", "16QAM"), ("32qam", "32QAM")],
+                              s_get(settings, "tx_mod", "qpsk"))   # 8PSK: modes S/SH; 16PSK: SH
         self.gain = tw.Stepper(-89, 0, 1, s_get(settings, "tx_gain", -10), " dB")
         self.radio = tw.RadioPicker("TX radio (connected now)", settings.get("tx_sdr", settings.get("sdr", "pluto")),
                                     pluto_uri=settings.get("tx_pluto_uri", ""))
@@ -266,9 +285,19 @@ class TxPage(QtWidgets.QWidget):
         right.addStretch(1)
         self.run = tw.RunButton("TX")  # bottom right, same place as RX's
         self.run.clicked.connect(self._run_clicked)
-        right.addWidget(self.run)
+        self.msg_btn = QtWidgets.QPushButton("✉")
+        self.msg_btn.setObjectName("msg")      # its big symbol (tw's stylesheet)
+        self.msg_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.msg_btn.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.msg_btn.clicked.connect(self._edit_message)
+        run_row = QtWidgets.QHBoxLayout()   # TX button, then the message button (a fifth of the row)
+        run_row.addWidget(self.run, 4)
+        run_row.addWidget(self.msg_btn, 1)
+        right.addLayout(run_row)
+        self._show_message()
         root.addLayout(right, 5)
 
+        self._last_link = (self.mode.value(), self.bw.value(), self.mod.value())
         for w in (self.source, self.res, self.audio, self.fps, self.mode, self.bw, self.mod):
             w.changed.connect(self._changed)
         for w in (self.camera, self.mic, self.freq, self.callsign):
@@ -407,9 +436,48 @@ class TxPage(QtWidgets.QWidget):
         return "NO VIDEO\naudio only at this mode / kHz"
 
     def _changed(self, *_):
+        mode = self.mode.value()
         self._apply_to_engine()
+        # a new mode / width / modulation: the picture size and frame rate
+        # that give the best quality for its video bitrate (changeable after)
+        link = (mode, self.bw.value(), self.mod.value())
+        if link != getattr(self, "_last_link", link):
+            self.engine._recalculate_bitrates()   # for the new link now (it otherwise follows a moment later)
+            # audio for the link: Codec2 under LOW_LINK_KBPS (leaves the most
+            # for video), Opus from there up (better sound, room for it)
+            m = re.search(r"~([\d.]+)\s*kbps", self.engine.link_capacity_label.text())
+            if m:
+                want = "codec2" if float(m.group(1)) < LOW_LINK_KBPS else "opus"
+                if want == "codec2" and getattr(self, "_no_codec2", False):
+                    want = "opus"
+                if self.audio.value() != want:
+                    self.audio.set_value(want)
+                    self._apply_to_engine()
+                    self.engine._recalculate_bitrates()
+        if link != getattr(self, "_last_link", link) and getattr(self.engine, "_video_enabled", True):
+            res, fps = tw.video_preset(self.engine.video_bitrate.value(), self.bw.value())
+            if (res, fps) != (self.res.value(), self.fps.value()):
+                self.res.set_value(res)
+                self.fps.set_value(fps)
+                self._apply_to_engine()
+        self._last_link = link
         if self.is_running():
             self.run.set_state("pending")
+
+    def _edit_message(self):
+        """The text message: shown on the keyboard to edit; OK sends it
+        (stamped now) until cleared or replaced, an empty one stops it."""
+        old = tw.tx_message()
+        d = tw.KeyboardDialog("Message (sent until cleared)", old, tw.MESSAGE_MAX_CHARS, self,
+                              rows=tw.KeyboardDialog.MESSAGE_ROWS, space_bar=True)
+        if d.exec_() and d.text() != old:
+            tw.set_tx_message(d.text())
+        self._show_message()
+
+    def _show_message(self):
+        on = bool(tw.tx_message())
+        # (just the symbol, big: coloured while a message is being sent)
+        tw.set_style(self.msg_btn, f"background: {tw.RX_ACCENT}; color: white;" if on else "")
 
     def fit_left_labels(self):
         """Line up the Focus/Camera/Mic labels (again after a re-scale)."""
@@ -481,6 +549,8 @@ class TxPage(QtWidgets.QWidget):
         if self.engine.sdr == "lime":
             tw.write_gain_file("tx", db)  # the running TX process picks it up
             return
+        if self.engine.sdr == "virtual":
+            return                        # a clean link: the level doesn't matter
         if self.is_running():
             if tw.LiveGain.available():
                 self.live_gain.set(self.engine.pluto_uri.text().strip() or tw.default_pluto_uri() or "ip:192.168.2.1", db)
@@ -566,6 +636,9 @@ class TxPage(QtWidgets.QWidget):
             self.start()
 
     def _run_clicked(self):
+        self.run.run_pressed(self._run_clicked_now)
+
+    def _run_clicked_now(self):
         if self._waiting_codec:  # tapped while waiting for the codec: cancel
             self._waiting_codec = False
             self.run.set_state("stopped")
@@ -725,7 +798,7 @@ class TxPage(QtWidgets.QWidget):
                 and not any(x in line for x in tw._ERROR_IGNORE):
             err = line.strip()
         if err:
-            tw.notices().add("TX", err)
+            tw.notices().add("TX", err, exception=tw.is_exception_line(line))
             self._last_error = err[:120]  # for "TX stopped: <why>" if it then stops
         # the video source's warm-up (media_source_wavelet.py): the first
         # start on a machine compiles the codec, minutes on a slow CPU
@@ -736,6 +809,10 @@ class TxPage(QtWidgets.QWidget):
             self.preview.clear_image("Starting video...")
 
     def _tick(self):
+        # the message button follows the file itself, about once a second
+        self._msg_ticks = getattr(self, "_msg_ticks", 0) + 1
+        if self._msg_ticks % 10 == 0:
+            self._show_message()
         if self.is_running():
             dead = [p for p in self.engine.procs if p.poll() is not None]
             if dead:

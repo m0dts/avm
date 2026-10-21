@@ -38,6 +38,7 @@ HDR_REPEAT = 8
 DATA_BLOCK = 128
 PILOT_LEN = 8
 LAG_FINE = 16                   # preamble frequency estimate: lag 1 (range) then lag 16 (accuracy)
+FINE_LAGS = (16, 64, 128)       # ... then refined over these lags in turn (_sync)
 DETECT_THRESHOLD = 0.32         # |correlation| / energy: noise alone peaks ~0.07, rare extremes ~0.25; a burst at 0 dB ~0.5
 SEARCH_CHUNK_S = 2.0            # look for a preamble this far at a time
 LLR_CLIP = 40.0
@@ -67,8 +68,8 @@ class SCConfig:
         self.occupancy_hz = float(occupancy_khz) * 1000
         self.symbol_rate = self.occupancy_hz / (1 + ALPHA)
         self.fs = SPS * self.symbol_rate
-        if data_modulation not in CONSTELLATIONS:
-            raise ValueError(f"mode S has {', '.join(CONSTELLATIONS)} (got {data_modulation})")
+        if data_modulation not in S_MODULATIONS:
+            raise ValueError(f"mode S has {', '.join(S_MODULATIONS)} (got {data_modulation})")
         self.data_modulation = data_modulation
         self.bits_per_symbol = BITS_PER_SYMBOL[data_modulation]
         self.fec_scheme = "ldpc"
@@ -122,8 +123,9 @@ def _gray_psk(m):
 
 
 # data constellations (pilots and preamble stay QPSK/BPSK whatever the data)
-CONSTELLATIONS = {"qpsk": _gray_psk(4), "8psk": _gray_psk(8)}
-BITS_PER_SYMBOL = {"qpsk": 2, "8psk": 3}
+CONSTELLATIONS = {"qpsk": _gray_psk(4), "8psk": _gray_psk(8), "16psk": _gray_psk(16)}
+BITS_PER_SYMBOL = {"qpsk": 2, "8psk": 3, "16psk": 4}
+S_MODULATIONS = ("qpsk", "8psk")     # mode S; 16PSK is mode SH only
 
 
 def _rrc(alpha=ALPHA, sps=SPS, span=RRC_SPAN):
@@ -330,12 +332,18 @@ def _sync(x, i, cfo1):
     symbol 0."""
     zz = _derotated_mf(x, cfo1)
     t0 = i + _fine_timing(zz, i + np.arange(PRE_LEN) * SPS, PREAMBLE)
-    s = _cubic(zz, t0 + np.arange(PRE_LEN) * SPS) * PREAMBLE      # ~constant phase if on frequency
-    # lag-16 refinement: 16x finer, ambiguity +-1/32 cycles/symbol
-    f16 = np.angle(np.vdot(s[:-LAG_FINE], s[LAG_FINE:])) / (2 * np.pi * LAG_FINE)
-    cfo = cfo1 + f16
-    zz = _derotated_mf(x, cfo)
-    t0 = i + _fine_timing(zz, i + np.arange(PRE_LEN) * SPS, PREAMBLE)
+    # Refined in steps over longer and longer spans of the preamble, each
+    # re-measured after the last correction: lag 16 (ambiguity +-1/32
+    # cycles/symbol), then 64 and 128 (+-1/128, +-1/256), each well inside
+    # the one before's error. Lag 16 alone left 20-50 Hz at 40 kHz when the
+    # coarse estimate was ~150 Hz out -- ~50 deg over the header, which then
+    # failed its checksum (1 frame in 40 at 3 dB, where all should decode).
+    cfo = cfo1
+    for lag in FINE_LAGS:
+        s = _cubic(zz, t0 + np.arange(PRE_LEN) * SPS) * PREAMBLE      # ~constant phase if on frequency
+        cfo += np.angle(np.vdot(s[:-lag], s[lag:])) / (2 * np.pi * lag)
+        zz = _derotated_mf(x, cfo)
+        t0 = i + _fine_timing(zz, i + np.arange(PRE_LEN) * SPS, PREAMBLE)
     return t0, cfo, zz
 
 
@@ -476,7 +484,11 @@ def _demod_data(zz, t0, ref, n_bytes, modulation="qpsk"):
     hard = _slice(d, const)
     nv = float(np.mean(np.concatenate([np.abs(pil) ** 2, np.abs(d - hard) ** 2])))
     nv = max(nv, 1e-4)
-    mer = -10 * np.log10(nv)
+    # The readout: from the pilots alone (known symbols, ~500 a frame). The
+    # decided data errors above (fine for the soft bits) read high near the
+    # threshold -- a wrong decision looks like a small error -- so S showed
+    # ~2 dB more than SH at the same SNR (SH measures its preamble the same way)
+    mer = -10 * np.log10(max(float(np.mean(np.abs(pil) ** 2)), 1e-4))
     # soft bits: exact (log of the summed likelihoods of every point with the
     # bit 0, less with it 1) or max-log (nearest point each way)
     dist = np.abs(d[:, None] - const[None, :]) ** 2

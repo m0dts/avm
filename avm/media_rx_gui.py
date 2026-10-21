@@ -401,7 +401,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
         form.addRow("Occupancy (kHz)", self.occupancy)
 
         self.modulation = QtWidgets.QComboBox()
-        self.modulation.addItems(["qpsk", "16qam", "32qam", "8psk"])   # 8psk: mode S
+        self.modulation.addItems(["qpsk", "16qam", "32qam", "8psk", "16psk"])   # 8psk: S/SH, 16psk: SH
         form.addRow("Modulation", self.modulation)
 
         self.fec = QtWidgets.QComboBox()
@@ -817,17 +817,24 @@ class MediaRxWindow(QtWidgets.QMainWindow):
 
     def _append_log(self, text):
         self._log_pending_lines.append(text)
+        # A confirmed (CRC-good) station ID is held until RX restarts or a
+        # different one is confirmed: signal gaps and partial decodes of the
+        # next ID don't clear it.
+        held = getattr(self, "_confirmed_station_id", None)
         if self._station_id_reset_re.match(text):
-            self.station_id_label.setText("(none received yet)")
-            self._set_station_style("")
+            if held is None:
+                self.station_id_label.setText("(none received yet)")
+                self._set_station_style("")
             return
         m = self._station_id_tentative_re.match(text)
         if m:
-            self.station_id_label.setText(f"'{m.group(1)}' (unconfirmed)")
-            self._set_station_style("color: #b70;")
+            if held is None:
+                self.station_id_label.setText(f"'{m.group(1)}' (unconfirmed)")
+                self._set_station_style("color: #b70;")
             return
         m = self._station_id_re.match(text)
         if m:
+            self._confirmed_station_id = m.group(1)
             self.station_id_label.setText(f"'{m.group(1)}'")
             self._set_station_style("")
             return
@@ -877,6 +884,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
             return
 
         self._reset_frag_stats()
+        self._confirmed_station_id = None
         self.station_id_label.setText("(none received yet)")
         self._set_station_style("")
         self.video_label.set_frame(QtGui.QPixmap())
@@ -898,7 +906,7 @@ class MediaRxWindow(QtWidgets.QMainWindow):
         rx_priority = {"creationflags": subprocess.HIGH_PRIORITY_CLASS} if sys.platform == "win32" else {}
         # a preloaded receiver (warm_pool.py) skips its ~3.5 s of imports;
         # only for the usual pipes (a file input gets a fresh process)
-        warm = warm_pool.take("rx") if rx_stdin is subprocess.PIPE else None
+        warm = warm_pool.take("rx", getattr(self, "sdr", "pluto")) if rx_stdin is subprocess.PIPE else None
         if warm is not None:
             p_rx = warm.launch(rx_cmd[2:])
             self._append_log("[gui] rx: started from the preloaded process")

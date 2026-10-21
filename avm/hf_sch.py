@@ -8,7 +8,7 @@ against 8.5-12).
 
     preamble   PERIOD-symbol sequence x SHORT_REPEATS, then the UW x PRE_UWS
     header     one block: the payload length (24 bits, each x8, BPSK), UW
-    data       blocks of D_LEN symbols (LDPC 1/2, QPSK or 8PSK), each + UW
+    data       blocks of D_LEN symbols (LDPC 1/2, QPSK, 8PSK or 16PSK), each + UW
 
 The UW (64 known symbols, 8 ms) ends every block, so each block's FFT
 window [data, UW] is cyclic -- the UW before it is its cyclic prefix -- and

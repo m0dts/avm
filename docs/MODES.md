@@ -27,6 +27,9 @@ Codec2 audio needs 3.2 kbit/s.
   where 90% of frames decode in plain noise, measured with AVM's own
   receiver. The SNR in the signal's own bandwidth is about the same, within
   about 1 dB. On a fading path, allow **3-6 dB more**.
+  S and SH both measure it from known symbols (S from its pilots, SH from
+  its preamble), so their figures compare directly: at the same signal
+  they read the same, about 1 dB above the SNR.
 - **Echo span** is the longest echo delay the mode handles cleanly. Echoes
   are the same signal arriving again later, from another path (multi-hop HF,
   or reflections on VHF). An echo longer than this adds interference.
@@ -149,8 +152,8 @@ the mode carries at 10 kHz. Other widths scale with width (20 kHz is about
 | SH | QPSK | 1.8 | 6.0 kbit/s | 8 ms | ~1 Hz |
 | SH | 8PSK | 4.9-5.3 | 9.0 kbit/s | | |
 | SH | 16PSK | 8.5-8.6 | 12.0 kbit/s | | |
-| S | QPSK | 3.2-3.4 | 7.5 kbit/s | ~1 ms | steady |
-| S | 8PSK | 6.9 | 11.3 kbit/s | | |
+| S | QPSK | 1.9-2.0 | 7.5 kbit/s | ~1 ms | steady |
+| S | 8PSK | 5.1-5.2 | 11.3 kbit/s | | |
 | VU (80 kHz) | QPSK | 3.0 | 53 kbit/s | 0.033 ms | >100 Hz |
 | VU (80 kHz) | 16QAM | 6.9-7.0 | 106 kbit/s | | |
 | VU (80 kHz) | 32QAM | 9.9-10.1 | 133 kbit/s | | |

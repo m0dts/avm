@@ -119,7 +119,7 @@ def preopen_from_argv(argv, what):
     if any(a in ("-h", "--help") or a.startswith("--list") for a in argv):
         return
     driver = opt("--sdr", "pluto")
-    if driver in ("kiwi", "hpsdr"):   # not SoapySDR radios
+    if driver in ("kiwi", "hpsdr", "virtual"):   # not SoapySDR radios
         return
     try:
         preopen(driver, opt("--pluto-uri"), what)
@@ -637,7 +637,6 @@ class TddTxFeeder:
     def __init__(self, sdr, freq_hz, sample_rate_hz, fifo, tx_gain_db=-10.0, latency_s=TDD_TXRX_LATENCY_S,
                  start_muted=False, rx_count=None, uri=None):
         import collections
-        import SoapySDR
         from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
         # The RX's own connection. (A second one was tried twice: opened late
         # it put the slot timing out by an unknown offset; opened before RX

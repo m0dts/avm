@@ -297,7 +297,19 @@ elif [ $CHECK_ONLY = 1 ]; then
     [ $NDEP -gt 0 ] && plan "apt: $NDEP other package(s) these need" "system (/usr)"
     plan "  apt packages in total" "" $((KB / 1024))
 else
-    $SUDO apt-get install -y $MISSING || die "apt install failed"
+    # Progress: apt's own bar needs a terminal (this output also goes to the
+    # log), so count its download and set-up lines against the total instead
+    TOTAL="$(apt-get -s install $MISSING 2>/dev/null | grep -c '^Inst ')"
+    echo "installing $TOTAL package(s) with what they need -- this can take 10-20 minutes on a Pi"
+    set -o pipefail
+    # (apt's full output to the log as well; the screen gets the progress)
+    $SUDO apt-get install -y $MISSING 2>&1 | tee -a "${LOG:-/dev/null}" | awk -v n="$TOTAL" '
+        /^Get:/        { g++; if (g == 1) print "  downloading..."
+                         if (n && (g % 10 == 0 || g == n)) printf "  downloaded %d/%d\n", g, n; fflush(); next }
+        /^Setting up / { s++; printf "  [%3d/%d] set up %s\n", s, n, $3; fflush(); next }
+        /^(E:|W:|dpkg: |Errors|Need to get|After this operation)/ { print "  " $0; fflush() }
+    ' || die "apt install failed (the log has the details)"
+    set +o pipefail
 fi
 
 # ---------------------------------------------------------------- 2. SoapyPlutoSDR
@@ -408,7 +420,7 @@ esac
 export PIP_CONSTRAINT="$NP_PIN"
 if [ $CHECK_ONLY = 0 ]; then
     [ -x "$VENV/bin/python" ] || python3 -m venv --system-site-packages "$VENV" || die "venv creation failed"
-    "$VENV/bin/pip" install -q --upgrade pyqtgraph sounddevice || die "pip install failed"
+    "$VENV/bin/pip" install --progress-bar off --upgrade pyqtgraph sounddevice || die "pip install failed"
 else
     [ -x "$VENV/bin/python" ] || plan "Python environment (venv)" "$VENV" 1
     plan "pip: pyqtgraph, sounddevice (latest)" "$VENV" 7
@@ -423,7 +435,7 @@ if [ -n "$SYS_NP" ] && [ -n "$VENV_NP" ] && [ "$VENV_NP" != "$SYS_NP" ]; then
         echo "  numpy $VENV_NP.x in the venv but the system's is $SYS_NP.x (would be fixed)"
     else
         echo "  numpy: venv has $VENV_NP.x, system modules need $SYS_NP.x -- fixing"
-        "$VENV/bin/pip" install -q "$(cat "$NP_PIN")" || warn "numpy fix failed"
+        "$VENV/bin/pip" install --progress-bar off "$(cat "$NP_PIN")" || warn "numpy fix failed"
     fi
 fi
 PY="$VENV/bin/python"
@@ -442,7 +454,7 @@ for spec in "numpy numpy" "scipy scipy" "numba numba" "cv2 opencv-python-headles
         case "$1" in pyqtgraph|sounddevice) ;; *) plan "pip (if apt lacks it): $2" "$VENV" "$(pip_mb "$2")" ;; esac
     else
         echo "  $1: installing $2 from pip"
-        "$VENV/bin/pip" install -q "$2" || warn "pip install $2 failed"
+        "$VENV/bin/pip" install --progress-bar off "$2" || warn "pip install $2 failed"
     fi
 done
 # Debian 12's apt numba (0.56) predates Python 3.11 support: use pip's instead
@@ -452,7 +464,7 @@ if ! "$PY" -c 'import numba, sys; v = tuple(map(int, numba.__version__.split("."
         plan "pip: numba (newer than apt's)" "$VENV" 130
     else
         echo "  numba: upgrading from pip (apt's is too old)"
-        "$VENV/bin/pip" install -q "numba>=0.59" || warn "pip install numba failed"
+        "$VENV/bin/pip" install --progress-bar off "numba>=0.59" || warn "pip install numba failed"
     fi
 fi
 # Versions, not just presence: what's actually there vs what AVM needs.

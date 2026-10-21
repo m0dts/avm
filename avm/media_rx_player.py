@@ -43,6 +43,7 @@ Needs opencv-python (cv2) for the video window, in addition to this
 project's existing av/sounddevice dependencies.
 """
 import argparse
+import json
 import os
 import queue
 import struct
@@ -84,6 +85,8 @@ AUDIO_PACKET_START_TYPE = 0x07
 AUDIO_PACKET_CONT_TYPE = 0x08
 AUDIO_PACKET_FIXED_TYPE = 0x0A  # see media_tx_framer.py's own comment on this type
 STATION_ID_TYPE = 0x0B  # see media_tx_framer.py's own comment on this type
+MESSAGE_TYPE = 0x0C          # a piece of a text message (media_tx_framer.MESSAGE_TYPE)
+STATION_ID_FULL_TYPE = 0x0D  # the whole station ID + CRC in one record (spare space)
 STATION_ID_LEN = 20
 # Every station-ID byte that reaches this script already rode inside a
 # fragment whose OWN CRC32 (the payload-level one in hf_ofdm_common.py --
@@ -1191,6 +1194,10 @@ def run_player_loop(fh, args, video, audio_worker, record=None):
     station_id_shown = None
     station_id_tentative_shown = None  # last-printed pre-CRC guess, so reprints only on an actual change
     last_block_t = None  # see STATION_ID_RESET_GAP_S below
+    # Text messages: pieces kept by (message id, length) until the CRC
+    # holds; each message reported once per session (TX repeats it)
+    message_parts = {}
+    messages_seen = set()
 
     def _on_codec2_pcm(pcm):
         # Runs on Codec2Decoder's own reader thread, not this loop's --
@@ -1440,6 +1447,44 @@ def run_player_loop(fh, args, video, audio_worker, record=None):
                         if tentative != station_id_tentative_shown:
                             station_id_tentative_shown = tentative
                             _log(f"Station ID: '{tentative}' (unconfirmed -- CRC not yet valid)")
+
+            elif rtype == STATION_ID_FULL_TYPE and len(rpayload) == STATION_ID_LEN + 4:
+                raw = bytes(rpayload[:STATION_ID_LEN])
+                if zlib.crc32(raw) & 0xFFFFFFFF == struct.unpack_from(">I", rpayload, STATION_ID_LEN)[0]:
+                    station_buf_ok = bytes(rpayload)
+                    station_id_buf[:] = station_buf_ok
+                    for k, byte in enumerate(station_buf_ok):
+                        station_id_history[k].clear()
+                        station_id_history[k].append(byte)
+                    station_id = raw.decode("ascii", "replace")
+                    if station_id != station_id_shown:
+                        station_id_shown = station_id
+                        station_id_tentative_shown = None
+                        _log(f"Station ID: '{station_id}'")
+
+            elif rtype == MESSAGE_TYPE and len(rpayload) > 3:
+                msg_id, total, offset = rpayload[0], rpayload[1], rpayload[2]
+                piece = bytes(rpayload[3:])
+                if 8 < total and offset + len(piece) <= total:
+                    key = (msg_id, total)
+                    if key not in message_parts:
+                        if len(message_parts) >= 4:      # a few at once at most
+                            message_parts.pop(next(iter(message_parts)))
+                        message_parts[key] = (bytearray(total), bytearray(total))
+                    buf, have = message_parts[key]
+                    buf[offset:offset + len(piece)] = piece
+                    have[offset:offset + len(piece)] = b"\x01" * len(piece)
+                    if all(have):
+                        body = bytes(buf[:-4])
+                        if zlib.crc32(body) & 0xFFFFFFFF == struct.unpack_from(">I", buf, total - 4)[0]:
+                            del message_parts[key]
+                            ts = struct.unpack_from(">I", body, 0)[0]
+                            text = body[4:].decode("utf-8", "replace")
+                            if (ts, text) not in messages_seen:
+                                messages_seen.add((ts, text))
+                                _log("Message: " + json.dumps({"ts": ts, "text": text}))
+                        else:
+                            have[:] = bytes(total)   # a bad piece somewhere: collect again
 
             elif rtype == VIDEO_CONFIG_TYPE and len(rpayload) >= 6 and video is not None:
                 width, height, fps_x1000 = struct.unpack_from(">HHH", rpayload, 0)

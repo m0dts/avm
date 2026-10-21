@@ -140,6 +140,17 @@ def make_reader(args, cfg):
             print(f"WARNING: mode {cfg.mode} at this width occupies {occupied / 1e3:.1f} kHz, more than this "
                   f"KiwiSDR's {capture_fs / 1e3:.2f} kS/s stream carries -- use 10 kHz (or a wideband Kiwi)",
                   file=sys.stderr)
+    elif args.sdr == "virtual":
+        # no radio: hf_ofdm_tx.py --sdr virtual on this machine (virtual_radio.py),
+        # at the rate asked for, with the LO offset where a Pluto's would put it
+        from virtual_radio import VirtualRxSource
+        reader = VirtualRxSource(args.rf_freq, capture_fs, tune_offset_hz=args.lo_offset_hz,
+                                 lo_offset_hz=0.0 if use_frontend else args.lo_offset_hz)
+        if args.freq_offset_file:   # the GUI's live RX offset, as for the other radios
+            from pluto_soapy_sink import GainFileWatcher
+            GainFileWatcher(args.freq_offset_file, reader.set_freq_offset)
+        args.radio_source = reader
+        fe_lo = args.lo_offset_hz if use_frontend else 0.0
     elif args.sdr == "hpsdr":
         # openHPSDR protocol 2 radio (ANAN-10/100, Hermes) over the network,
         # found by discovery (--pluto-uri: its address, optional). Its DDC
@@ -1868,7 +1879,7 @@ def main():
                           "--occupancy. One of DRM's official values (4.5, 5, 9, 10, 18, 20) uses "
                           "its exact spec'd carrier range; anything else (e.g. 40, 80) falls back "
                           "to a symmetric carrier-count scaling instead.")
-    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam", "8psk"], default="qpsk",
+    ap.add_argument("--modulation", choices=["qpsk", "16qam", "32qam", "8psk", "16psk"], default="qpsk",
                      help="PAYLOAD modulation (default qpsk) -- must match whatever hf_ofdm_tx.py "
                           "was given, or every payload symbol will decode to noise (the preamble/"
                           "pilots/header stay QPSK either way, so sync itself won't be affected, "
@@ -1932,7 +1943,8 @@ def main():
                           "gain-control/DC-offset/quadrature-tracking settling time -- confirmed for "
                           "real: a freshly-started RX decoded far worse than the identical settings "
                           "moments later after just restarting the RX process. 0 disables it.")
-    ap.add_argument("--sdr", choices=["pluto", "lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi", "hpsdr"],
+    ap.add_argument("--sdr", choices=["pluto", "lime", "rtlsdr", "airspy", "airspyhf", "sdrplay", "kiwi", "hpsdr",
+                                      "virtual"],
                      default="pluto",
                      help="Radio for --input pluto: 'pluto' (PlutoSDR, default), 'lime' "
                           "(LimeSDR-USB or LimeSDR Mini; manual gain only, no AGC) or 'rtlsdr' "
