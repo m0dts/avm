@@ -334,8 +334,16 @@ Say "Radios SoapySDR can see now"
 if (Test-Path $py) {
     $env:PATH = "$envDir;$envDir\Library\bin;$env:PATH"
     # errors only: the Pluto driver warns about search methods that don't
-    # apply on Windows ("Unable to scan local: -19") -- harmless noise
-    & $py -c "import SoapySDR; SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_ERROR); r = SoapySDR.Device.enumerate(); print('\n'.join('  ' + d['driver'] + ': ' + d['label'] for d in r) or '  (none found)')" 2>$null
+    # apply on Windows ("Unable to scan local: -19") -- harmless noise; and
+    # libusb's own warnings ("could not infer VID/PID of HCD"). With
+    # $ErrorActionPreference Stop, Windows PowerShell made that stderr text a
+    # terminating error, and the installer ended here, before "Done"
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $py -c "import SoapySDR; SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_ERROR); r = SoapySDR.Device.enumerate(); print('\n'.join('  ' + d['driver'] + ': ' + d['label'] for d in r) or '  (none found)')" 2>$null
+    } catch { }
+    $ErrorActionPreference = $eap
 }
 Say "Done"
 Write-Host "Start AVM from the 'AVM' shortcut (or AVM.bat in $avm)."

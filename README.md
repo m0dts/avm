@@ -11,7 +11,7 @@ picture and sound appear at the other, with a station callsign, carried by a
 digital OFDM modem 20 to 250 kHz wide.
 
 It's a complete station in one program, with a full-screen touch interface.
-It's built to run on a **Raspberry Pi 4 with a 7" touch screen**, which can
+It's built to run on a **Raspberry Pi 4 or 5 with a 7" touch screen**, which can
 transmit and receive at the same time. See [Install](#install) to set one
 up.
 
@@ -58,7 +58,8 @@ may be added later.
 
 ## Install
 
-AVM runs on a **Raspberry Pi 4**. If you already have a Portsdown DATV
+AVM runs on a **Raspberry Pi 4 or Raspberry Pi 5** (tested on a Pi 5 with
+just 1 GB of memory). If you already have a Portsdown DATV
 station, it has the right hardware (a Pi 4 with the 7" touch screen and a
 Pluto or LimeSDR): make a separate SD card for AVM, and swap cards to switch
 between Portsdown and AVM.
@@ -72,7 +73,7 @@ the older Bookworm) are not supported.
 1. Download and install **Raspberry Pi Imager** on your PC or Mac from
    [raspberrypi.com/software](https://www.raspberrypi.com/software/).
 2. In Imager, choose:
-   - **Device:** Raspberry Pi 4
+   - **Device:** your Pi (Raspberry Pi 4 or Raspberry Pi 5)
    - **Operating system:** **Raspberry Pi OS (64-bit)**, the first entry,
      with desktop. Make sure it says **Trixie** and **64-bit**.
    - **Storage:** your SD card (16 GB or larger).
@@ -104,7 +105,8 @@ bash install_avm.sh
 
 First it checks the Pi and lists what it would install or change. Nothing is
 touched until you answer **y**. It then downloads AVM into `~/avm` and
-installs everything it needs; this takes a while. When it's done it adds an
+installs everything it needs. On a Pi 5 with an average SD card this
+takes about 5 minutes; a Pi 4 takes longer. When it's done it adds an
 **AVM** icon to the menu and desktop, and an `avm` command. Reboot, then
 start AVM from the desktop icon.
 
@@ -324,6 +326,7 @@ AVM, not that every setting has been tried on it.
 | Computer | Notes |
 |---|---|
 | **Raspberry Pi 4** with 64-bit Raspberry Pi OS (Trixie, desktop) | What AVM is developed and tested on. Best with the 7" touch screen. |
+| **Raspberry Pi 5** (tested with 1 GB) with 64-bit Raspberry Pi OS (Trixie, desktop) | Tested and working. Installs in about 5 minutes on an average SD card (a Pi 4 takes longer). |
 
 ### Radios
 
