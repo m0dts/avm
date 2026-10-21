@@ -380,7 +380,7 @@ AVM, not that every setting has been tried on it.
 | Radio | TX | RX | Tuning range | Status | Notes |
 |---|:-:|:-:|---|---|---|
 | **ADALM-Pluto** | ✓ | ✓ | 70-6000 MHz* | Tested | TX and RX at once from one Pluto. On USB, or on the network at 192.168.2.1 / pluto.local. |
-| **LibreSDR** (and other boards running Pluto firmware) | ✓ | ✓ | 70-6000 MHz | Untested | Works as a Pluto. On Ethernet, AVM checks both 192.168.2.1 and 192.168.1.10 (LibreSDR's default) and uses whichever answers. |
+| **LibreSDR** (and other boards running Pluto firmware) | ✓ | ✓ | 70-6000 MHz | Tested (Tezuka firmware) | Works as a Pluto. On Ethernet, AVM checks both 192.168.2.1 and 192.168.1.10 (LibreSDR's default) and uses whichever answers. |
 | **LimeSDR-USB / LimeSDR Mini** | ✓ | ✓ | 0.1-3800 MHz | Tested | TX **or** RX, not both at once from one Lime (it can only be opened by one program). To do both, add a second radio for RX, e.g. an RTL-SDR. AVM says "LimeSDR busy" otherwise. Antenna port selectable. |
 | **RTL-SDR dongle** (RTL2832U + R820T) | | ✓ | 24-1766 MHz | Tested | Cheap RX. PPM setting to correct its crystal. |
 | **Airspy R2 / Mini** | | ✓ | 24-1800 MHz | Found by AVM, receive not yet tested | Samples at 2.5 MS/s (R2) or 3 MS/s (Mini): more CPU on a Pi than an RTL-SDR. |
