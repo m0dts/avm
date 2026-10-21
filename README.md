@@ -118,6 +118,44 @@ The first transmit or receive after installing takes a minute or two while
 the modem and codec are compiled for the Pi. The TX preview shows
 "Preparing video codec..." meanwhile. After that, starts are quick.
 
+### Windows
+
+AVM also runs on a 64-bit Windows 10 or 11 PC. **The setup uses about
+5 GB of disk space**, most of it for the Python environment AVM runs in.
+
+1. Download **install_avm.bat** from
+   [github.com/m0dts/avm](https://github.com/m0dts/avm) (open the file,
+   then **Download raw file**), and double-click it.
+2. It checks the PC first and lists what it will install, where, and
+   roughly how big, with the free disk space. Nothing is changed until you
+   answer **y**.
+3. It then installs, which takes several minutes (most of it downloading):
+   - **AVM's files** into `%USERPROFILE%\avm`.
+   - **conda**, the tool that builds the Python environment. It uses
+     radioconda, Miniforge or Anaconda if one is already installed;
+     otherwise it installs **Miniforge**, just for your user.
+   - **A private Python environment** in `%LOCALAPPDATA%\AVM\env`, made by
+     conda from the conda-forge collection: Python and the libraries AVM
+     needs (numpy, scipy, numba, PyQt5, OpenCV, PyAV, sounddevice),
+     SoapySDR, and its PlutoSDR, LimeSDR, RTL-SDR and Airspy drivers. This
+     is the large part: conda downloads ready-built copies of everything,
+     so nothing has to be compiled. It's separate from any other Python on
+     the PC, and doesn't change them.
+   - **ffmpeg**, with Opus and Codec2 audio. It uses one already on the PC
+     if it has both; otherwise it downloads the "full" build (about 450 MB)
+     into `%LOCALAPPDATA%\AVM\ffmpeg`.
+   - An **AVM** shortcut on the Desktop and in the Start menu.
+4. Start AVM from the **AVM** shortcut.
+
+No administrator rights are needed: everything goes into your own user
+folders. Everything the installer printed is saved to
+`%LOCALAPPDATA%\AVM\install.log`. Run **install_avm.bat** again to repair
+an installation; AVM's Update button keeps it up to date.
+
+On Windows, an RTL-SDR needs the WinUSB driver (from
+[Zadig](https://zadig.akeo.ie)) before AVM can see it. SDRplay radios
+aren't set up by the Windows installer.
+
 ### SDRplay RSPs
 
 An SDRplay RSP needs SDRplay's own **API**: a background service that talks
@@ -327,6 +365,7 @@ AVM, not that every setting has been tried on it.
 |---|---|
 | **Raspberry Pi 4** with 64-bit Raspberry Pi OS (Trixie, desktop) | What AVM is developed and tested on. Best with the 7" touch screen. |
 | **Raspberry Pi 5** (tested with 1 GB) with 64-bit Raspberry Pi OS (Trixie, desktop) | Tested and working. Installs in about 5 minutes on an average SD card (a Pi 4 takes longer). |
+| **Windows 10 / 11 PC** (64-bit) | Working. Its Python setup takes about 5 GB of disk space: see [Windows](#windows). |
 
 ### Radios
 
