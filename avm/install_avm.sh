@@ -427,6 +427,7 @@ else
     JOBS="$(nproc)"
     MEM_MB="$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)"
     [ "$MEM_MB" -lt 3000 ] && [ "$JOBS" -gt 2 ] && JOBS=2
+    [ "$MEM_MB" -lt 1500 ] && JOBS=1     # a 1 GB Pi: one at a time (the big files need most of it)
     echo "building AVM with $JOBS job(s) -- about 10 minutes on a Pi 4 the first time..."
     BUILD_LOG="$(mktemp)"
     if cmake -S "$AVM_DIR/gui" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >"$BUILD_LOG" 2>&1 \
