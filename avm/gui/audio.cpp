@@ -1,6 +1,6 @@
 #include "audio.h"
 
-#define MINIAUDIO_IMPLEMENTATION
+// (its implementation is miniaudio.cpp's, built once; the options as there)
 #define MA_NO_ENCODING
 #define MA_NO_DECODING
 #define MA_NO_GENERATION

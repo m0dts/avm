@@ -87,11 +87,16 @@ else()
 endif()
 
 add_executable(avm_gui WIN32
-    main.cpp style.cpp widgets.cpp pages.cpp mainwindow.cpp media.cpp audio.cpp capture.cpp media_tx.cpp link_plan.cpp recorder.cpp touch.cpp web.cpp updater.cpp
+    main.cpp style.cpp widgets.cpp pages.cpp mainwindow.cpp media.cpp audio.cpp miniaudio.cpp capture.cpp media_tx.cpp link_plan.cpp recorder.cpp touch.cpp web.cpp updater.cpp
     style.h widgets.h pages.h mainwindow.h media.h audio.h capture.h media_tx.h link_plan.h recorder.h touch.h web.h updater.h)
 target_include_directories(avm_gui PRIVATE third_party ${AUDIO_INCLUDES} ${FFMPEG_INCLUDES})
 target_link_libraries(avm_gui PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network ${AUDIO_LIBS} ${FFMPEG_LIBS})
 add_dependencies(avm_gui avm)    # (loaded at run time, not linked: QLibrary)
+# the GUI at -O2 (after the build type's -O3, so it wins): no difference you'd see,
+# about a quarter less compile time on a Pi; the library keeps its -O3
+if(NOT MSVC)
+    target_compile_options(avm_gui PRIVATE -O2)
+endif()
 if(UNIX)
     target_link_libraries(avm_gui PRIVATE ${CMAKE_DL_LIBS} pthread m)   # miniaudio loads ALSA / PulseAudio at run time
 endif()
