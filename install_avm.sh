@@ -508,22 +508,22 @@ Icon=network-transmit-receive
 Terminal=false
 Categories=Network;HamRadio;"
 DESKTOP_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")"
-# launchers an earlier AVM made (any name) for the Python GUI: switched over
-# to this one, not left starting the old GUI beside a new icon
-OLD="$(grep -l 'touch_gui.py' "$HOME"/.local/share/applications/*.desktop "$DESKTOP_DIR"/*.desktop 2>/dev/null \
-       | grep -v '/avm.desktop$')"
+# launchers an earlier AVM made under other names (hfmodem-touch.desktop...)
+# for the Python GUI -- or already switched to this one by a 1.1.0 test
+# build: removed, avm.desktop (written below) is the one AVM icon
+OLD="$(grep -l -e 'touch_gui.py' -e "Exec=$AVM_GUI" "$HOME"/.local/share/applications/*.desktop \
+       "$DESKTOP_DIR"/*.desktop 2>/dev/null | grep -v '/avm.desktop$')"
 if [ $CHECK_ONLY = 1 ]; then
     [ -f "$HOME/.local/share/applications/avm.desktop" ] && grep -q "$AVM_GUI" "$HOME/.local/share/applications/avm.desktop" \
         && echo "present" || echo "missing or for the Python GUI (would be set to $AVM_GUI)"
     plan "menu entry + desktop icon" "~/.local/share/applications, Desktop"
     plan "'avm' command" "$HOME/.local/bin/avm"
-    for f in $OLD; do echo "launcher for the old Python GUI (would be switched over): $f"; done
+    for f in $OLD; do echo "old AVM launcher (would be removed): $f"; done
 else
     mkdir -p "$HOME/.local/share/applications"
     echo "$DESK" > "$HOME/.local/share/applications/avm.desktop"
     for f in $OLD; do
-        echo "$DESK" > "$f"
-        echo "switched to the new AVM: $f"
+        rm -f "$f" && echo "old AVM launcher removed: $f"
     done
     if [ -d "$DESKTOP_DIR" ]; then
         echo "$DESK" > "$DESKTOP_DIR/avm.desktop"
