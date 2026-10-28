@@ -328,6 +328,9 @@ int main(int argc, char** argv) {
     app.setStyleSheet(avm::stylesheet(avm::RX_ACCENT));
 
     avm::settings().remove("tx/message");   // the TX message lasts one session: none until one is set
+    // TX starts on the test picture and tone each session: the camera and
+    // microphone only once chosen (not opened just because AVM started)
+    avm::settings().setValue("tx/video", "test");
     avm::MainWindow w(a.contains("--demo"));
     TouchMarker marker;
     if (shots.isEmpty()) app.installEventFilter(&marker);
