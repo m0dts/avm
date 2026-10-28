@@ -151,9 +151,16 @@ else
     SRC="$(find "$TMP" -maxdepth 4 -path '*/gui/CMakeLists.txt' -printf '%h\n' | head -n 1)"
     SRC="${SRC%/gui}"
     [ -n "$SRC" ] || die "the download has no AVM source (gui/CMakeLists.txt) ($URL)"
-    # copy over the top: settings live in ~/.config, logs in gui_logs/ are kept
+    # copy over the top: settings live in ~/.config, logs in gui_logs/ are kept.
+    # Only the files that changed: the rest keep their dates, so the build
+    # (step 3) recompiles just what's new -- a download dates every file now,
+    # and copying them all rebuilt everything on every update
     mkdir -p "$AVM_DIR"
-    cp -a "$SRC"/. "$AVM_DIR"/ || die "couldn't copy into $AVM_DIR"
+    (cd "$SRC" && find . -type f -print0) | while IFS= read -r -d '' f; do
+        if ! cmp -s "$SRC/$f" "$AVM_DIR/$f"; then
+            mkdir -p "$AVM_DIR/$(dirname "$f")" && cp -p "$SRC/$f" "$AVM_DIR/$f" || exit 1
+        fi
+    done || die "couldn't copy into $AVM_DIR"
     rm -rf "$TMP"
     echo "installed AVM into $AVM_DIR"
     # Carry on with the installer just downloaded, not this (older) copy --
@@ -228,7 +235,7 @@ have_pkg soapysdr0.8-module-lms7 || { have_pkg soapysdr0.7-module-lms7 && SOAPY_
 # CMake, Qt, the FFmpeg libraries (camera, microphone, recordings), Opus and
 # Codec2, SoapySDR (loaded at run time) with the radio modules. The tools to
 # build a radio driver from source are added below, only when one is needed.
-PKGS="g++ cmake pkg-config qt6-base-dev
+PKGS="g++ cmake pkg-config ccache qt6-base-dev
       libavdevice-dev libavformat-dev libavcodec-dev libavfilter-dev libswscale-dev libavutil-dev
       libopus-dev libcodec2-dev
       libsoapysdr${SOAPY_ABI} soapysdr-tools

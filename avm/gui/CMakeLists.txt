@@ -7,6 +7,13 @@ project(avm_gui LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+# ccache where it's installed (the installer adds it): a file whose source and
+# flags haven't changed comes from the cache in a moment, not recompiled
+find_program(AVM_CCACHE ccache)
+if(AVM_CCACHE)
+    set(CMAKE_C_COMPILER_LAUNCHER ${AVM_CCACHE})
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${AVM_CCACHE})
+endif()
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network)
