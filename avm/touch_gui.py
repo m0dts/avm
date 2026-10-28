@@ -694,6 +694,14 @@ def main():
     lock = QtCore.QLockFile(os.path.join(os.path.expanduser("~"), ".config", "hfmodem", "avm.lock"))
     lock.setStaleLockTime(0)              # only a dead process's lock is stale
     os.makedirs(os.path.join(os.path.expanduser("~"), ".config", "hfmodem"), exist_ok=True)
+    # restarted after an update (os.execv: the same process number): the lock is
+    # this process's own from before -- not another AVM's
+    ok, pid, _host, _app = lock.getLockInfo()
+    if ok and pid == os.getpid():
+        try:
+            os.remove(lock.fileName())
+        except OSError:
+            pass
     if not os.environ.get("AVM_ALLOW_SECOND") and not lock.tryLock(100):
         QtWidgets.QMessageBox.warning(None, "AVM", "AVM is already running.\n\n"
                                       "Use the AVM window that's open (it may be behind other "
