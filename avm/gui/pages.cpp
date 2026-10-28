@@ -1047,7 +1047,21 @@ void RxPage::showKiwiInfo() {
 
 void RxPage::setSpectrumAverages(int n) { spectrum_->setAverages(n); }
 
+// Duplex works with QPSK only: while it's chosen (Config, Experimental), the
+// page's other modulations are greyed out, and QPSK picked if one of them was
+static void limitDuplexModulations(Segmented* mod) {
+    QSettings& s = settings();
+    const bool duplex = s.value("experimental", false).toBool() && s.value("duplex", "off").toString() != "off";
+    for (const char* k : {"8psk", "16psk", "16qam", "32qam"})
+        if (QPushButton* b = mod->button(k)) b->setEnabled(!duplex);
+    if (duplex && mod->value() != "qpsk" && mod->button("qpsk")) {
+        mod->setValue("qpsk");
+        emit mod->changed("qpsk");      // (saved, and the link re-planned, as a tap)
+    }
+}
+
 void RxPage::refreshDuplex() {
+    limitDuplexModulations(mod_);
     if (!running() && !pending_ && run_->text() != runLabel() &&
         (run_->text() == "RX" || run_->text() == "TX+RX"))
         run_->setText(runLabel());
@@ -1448,6 +1462,7 @@ double TxPage::linkBps() const {
 }
 
 void TxPage::refreshDuplex() {
+    limitDuplexModulations(mod_);
     const bool duplex = !duplexRole().isEmpty();
     run_->setVisible(!duplex || running());
     if (duplex && !running()) status_->setText("Duplex: start and stop on the RX page (TX+RX)");
