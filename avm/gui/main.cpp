@@ -386,6 +386,10 @@ int main(int argc, char** argv) {
         int q = a.indexOf("--quit-after");
         double quit_s = q >= 0 && q + 1 < a.size() ? a[q + 1].toDouble() : 0;
         if (what.contains("rx")) QTimer::singleShot(500, &w, [&w] { avm::guiLog("GUI", "auto: RX start"); w.rx()->start(); });
+        if (what.contains("rxagain")) {     // RX stopped at 5 s and started again (a restart: the radio reopened)
+            QTimer::singleShot(5000, &w, [&w] { avm::guiLog("GUI", "auto: RX stop"); w.rx()->stop(); });
+            QTimer::singleShot(5500, &w, [&w] { avm::guiLog("GUI", "auto: RX start again"); w.rx()->start(); });
+        }
         if (what.contains("tx")) QTimer::singleShot(3000, &w, [&w] { avm::guiLog("GUI", "auto: TX start"); w.tx()->start(); });
         if (what.contains("rec")) QTimer::singleShot(8000, &w, [&w] { avm::guiLog("GUI", "auto: record"); w.rx()->record(); });
         auto* watch = new QTimer(&w);      // the pages' status lines as they change

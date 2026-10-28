@@ -132,6 +132,44 @@ struct Api {
 
 inline Api& api() { static Api a; return a; }
 
+// One SoapySDR device per radio in this process, shared by its receiver and
+// transmitter (counted): opened apart -- as the Python AVM's two programs did --
+// stopping RX closed it under the running TX (a Pluto: libiio crashed in the
+// transmitter's iio_buffer_push). The same args = the same radio.
+struct DevicePool {
+    struct Entry { std::string args; void* dev; int users; };
+    std::mutex mu;
+    std::vector<Entry> open;
+};
+inline DevicePool& device_pool() { static DevicePool p; return p; }
+
+inline void* open_device(const std::string& args) {
+    Api& A = api();
+    DevicePool& P = device_pool();
+    std::lock_guard<std::mutex> g(P.mu);
+    for (auto& e : P.open)
+        if (e.args == args) { ++e.users; return e.dev; }
+    void* d = A.make ? A.make(args.c_str()) : nullptr;
+    if (d) P.open.push_back({args, d, 1});
+    return d;
+}
+
+inline void close_device(void* dev) {
+    if (!dev) return;
+    Api& A = api();
+    DevicePool& P = device_pool();
+    std::lock_guard<std::mutex> g(P.mu);
+    for (size_t i = 0; i < P.open.size(); ++i)
+        if (P.open[i].dev == dev) {
+            if (--P.open[i].users == 0) {
+                if (A.unmake) A.unmake(dev);
+                P.open.erase(P.open.begin() + (long)i);
+            }
+            return;
+        }
+    if (A.unmake) A.unmake(dev);     // (not from the pool)
+}
+
 // The radios connected now (touch_widgets.detect_radios / detect_rx_radios):
 // one per Pluto route (USB, or its address), LimeSDR by model and serial, and
 // the receive-only SoapySDR radios. driver: the --sdr name; uri: a Pluto's.
@@ -258,15 +296,15 @@ public:
         if (c.driver == "pluto") args = "driver=plutosdr" + (c.uri.empty() ? std::string() : ",uri=" + c.uri);
         else args = "driver=" + c.driver;
         avm_logf("Opening %s RX (%s)...\n", c.driver.c_str(), args.c_str());
-        dev_ = A.make(args.c_str());
+        dev_ = open_device(args);
         if (!dev_ && c.driver == "pluto" && !c.uri.empty()) {
             // the chosen route failed: the other default addresses, then libiio's own search
             for (const char* alt : {"ip:192.168.2.1", "ip:192.168.1.10"})
-                if (c.uri != alt && (dev_ = A.make((std::string("driver=plutosdr,uri=") + alt).c_str()))) {
+                if (c.uri != alt && (dev_ = open_device(std::string("driver=plutosdr,uri=") + alt))) {
                     avm_logf("PlutoSDR RX: found at %s\n", alt);
                     break;
                 }
-            if (!dev_) dev_ = A.make("driver=plutosdr");
+            if (!dev_) dev_ = open_device("driver=plutosdr");
         }
         if (!dev_) { error = std::string("could not open the radio: ") + (A.lastError ? A.lastError() : "?"); return false; }
         double want = c.rate;
@@ -398,7 +436,7 @@ public:
             if (A.deactivateStream) A.deactivateStream(dev_, stream_, 0, 0);
             if (A.closeStream) A.closeStream(dev_, stream_);
         }
-        if (dev_ && A.unmake) A.unmake(dev_);
+        close_device(dev_);     // (the shared radio: closed once its last user is done)
     }
 
 private:
@@ -503,8 +541,8 @@ public:
         std::string args = c.driver == "lime" ? "driver=lime"
                                               : "driver=plutosdr" + (c.uri.empty() ? std::string() : ",uri=" + c.uri);
         avm_logf("Opening %s TX (%s)...\n", c.driver.c_str(), args.c_str());
-        dev_ = A.make(args.c_str());
-        if (!dev_ && c.driver == "pluto" && !c.uri.empty()) dev_ = A.make("driver=plutosdr");
+        dev_ = open_device(args);
+        if (!dev_ && c.driver == "pluto" && !c.uri.empty()) dev_ = open_device("driver=plutosdr");
         if (!dev_) { error = std::string("could not open the radio: ") + (A.lastError ? A.lastError() : "?"); return false; }
         A.setSampleRate(dev_, TX, 0, c.rate);
         rate = A.getSampleRate ? A.getSampleRate(dev_, TX, 0) : c.rate;
@@ -571,7 +609,7 @@ public:
             if (A.deactivateStream) A.deactivateStream(dev_, stream_, 0, 0);
             if (A.closeStream) A.closeStream(dev_, stream_);
         }
-        if (dev_ && A.unmake) A.unmake(dev_);
+        close_device(dev_);     // (the shared radio: closed once its last user is done)
     }
 
 private:
