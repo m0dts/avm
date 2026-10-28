@@ -21,6 +21,11 @@ $avm = Split-Path -Parent $gui
 $dist = Join-Path $avm "dist"
 $out = Join-Path $dist "AVM"
 
+# an AVM running from dist\AVM holds its files: stop before deleting any of them
+if (Get-Process avm_gui -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$out\*" }) {
+    throw "AVM is running from $out -- close it first"
+}
+
 # ---- build (portable)
 $env:AVM_BUILD_DIR = "build-release"
 $env:AVM_CMAKE_ARGS = "-DAVM_NATIVE=OFF"
