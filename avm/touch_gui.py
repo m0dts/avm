@@ -15,14 +15,19 @@ CANDIDATES = (os.path.join(HERE, "gui", "build", "avm_gui"),       # Linux: buil
 
 
 def main():
+    # what the Python GUI set for itself, inherited through its restart: it forced
+    # QT_QPA_PLATFORM=wayland under Wayland, and the C++ AVM's Qt (no Wayland
+    # plug-in on a Pi) then quit at once instead of using X11 -- Qt chooses
+    env = dict(os.environ)
+    env.pop("QT_QPA_PLATFORM", None)
     for exe in CANDIDATES:
         if os.path.isfile(exe) and os.access(exe, os.X_OK):
             if sys.platform == "win32":
                 import subprocess
-                subprocess.Popen([exe] + sys.argv[1:], cwd=os.path.dirname(exe))
+                subprocess.Popen([exe] + sys.argv[1:], cwd=os.path.dirname(exe), env=env)
                 return
             os.chdir(os.path.dirname(exe))
-            os.execv(exe, [exe] + sys.argv[1:])
+            os.execve(exe, [exe] + sys.argv[1:], env)
     if sys.platform == "win32":
         how = "run install_avm.bat (in your avm folder) again"
     else:
