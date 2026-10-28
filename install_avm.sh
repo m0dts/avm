@@ -119,7 +119,10 @@ echo "AVM:    $AVM_DIR"
 [ "$(id -u)" = 0 ] && die "Run as your normal user, not root (it uses sudo where needed)."
 SUDO=sudo
 # Debian installed with a root password leaves the user without sudo
-if [ $CHECK_ONLY = 0 ] && ! { command -v sudo >/dev/null && sudo -v; }; then
+# (sudo -n true first: "sudo -v" asks for a password whenever ANY rule for the
+# user wants one -- e.g. the sudo group's -- even with a NOPASSWD: ALL rule too,
+# and from AVM's Update button there's no terminal to type it in)
+if [ $CHECK_ONLY = 0 ] && ! { command -v sudo >/dev/null && { sudo -n true 2>/dev/null || sudo -v; }; }; then
     die "This needs sudo for your user ($USER). As root, run once:
      su -c 'apt-get install -y sudo && usermod -aG sudo $USER'
    then log out and back in, and run this installer again."
