@@ -37,6 +37,7 @@ Get-ChildItem $built | Where-Object {
 } | Copy-Item -Destination $out -Recurse -Force
 Copy-Item (Join-Path $avm "c++\avm.dll") "$out\c++\"
 Copy-Item (Join-Path $avm "VERSION") $out
+Copy-Item (Join-Path $avm "mer_thresholds.json") $out     # the RX status line's "MER needed" (pages.cpp)
 # SoapySDR, its modules, and every DLL they need (objdump's import lists,
 # followed to the end; Windows' own and what Qt's deployment already has are skipped)
 $bin = Join-Path $SoapyEnv "Library\bin"
