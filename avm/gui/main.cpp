@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
         int k = a.indexOf("--settings-file");
         if (k >= 0 && k + 1 < a.size()) avm::setSettingsFile(a[k + 1]);
         else if (!a.contains("--screenshots") && !a.contains("--plan")) importPythonSettings();
-        avm::setVideoSmooth(avm::settings().value("tx/video_smooth", false).toBool());   // (link_plan.h)
+        avm::setVideoSmooth(avm::settings().value("tx/video_smooth", true).toBool());   // (link_plan.h)
         k = a.indexOf("--log");
         if (k >= 0 && k + 1 < a.size()) avm::setLogFile(a[k + 1]);
         else if (!a.contains("--screenshots") && !a.contains("--plan")) {

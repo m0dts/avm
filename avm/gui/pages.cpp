@@ -1379,7 +1379,7 @@ TxPage::TxPage(QWidget* parent) : QWidget(parent) {
     connect(mode_, &Segmented::changed, this, [this] { enforceModeLimits(mode_, bw_, mod_); });
     for (auto* w : {mode_, bw_, mod_}) connect(w, &Segmented::changed, this, &TxPage::linkChanged);
     applyModeType();
-    showPlan();
+    linkChanged();     // the picture size, frame rate and audio for the mode loaded (or the defaults)
     connect(run_, &QPushButton::clicked, this, &TxPage::toggleRun);
     connect(&link_, &Link::line, this, &TxPage::onLine);
     connect(&link_, &Link::stateChanged, this, [this](bool on) {
@@ -1819,6 +1819,7 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         settings().setValue("tx/video_smooth", v == "smooth");
         setVideoSmooth(v == "smooth");
         emit txSettingChanged();
+        emit motionChanged();     // the TX page re-plans its picture size and frame rate
     });
     {   // the picture for the Image source
         auto* img = new ElideLabel(s.value("tx/image").toString().isEmpty() ? QString("(none)") : s.value("tx/image").toString());

@@ -114,6 +114,7 @@ MainWindow::MainWindow(bool demo, QWidget* parent) : QWidget(parent) {
     connect(config_, &ConfigPage::callsignChanged, tx_, &TxPage::callsignChanged);
     connect(config_, &ConfigPage::rxSettingChanged, rx_, &RxPage::rxSettingChanged);
     connect(config_, &ConfigPage::txSettingChanged, tx_, &TxPage::txSettingChanged);
+    connect(config_, &ConfigPage::motionChanged, tx_, &TxPage::replan);
     connect(config_, &ConfigPage::spectrumAveragesChanged, rx_, &RxPage::setSpectrumAverages);
     connect(config_, &ConfigPage::modeTypeChanged, this, [this] {
         tx_->applyModeType();

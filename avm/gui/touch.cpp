@@ -12,6 +12,7 @@
 #include <QRegularExpression>
 #include <QTime>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLibrary>
 #include <QMessageBox>
 #include <QScroller>
@@ -38,6 +39,16 @@ void coverWindow(QDialog* d, QWidget* parent) {
         d->raise();
     } else if (top) d->setGeometry(top->geometry());
     else d->resize(ui.px(800), ui.px(480));
+}
+
+// a USB keyboard's keys to this dialog (its buttons never take the focus): once
+// it's up -- drawn inside the window, as a window of its own
+static void takeKeyboard(QDialog* d) {
+    d->setFocusPolicy(Qt::StrongFocus);
+    QTimer::singleShot(0, d, [d] {
+        d->activateWindow();
+        d->setFocus(Qt::OtherFocusReason);
+    });
 }
 
 void embedDialog(QDialog* d, QWidget* parent) {
@@ -266,6 +277,17 @@ KeypadDialog::KeypadDialog(const QString& title, const QString& text, QWidget* p
     connect(ok, &QPushButton::clicked, this, &QDialog::accept);
     lay->addLayout(row);
     coverWindow(this, parent);
+    takeKeyboard(this);
+}
+
+void KeypadDialog::keyPressEvent(QKeyEvent* e) {
+    const int k = e->key();
+    if (k >= Qt::Key_0 && k <= Qt::Key_9) key(QString(QChar('0' + (k - Qt::Key_0))));
+    else if (k == Qt::Key_Period || k == Qt::Key_Comma) key(".");
+    else if (k == Qt::Key_Backspace || k == Qt::Key_Delete) key(QString::fromUtf8("⌫"));
+    else if (k == Qt::Key_Return || k == Qt::Key_Enter) accept();
+    else if (k == Qt::Key_Escape) reject();
+    else QDialog::keyPressEvent(e);
 }
 
 void KeypadDialog::key(const QString& k) {
@@ -357,8 +379,23 @@ KeyboardDialog::KeyboardDialog(const QString& title, const QString& text, int ma
     button("Cancel", [this] { reject(); });
     button("OK", [this] { accept(); });
     lay->addLayout(row);
+    allowed_ = rows.join(QString()) + (spaceBar ? " " : "");
     set(text);
     coverWindow(this, parent);
+    takeKeyboard(this);
+}
+
+void KeyboardDialog::keyPressEvent(QKeyEvent* e) {
+    const int k = e->key();
+    if (k == Qt::Key_Backspace) { set(text_.left(text_.size() - 1)); return; }
+    if (k == Qt::Key_Return || k == Qt::Key_Enter) { accept(); return; }
+    if (k == Qt::Key_Escape) { reject(); return; }
+    for (QChar c : e->text()) {
+        if (!allowed_.contains(c) && allowed_.contains(c.toUpper())) c = c.toUpper();   // (callsigns: capitals only)
+        if (!allowed_.contains(c) && allowed_.contains(c.toLower())) c = c.toLower();
+        if (allowed_.contains(c) && text_.size() < max_) set(text_ + c);
+    }
+    if (e->text().isEmpty()) QDialog::keyPressEvent(e);
 }
 
 void KeyboardDialog::set(const QString& t) {

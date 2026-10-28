@@ -90,6 +90,8 @@ class KeypadDialog : public QDialog {
 public:
     KeypadDialog(const QString& title, const QString& text, QWidget* parent);
     bool value(double* v) const;
+protected:
+    void keyPressEvent(QKeyEvent* e) override;   // a USB keyboard too: digits, '.', Backspace, Enter, Esc
 private:
     void key(const QString& k);
     QLabel* display_;
@@ -124,10 +126,15 @@ public:
     KeyboardDialog(const QString& title, const QString& text, int maxLen, QWidget* parent,
                    const QStringList& rows = ROWS, bool spaceBar = false);
     QString text() const { return text_.trimmed(); }
+protected:
+    // a USB keyboard too: the characters the keys offer (lower case typed as
+    // upper where only capitals are offered), Backspace, Enter (OK), Esc (Cancel)
+    void keyPressEvent(QKeyEvent* e) override;
 private:
     void set(const QString& t);
     QLabel* display_;
     QString text_;
+    QString allowed_;     // every character the on-screen keys offer
     int max_;
 };
 

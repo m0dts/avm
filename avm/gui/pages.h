@@ -215,6 +215,7 @@ public:
     void applyModeType();
     void callsignChanged();       // set in Config: re-planned, and restart to apply while sending
     void txSettingChanged() { markPending(); if (!link_.running()) showPlan(); }
+    void replan() { linkChanged(); }    // Config's Motion changed: the pickers to the new plan
     void refreshDuplex();         // duplex: no TX button here (RX's TX+RX runs both)
 signals:
     void runningChanged(bool running);
@@ -277,6 +278,7 @@ signals:
     void callsignChanged();
     void rxSettingChanged();
     void txSettingChanged();      // a TX setting: restart to apply while sending
+    void motionChanged();         // Motion (Sharp / Smooth): the TX plan changes
     void duplexChanged();
     void spectrumAveragesChanged(int n);
 private:
