@@ -54,6 +54,12 @@ import numpy as np
 
 import hf_ofdm_common as ofdm
 
+# AVM_CPP=1: the modem on its C++ kernels (c++/avm_cpp.py; same results)
+if os.environ.get("AVM_CPP", "0") not in ("", "0"):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "c++"))
+    import avm_cpp
+    avm_cpp.install_if_enabled()
+
 FRAG_HEADER = struct.Struct(">HHI")  # frag_index, total_frags, total_len
 
 
@@ -152,14 +158,16 @@ def make_reader(args, cfg):
         args.radio_source = reader
         fe_lo = args.lo_offset_hz if use_frontend else 0.0
     elif args.sdr == "hpsdr":
-        # openHPSDR protocol 2 radio (ANAN-10/100, Hermes) over the network,
+        # openHPSDR radio (protocol 2: ANAN-10/100, Hermes; protocol 1: Hermes-Lite 2,
+        # Radioberry) over the network,
         # found by discovery (--pluto-uri: its address, optional). Its DDC
         # delivers IQ centred on --rf-freq (no LO offset) at the lowest of
         # its rates that carries the mode with room to spare -- not the
         # Pluto-style rate the GUI passes, which would only cost CPU here.
-        from hpsdr_source import HpsdrRxSource
+        # (protocol 1 -- Hermes-Lite 2, Radioberry -- when that's what answers)
+        from hpsdr_source import open_rx
         occupied = len(cfg.data_bins) * cfg.carrier_spacing
-        reader = HpsdrRxSource(args.pluto_uri, args.rf_freq, sample_rate_hz=max(48000.0, 1.3 * occupied),
+        reader = open_rx(args.pluto_uri, args.rf_freq, sample_rate_hz=max(48000.0, 1.3 * occupied),
                                rx_gain_db=args.rx_gain, antenna=args.sdr_antenna,
                                gain_file=args.gain_file, freq_offset_file=args.freq_offset_file)
         args.radio_source = reader
@@ -573,9 +581,23 @@ def _search_integer_cfo(cfg, rx, start_index, cfo_hz, prior_k, cfo_memo):
     symbols are corrected -- all the search reads -- not the several frames'
     worth it used to be handed."""
     n_header = ofdm._header_symbol_plan(cfg)[-1] + 1
-    seg = rx[start_index:start_index + cfg.preamble_len + n_header * cfg.symbol_len]
-    after_preamble = ofdm.apply_cfo_correction(seg, cfo_hz, cfg.fs)[cfg.preamble_len:]
-    k, confidence = ofdm.resolve_integer_cfo(cfg, after_preamble, prior_k=prior_k)
+
+    def search(s):
+        seg = rx[s:s + cfg.preamble_len + n_header * cfg.symbol_len]
+        after_preamble = ofdm.apply_cfo_correction(seg, cfo_hz, cfg.fs)[cfg.preamble_len:]
+        return ofdm.resolve_integer_cfo(cfg, after_preamble, prior_k=prior_k)
+
+    k, confidence = search(start_index)
+    # The sync's start is the earliest the frame can begin (a cyclic prefix
+    # before its correlation peak); in a long-prefix mode the frame often
+    # starts well after it, and FFT windows that early tilt every carrier's
+    # phase so steeply that the pilots can't be interpolated -- mode C found
+    # k=-4 at 0.76 for a 37 Hz offset, and lost its first fragments whenever
+    # the input came all at once. Unsure: half a prefix later too, the surer kept.
+    if confidence < 0.95:
+        k2, confidence2 = search(start_index + cfg.n_cp // 2)
+        if confidence2 > confidence:
+            k, confidence = k2, confidence2
     if cfo_memo is not None:
         cfo_memo[start_index] = (k, confidence)
     return k, confidence
@@ -1952,8 +1974,8 @@ def main():
                           "0.9-3.2 MS/s, e.g. 1024000), 'airspy' (Airspy R2/Mini), 'airspyhf' "
                           "(Airspy HF+) or 'sdrplay' (SDRplay RSP), receive only, at their nearest "
                           "offered sample rate; 'kiwi' (a KiwiSDR over the network, --pluto-uri "
-                          "host:port, at the rate it sends, ~12 kS/s); 'hpsdr' (an openHPSDR protocol 2 radio "
-                          "such as an ANAN-10/100 on the network, receive only, found by discovery; "
+                          "host:port, at the rate it sends, ~12 kS/s); 'hpsdr' (an openHPSDR radio "
+                          "such as an ANAN-10/100, Hermes-Lite 2 or Radioberry on the network, receive only, found by discovery; "
                           "--pluto-uri its IP if several; --sdr-antenna ANT1-3; --rx-gain 0-31 drives "
                           "its step attenuator, 31 = no attenuation).")
     ap.add_argument("--invert-spectrum", action="store_true",

@@ -47,6 +47,7 @@ TX_AMPLITUDE_SC = 0.3
 
 
 
+CALLSIGN_MAX = 16   # callsign / message characters (TX page)
 LOW_LINK_KBPS = 16   # TX audio default: Codec2 on links slower than this, else Opus
 
 class _TxEngine(media_tx_gui.MediaTxWindow):
@@ -270,8 +271,10 @@ class TxPage(QtWidgets.QWidget):
         sl.addWidget(self.res, 2)
         # callsign / short message, sent as the station ID (media_tx_framer
         # --station-id: 20 characters, repeated every 24 fragments)
-        self.callsign = tw.TextButton("Callsign / message", s_get(settings, "tx_callsign", ""),
-                                      max_len=media_tx_framer.STATION_ID_LEN)
+        # 16 characters (it shares the RX picture's top row with the lock
+        # lamps); still sent as the framer's fixed 20, space-padded
+        self.callsign = tw.TextButton("Callsign / message", s_get(settings, "tx_callsign", "")[:CALLSIGN_MAX],
+                                      max_len=CALLSIGN_MAX)
         # callsign and radio (with its Lime port) live on the Config tab
         rows = [("Source", src_row), ("Audio", self.audio), ("FPS", self.fps),
                 ("Freq", self.freq), ("TX gain", self.gain),

@@ -1256,7 +1256,7 @@ def saved_bandwidth(value):
 
 
 RADIO_NAMES = {"pluto": "PlutoSDR", "lime": "LimeSDR", "rtlsdr": "RTL-SDR",
-               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay", "kiwi": "KiwiSDR", "hpsdr": "ANAN (HPSDR)",
+               "airspy": "Airspy", "airspyhf": "Airspy HF+", "sdrplay": "SDRplay", "kiwi": "KiwiSDR", "hpsdr": "HPSDR (ANAN, Hermes-Lite, Radioberry)",
                "virtual": "Virtual radio"}   # TX to RX on this machine, no hardware (virtual_radio.py)
 # USB vendor:product IDs per radio, for the USB watchdog (touch_gui). A radio
 # that isn't on USB at all (e.g. a Pluto on the network) simply isn't watched.
@@ -1355,11 +1355,11 @@ def radio_present(sdr, uri=None):
         host = (uri or "").replace("ip:", "").split(":")[0] or None
         radios = hpsdr_source.discover(host)
         if not radios:
-            return False, "ANAN/HPSDR radio not answering on the network -- check it's on and connected"
+            return False, "HPSDR radio not answering on the network -- check it's on and connected"
         ip, board, busy = radios[0]
         if busy:
-            return False, f"ANAN/HPSDR {ip} is in use by another program -- close it first"
-        return True, f"ANAN ({board}) at {ip}"
+            return False, f"HPSDR {ip} is in use by another program -- close it first"
+        return True, f"HPSDR {board} at {ip}"
     devs = usb_devices()
     if devs is not None:
         if USB_IDS.get(sdr, set()) & devs:
@@ -1418,11 +1418,11 @@ def detect_rx_radios():
             found.append(f"SDRplay {model} {kw.get('serial', '')[-6:]}".strip())
     except Exception:
         pass
-    # ANAN / openHPSDR protocol 2 radios on the network (discovery, ~0.6 s)
+    # openHPSDR radios on the network, protocol 2 (ANAN) and 1 (Hermes-Lite 2, Radioberry)
     try:
         import hpsdr_source
         for ip, board, busy in hpsdr_source.discover():
-            found.append(f"ANAN {board} {ip}{' (in use)' if busy else ''}")
+            found.append(f"HPSDR {board} {ip}{' (in use)' if busy else ''}")
     except Exception:
         pass
     # KiwiSDR: over the network, so always offered (checked when RX starts)
@@ -1503,7 +1503,7 @@ class RadioPicker(Picker):
     search_in_background = True  # the radio search takes ~1.7 s on a Pi 4
 
     SHORT = {"pluto": "Pluto", "lime": "Lime", "rtlsdr": "RTL", "airspy": "Airspy", "airspyhf": "HF+",
-             "sdrplay": "SDRplay", "kiwi": "Kiwi", "hpsdr": "ANAN", "virtual": "Virtual"}  # fits beside the frequency
+             "sdrplay": "SDRplay", "kiwi": "Kiwi", "hpsdr": "HPSDR", "virtual": "Virtual"}  # fits beside the frequency
 
     def __init__(self, title, sdr, rx=False, pluto_uri=""):
         allowed = RADIO_NAMES if rx else {k: v for k, v in RADIO_NAMES.items() if k not in RX_ONLY_RADIOS}
@@ -1532,7 +1532,7 @@ class RadioPicker(Picker):
                else "airspy" if label.startswith("Airspy")
                else "sdrplay" if label.startswith("SDRplay")
                else "kiwi" if label.startswith("KiwiSDR")
-               else "hpsdr" if label.startswith("ANAN")
+               else "hpsdr" if label.startswith(("HPSDR", "ANAN"))
                else "virtual" if label.startswith("Virtual") else None)
         if sdr == "pluto":
             self.pluto_uri = PLUTO_URIS.get(label, "")

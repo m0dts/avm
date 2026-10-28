@@ -17,19 +17,20 @@
 # What it does (each step is skipped if already done; safe to re-run):
 #   0. AVM itself: from GitHub, unless this script sits in / beside an AVM
 #      folder already (a copied release folder)
-#   1. apt packages: Python libs, Qt5, SoapySDR + Lime and RTL-SDR modules,
-#      libiio, ffmpeg (with Opus and Codec2), arecord, pw-cat, v4l2-ctl
+#   1. apt packages: the compiler and CMake, Qt 6, the FFmpeg, Opus and Codec2
+#      libraries, SoapySDR + Lime and RTL-SDR modules, libiio, pw-cat, v4l2-ctl
 #   2. SoapyPlutoSDR: from apt if offered, else built from source
-#   3. ~/venv (with system site-packages) + pyqtgraph and sounddevice
+#   3. AVM built from its source (C++: the GUI and the modem library;
+#      ~10 minutes on a Pi 4 the first time, quick after that)
 #   4. udev rules / RTL-SDR TV-driver blacklist, user groups
-#   5. desktop launcher (menu + desktop icon) for the touch GUI
-# Then it checks every module imports and lists the radios Soapy can see.
+#   5. desktop launcher (menu + desktop icon) and an 'avm' command
+# Then it lists the radios Soapy can see. AVM needs no Python.
 # The whole script is one { } block, so bash reads it all before running:
 # --update replaces this file while it runs.
 {
 set -u
 AVM_REPO="${AVM_REPO:-m0dts/avm}"
-AVM_BRANCH="${AVM_BRANCH:-main}"
+AVM_BRANCH="${AVM_BRANCH:-}"     # (default below: the remembered test branch, else main)
 CHECK_ONLY=0
 UPDATE=0
 ASSUME_YES=0
@@ -46,14 +47,19 @@ done
 # else ~/avm (or AVM_INSTALL_DIR), fetched from GitHub if not there yet.
 SCRIPT_DIR=""
 [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ] && SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/touch_gui.py" ]; then
+# (an AVM folder: the one with gui/CMakeLists.txt, the C++ source)
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/gui/CMakeLists.txt" ]; then
     AVM_DIR="$SCRIPT_DIR"
-elif [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/avm/touch_gui.py" ]; then
+elif [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/avm/gui/CMakeLists.txt" ]; then
     AVM_DIR="$SCRIPT_DIR/avm"
 else
     AVM_DIR="${AVM_INSTALL_DIR:-$HOME/avm}"
 fi
-VENV="${AVM_VENV:-$HOME/venv}"
+BUILD_DIR="$AVM_DIR/gui/build"
+AVM_GUI="$BUILD_DIR/avm_gui"
+# no AVM_BRANCH given: the one this AVM was installed from (a test branch), else main
+[ -z "$AVM_BRANCH" ] && [ -f "$AVM_DIR/BRANCH" ] && AVM_BRANCH="$(head -n 1 "$AVM_DIR/BRANCH")"
+AVM_BRANCH="${AVM_BRANCH:-main}"
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*"; }
@@ -101,15 +107,15 @@ FAMILY="$ID ${ID_LIKE:-}"
 case "$FAMILY" in
     *debian*|*ubuntu*) ;;
     *) die "This installer supports Ubuntu / Debian / Raspberry Pi OS (found: $PRETTY_NAME).
-   Elsewhere, install by hand: Python 3 with numpy, scipy, numba, opencv, av, PyQt5,
-   pyqtgraph, sounddevice; SoapySDR with Python bindings and the PlutoSDR / LMS7 /
-   RTL-SDR modules; ffmpeg (libopus, libcodec2); arecord; pw-cat; v4l2-ctl." ;;
+   Elsewhere, install by hand: a C++17 compiler, CMake, Qt 6 (or 5) development files,
+   the FFmpeg, Opus and Codec2 libraries (development files), SoapySDR with the
+   PlutoSDR / LMS7 / RTL-SDR modules, pw-cat and v4l2-ctl; then build AVM:
+   cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release && cmake --build gui/build" ;;
 esac
 IS_PI=0
 grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null && IS_PI=1
 echo "System: $PRETTY_NAME, $(uname -m)$([ $IS_PI = 1 ] && echo ', Raspberry Pi')"
 echo "AVM:    $AVM_DIR"
-echo "venv:   $VENV"
 [ "$(id -u)" = 0 ] && die "Run as your normal user, not root (it uses sudo where needed)."
 SUDO=sudo
 # Debian installed with a root password leaves the user without sudo
@@ -121,10 +127,8 @@ fi
 
 # ---------------------------------------------------------------- 0. AVM from GitHub
 say "0. AVM program files"
-if [ -f "$AVM_DIR/touch_gui.py" ] && [ $UPDATE = 0 ]; then
-    echo "present ($AVM_DIR); --update fetches the latest from GitHub"
-    # how it compares with GitHub (one line; nothing if offline)
-    [ -f "$AVM_DIR/avm_update.py" ] && python3 "$AVM_DIR/avm_update.py" 2>/dev/null | head -n 1
+if [ -f "$AVM_DIR/gui/CMakeLists.txt" ] && [ $UPDATE = 0 ]; then
+    echo "present ($AVM_DIR, version $(cat "$AVM_DIR/VERSION" 2>/dev/null || echo '?')); --update fetches the latest from GitHub"
 elif [ $CHECK_ONLY = 1 ]; then
     echo "would download github.com/$AVM_REPO ($AVM_BRANCH) into $AVM_DIR"
     plan "AVM program files (from GitHub)" "$AVM_DIR" 3
@@ -140,8 +144,10 @@ else
         $SUDO apt-get install -y wget </dev/null >/dev/null && wget -q -O "$TMP/avm.tar.gz" "$URL"
     fi || die "download failed: $URL"
     tar -xzf "$TMP/avm.tar.gz" -C "$TMP" || die "couldn't unpack the download"
-    SRC="$(find "$TMP" -maxdepth 3 -name touch_gui.py -printf '%h\n' | head -n 1)"
-    [ -n "$SRC" ] || die "the download has no touch_gui.py ($URL)"
+    # (the folder holding gui/CMakeLists.txt)
+    SRC="$(find "$TMP" -maxdepth 4 -path '*/gui/CMakeLists.txt' -printf '%h\n' | head -n 1)"
+    SRC="${SRC%/gui}"
+    [ -n "$SRC" ] || die "the download has no AVM source (gui/CMakeLists.txt) ($URL)"
     # copy over the top: settings live in ~/.config, logs in gui_logs/ are kept
     mkdir -p "$AVM_DIR"
     cp -a "$SRC"/. "$AVM_DIR"/ || die "couldn't copy into $AVM_DIR"
@@ -156,19 +162,22 @@ else
         exec bash "$AVM_DIR/install_avm.sh" --yes
     fi
 fi
-[ -f "$AVM_DIR/touch_gui.py" ] || [ $CHECK_ONLY = 1 ] || die "touch_gui.py not found in $AVM_DIR."
+[ -f "$AVM_DIR/gui/CMakeLists.txt" ] || [ $CHECK_ONLY = 1 ] || die "AVM source (gui/CMakeLists.txt) not found in $AVM_DIR."
+# a test branch (AVM_BRANCH=...): remembered, so AVM's Update button follows it too
+if [ $CHECK_ONLY = 0 ]; then
+    if [ "$AVM_BRANCH" != main ]; then echo "$AVM_BRANCH" > "$AVM_DIR/BRANCH"; else rm -f "$AVM_DIR/BRANCH"; fi
+fi
 
-# numba (the modem's and codec's compiler) only exists for 64-bit systems
+# 64-bit only (what AVM is built and tested on)
 if [ "$(getconf LONG_BIT)" != 64 ]; then
-    die "This is a 32-bit system ($(uname -m)). AVM needs 64-bit (x86_64 or ARM64):
-   numba, which compiles the modem and video codec, has no 32-bit builds.
+    die "This is a 32-bit system ($(uname -m)). AVM needs 64-bit (x86_64 or ARM64).
    In a VM: create it as 'Ubuntu (64-bit)' from a 64-bit ISO. If the VM software
    only offers 32-bit, enable virtualisation (VT-x / AMD-V) in the PC's BIOS, and
    on Windows check Hyper-V / Memory Integrity isn't blocking it.
    On a Raspberry Pi: use the 64-bit Raspberry Pi OS."
 fi
 
-# Ubuntu: most of what AVM needs (numba, SoapySDR...) is in 'universe';
+# Ubuntu: some of what AVM needs (SoapySDR, Codec2...) is in 'universe';
 # enable it and refresh the lists BEFORE checking what apt offers.
 if [ $CHECK_ONLY = 0 ]; then
     if [ "$ID" = ubuntu ] && ! grep -rqs '^deb .* universe' /etc/apt/sources.list /etc/apt/sources.list.d/ \
@@ -198,8 +207,7 @@ if [ $CHECK_ONLY = 0 ]; then
     rm -f "$APT_LOG"
 fi
 
-# offered = has an installable candidate (Ubuntu 24.04 lists python3-numba
-# but has none -- numba then comes from pip, step 3)
+# offered = has an installable candidate (a package can be listed with none)
 have_pkg() {
     local c
     c="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2}')"
@@ -213,16 +221,20 @@ SOAPY_ABI=0.8
 have_pkg soapysdr0.8-module-lms7 || { have_pkg soapysdr0.7-module-lms7 && SOAPY_ABI=0.7; }
 
 # ---------------------------------------------------------------- 1. apt
-# What AVM uses at run time (the venv's own pip comes with python3-venv).
-# The tools to build a radio driver from source are added below, only when
-# one has to be built.
-PKGS="python3 python3-venv python3-numpy python3-scipy python3-numba
-      python3-opencv python3-av python3-pyqt5 python3-pyqtgraph python3-sounddevice libportaudio2
-      python3-soapysdr soapysdr-tools
+# What AVM is built with (step 3) and uses at run time: the compiler and
+# CMake, Qt, the FFmpeg libraries (camera, microphone, recordings), Opus and
+# Codec2, SoapySDR (loaded at run time) with the radio modules. The tools to
+# build a radio driver from source are added below, only when one is needed.
+PKGS="g++ cmake pkg-config qt6-base-dev
+      libavdevice-dev libavformat-dev libavcodec-dev libavfilter-dev libswscale-dev libavutil-dev
+      libopus-dev libcodec2-dev
+      libsoapysdr${SOAPY_ABI} soapysdr-tools
       soapysdr${SOAPY_ABI}-module-lms7 soapysdr${SOAPY_ABI}-module-rtlsdr rtl-sdr
       libiio0 libiio-utils
-      ffmpeg alsa-utils pipewire-bin v4l-utils"
+      pipewire-bin v4l-utils"
 BUILD_PKGS="git cmake g++ pkg-config libsoapysdr-dev libiio-dev libad9361-dev"
+# Qt 6 where offered (all supported releases); Qt 5 otherwise -- AVM builds with either
+have_pkg qt6-base-dev || PKGS="${PKGS/qt6-base-dev/qtbase5-dev}"
 # libiio0 was renamed on newer releases
 have_pkg libiio0 || PKGS="${PKGS/libiio0/libiio1}"
 have_pkg limesuite-udev && PKGS="$PKGS limesuite-udev"
@@ -269,11 +281,7 @@ MISSING=""
 PRESENT=0
 for p in $PKGS; do
     if ! have_pkg "$p"; then
-        # these come from pip in step 3 when apt lacks them: nothing to report
-        case "$p" in
-            python3-numba|python3-pyqtgraph|python3-sounddevice|python3-opencv|python3-av) ;;
-            *) warn "package $p not offered by apt on this system -- skipped" ;;
-        esac
+        warn "package $p not offered by apt on this system -- skipped"
     elif ! installed "$p"; then
         MISSING="$MISSING $p"
     else
@@ -300,7 +308,7 @@ else
     # Progress: apt's own bar needs a terminal (this output also goes to the
     # log), so count its download and set-up lines against the total instead
     TOTAL="$(apt-get -s install $MISSING 2>/dev/null | grep -c '^Inst ')"
-    echo "installing $TOTAL package(s) with what they need -- this can take 10-20 minutes on a Pi"
+    echo "installing $TOTAL package(s) with what they need -- this can take 5-15 minutes on a Pi"
     set -o pipefail
     # (apt's full output to the log as well; the screen gets the progress)
     $SUDO apt-get install -y $MISSING 2>&1 | tee -a "${LOG:-/dev/null}" | awk -v n="$TOTAL" '
@@ -405,134 +413,37 @@ else
     fi
 fi
 
-# ---------------------------------------------------------------- 3. venv
-say "3. Python venv ($VENV)"
-# Keep numpy on the system's major version for every pip install here: apt's
-# own modules (OpenCV, PyAV...) are built for it, and a numpy 1 <-> 2 switch
-# breaks them ("_ARRAY_API not found"). pip would otherwise pull numpy 2 in
-# with an upgraded numba on numpy-1 systems (Ubuntu 22.04, DragonOS).
-SYS_NP="$(/usr/bin/python3 -c 'import numpy; print(numpy.__version__.split(".")[0])' 2>/dev/null)"
-NP_PIN="$(mktemp)"
-case "$SYS_NP" in
-    1) echo "numpy<2" > "$NP_PIN" ;;
-    2) echo "numpy>=2" > "$NP_PIN" ;;
-esac
-export PIP_CONSTRAINT="$NP_PIN"
-if [ $CHECK_ONLY = 0 ]; then
-    [ -x "$VENV/bin/python" ] || python3 -m venv --system-site-packages "$VENV" || die "venv creation failed"
-    "$VENV/bin/pip" install --progress-bar off --upgrade pyqtgraph sounddevice || die "pip install failed"
+# ---------------------------------------------------------------- 3. build AVM
+say "3. AVM build"
+# The GUI and the modem library (c++/libavm.so) from the source, tuned for
+# this machine's CPU. The first build takes ~10 minutes on a Pi 4; after an
+# update only what changed is rebuilt. Always run (it's quick when nothing
+# changed), so an update's new source is built before AVM next starts.
+if [ $CHECK_ONLY = 1 ]; then
+    if [ -x "$AVM_GUI" ]; then echo "built ($AVM_GUI)"; else echo "not built yet"; fi
+    plan "AVM, built from source (~10 min on a Pi 4)" "$BUILD_DIR" 40
 else
-    [ -x "$VENV/bin/python" ] || plan "Python environment (venv)" "$VENV" 1
-    plan "pip: pyqtgraph, sounddevice (latest)" "$VENV" 7
-fi
-# approximate installed size (MB) of what pip may have to supply
-pip_mb() { case "$1" in numpy) echo 70;; scipy) echo 120;; numba) echo 130;; opencv-python-headless) echo 140;;
-                        av) echo 110;; PyQt5) echo 160;; *) echo 5;; esac; }
-# repair a venv where an earlier run let pip switch numpy's major version
-VENV_NP="$("$VENV/bin/python" -c 'import numpy; print(numpy.__version__.split(".")[0])' 2>/dev/null)"
-if [ -n "$SYS_NP" ] && [ -n "$VENV_NP" ] && [ "$VENV_NP" != "$SYS_NP" ]; then
-    if [ $CHECK_ONLY = 1 ]; then
-        echo "  numpy $VENV_NP.x in the venv but the system's is $SYS_NP.x (would be fixed)"
-    else
-        echo "  numpy: venv has $VENV_NP.x, system modules need $SYS_NP.x -- fixing"
-        "$VENV/bin/pip" install --progress-bar off "$(cat "$NP_PIN")" || warn "numpy fix failed"
+    # a Pi with little memory: fewer compilers at once (each can take ~0.5 GB)
+    JOBS="$(nproc)"
+    MEM_MB="$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)"
+    [ "$MEM_MB" -lt 3000 ] && [ "$JOBS" -gt 2 ] && JOBS=2
+    echo "building AVM with $JOBS job(s) -- about 10 minutes on a Pi 4 the first time..."
+    BUILD_LOG="$(mktemp)"
+    if cmake -S "$AVM_DIR/gui" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >"$BUILD_LOG" 2>&1 \
+        && nice cmake --build "$BUILD_DIR" -j"$JOBS" 2>&1 | tee -a "$BUILD_LOG" \
+           | awk '/^\[ *[0-9]+%\]/ { if ($2 != last) { last = $2; printf "  %s\n", $0; fflush() } }'; then
+        :
     fi
-fi
-PY="$VENV/bin/python"
-[ -x "$PY" ] || PY=python3
-# Anything apt couldn't supply (or supplied too old) comes from pip instead.
-for spec in "numpy numpy" "scipy scipy" "numba numba" "cv2 opencv-python-headless" "av av" \
-            "PyQt5 PyQt5" "pyqtgraph pyqtgraph" "sounddevice sounddevice" "SoapySDR -"; do
-    set -- $spec
-    if "$PY" -c "import $1" 2>/dev/null; then
-        :  # importable: its version is reported below
-    elif [ "$2" = "-" ]; then
-        warn "$1 won't import: needs python3-soapysdr (apt) and a venv with --system-site-packages"
-    elif [ $CHECK_ONLY = 1 ]; then
-        printf '  %-12s MISSING\n' "$1"
-        # apt may still supply it (step 1); if not, pip does
-        case "$1" in pyqtgraph|sounddevice) ;; *) plan "pip (if apt lacks it): $2" "$VENV" "$(pip_mb "$2")" ;; esac
+    cat "$BUILD_LOG" >> "${LOG:-/dev/null}"
+    if [ -x "$AVM_GUI" ] && { [ -f "$AVM_DIR/c++/libavm.so" ] || [ -f "$AVM_DIR/c++/avm.dll" ]; } \
+        && ! grep -q -E '^(CMake Error|.*error:)' "$BUILD_LOG"; then
+        echo "built: $AVM_GUI"
     else
-        echo "  $1: installing $2 from pip"
-        "$VENV/bin/pip" install --progress-bar off "$2" || warn "pip install $2 failed"
+        grep -E 'error|Error' "$BUILD_LOG" | head -n 20
+        rm -f "$BUILD_LOG"
+        die "the AVM build failed (the log has the details)"
     fi
-done
-# Debian 12's apt numba (0.56) predates Python 3.11 support: use pip's instead
-if ! "$PY" -c 'import numba, sys; v = tuple(map(int, numba.__version__.split(".")[:2])); sys.exit(v < (0, 57))' 2>/dev/null; then
-    if [ $CHECK_ONLY = 1 ]; then
-        echo "  numba older than 0.57 (would be upgraded from pip)"
-        plan "pip: numba (newer than apt's)" "$VENV" 130
-    else
-        echo "  numba: upgrading from pip (apt's is too old)"
-        "$VENV/bin/pip" install --progress-bar off "numba>=0.59" || warn "pip install numba failed"
-    fi
-fi
-# Versions, not just presence: what's actually there vs what AVM needs.
-echo
-echo "  versions (as AVM will use them):"
-SYS_NP="$SYS_NP" "$PY" - <<'PYVER'
-import importlib, os, sys
-def ver(mod):
-    try:
-        m = importlib.import_module(mod)
-    except Exception as e:
-        return None, f"won't import: {str(e).splitlines()[0][:60]}"
-    if mod == "PyQt5":
-        from PyQt5 import QtCore
-        return QtCore.PYQT_VERSION_STR, None
-    if mod == "SoapySDR":
-        return m.getAPIVersion(), None
-    return getattr(m, "__version__", "?"), None
-def tup(v):
-    out = []
-    for p in str(v).split("."):
-        d = "".join(c for c in p if c.isdigit())
-        out.append(int(d) if d else 0)
-    return tuple(out)
-sys_np = os.environ.get("SYS_NP", "")
-# (module, label, requirement text, check(version) -> bool)
-checks = [
-    ("numpy", "numpy", f"{sys_np}.x, as the system's" if sys_np else "any",
-     lambda v: not sys_np or str(v).split(".")[0] == sys_np),
-    ("numba", "numba", ">= 0.57", lambda v: tup(v) >= (0, 57)),
-    ("scipy", "scipy", "any", None),
-    ("cv2", "OpenCV", "any", None),
-    ("av", "PyAV", "any", None),
-    ("PyQt5", "PyQt5", "5.x", lambda v: str(v).startswith("5.")),
-    ("pyqtgraph", "pyqtgraph", "any", None),
-    ("sounddevice", "sounddevice", "any", None),
-    ("SoapySDR", "SoapySDR", "API 0.8", lambda v: str(v).startswith("0.8")),
-]
-bad = 0
-pyv = ".".join(map(str, sys.version_info[:3]))
-pyok = sys.version_info >= (3, 9)
-bad += not pyok
-print(f"    {'Python':<12} {pyv:<12} needs >= 3.9{'':<12} {'ok' if pyok else 'TOO OLD'}")
-for mod, label, need, check in checks:
-    v, err = ver(mod)
-    if err:
-        print(f"    {label:<12} {'-':<12} {err}")
-        bad += 1
-        continue
-    good = check is None or check(v)
-    bad += not good
-    print(f"    {label:<12} {str(v):<12} needs {need:<18} {'ok' if good else 'WRONG VERSION'}")
-sys.exit(1 if bad else 0)
-PYVER
-[ $? = 0 ] || warn "something above isn't what AVM needs -- re-run the installer to fix it, or fix it by hand"
-# ffmpeg: its version and the audio encoders AVM uses
-if command -v ffmpeg >/dev/null; then
-    FFV="$(ffmpeg -hide_banner -version 2>/dev/null | head -n1 | awk '{print $3}')"
-    FFE="$(ffmpeg -hide_banner -encoders 2>/dev/null)"
-    printf '    %-12s %-12s %s\n' ffmpeg "$FFV" \
-        "Opus: $(echo "$FFE" | grep -q libopus && echo yes || echo NO)  Codec2: $(echo "$FFE" | grep -q libcodec2 && echo yes || echo 'no (Opus only)')"
-    echo "$FFE" | grep -q libopus || warn "ffmpeg has no Opus encoder: AVM's audio won't work"
-    # Debian / Ubuntu / Raspberry Pi OS ffmpeg includes Codec2; a custom or
-    # third-party build (some SDR distributions) may not
-    echo "$FFE" | grep -q libcodec2 || warn "this ffmpeg ($(command -v ffmpeg)) has no Codec2: AVM offers Opus only.
-   For Codec2, use the distribution's ffmpeg: sudo apt install --reinstall ffmpeg libcodec2-dev"
-else
-    printf '    %-12s %s\n' ffmpeg "not installed yet"
+    rm -f "$BUILD_LOG"
 fi
 
 # ---------------------------------------------------------------- 4. USB access
@@ -586,42 +497,46 @@ mkdir -p "$AVM_DIR/gui_logs"
 DESK="[Desktop Entry]
 Type=Application
 Name=AVM
-Comment=AVM -- Audio Video Modem, touch GUI (TX and RX, full screen)
+Comment=AVM -- Audio Video Modem (TX and RX, full screen)
 Path=$AVM_DIR
-Exec=env HF_RX_GUI_LOG=$AVM_DIR/gui_logs/rx_session.log $VENV/bin/python $AVM_DIR/touch_gui.py
+Exec=$AVM_GUI
 Icon=network-transmit-receive
 Terminal=false
 Categories=Network;HamRadio;"
 DESKTOP_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")"
-# an existing launcher (any name) for touch_gui.py is kept, not duplicated
+# launchers an earlier AVM made (any name) for the Python GUI: switched over
+# to this one, not left starting the old GUI beside a new icon
 OLD="$(grep -l 'touch_gui.py' "$HOME"/.local/share/applications/*.desktop "$DESKTOP_DIR"/*.desktop 2>/dev/null \
-       | grep -v '/avm.desktop$' | head -n 1)"
-if [ -n "$OLD" ]; then
-    echo "existing launcher kept: $OLD"
-elif [ $CHECK_ONLY = 1 ]; then
-    [ -f "$HOME/.local/share/applications/avm.desktop" ] && echo "present" || echo "missing"
+       | grep -v '/avm.desktop$')"
+if [ $CHECK_ONLY = 1 ]; then
+    [ -f "$HOME/.local/share/applications/avm.desktop" ] && grep -q "$AVM_GUI" "$HOME/.local/share/applications/avm.desktop" \
+        && echo "present" || echo "missing or for the Python GUI (would be set to $AVM_GUI)"
     plan "menu entry + desktop icon" "~/.local/share/applications, Desktop"
     plan "'avm' command" "$HOME/.local/bin/avm"
+    for f in $OLD; do echo "launcher for the old Python GUI (would be switched over): $f"; done
 else
     mkdir -p "$HOME/.local/share/applications"
     echo "$DESK" > "$HOME/.local/share/applications/avm.desktop"
+    for f in $OLD; do
+        echo "$DESK" > "$f"
+        echo "switched to the new AVM: $f"
+    done
     if [ -d "$DESKTOP_DIR" ]; then
         echo "$DESK" > "$DESKTOP_DIR/avm.desktop"
         chmod +x "$DESKTOP_DIR/avm.desktop"
         # GNOME (Ubuntu) only runs desktop icons it's told are trusted
         gio set "$DESKTOP_DIR/avm.desktop" metadata::trusted true 2>/dev/null
     fi
-    echo "menu entry + desktop icon 'AVM' -> $AVM_DIR/touch_gui.py"
+    echo "menu entry + desktop icon 'AVM' -> $AVM_GUI"
 fi
 # an 'avm' command too (in ~/.local/bin, on PATH from the next login)
 if [ $CHECK_ONLY = 0 ]; then
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/avm" <<AVMCMD
 #!/bin/sh
-# AVM touch GUI (written by install_avm.sh)
+# AVM (written by install_avm.sh)
 cd "$AVM_DIR" || exit 1
-export HF_RX_GUI_LOG="$AVM_DIR/gui_logs/rx_session.log"
-exec "$VENV/bin/python" touch_gui.py "\$@"
+exec "$AVM_GUI" "\$@"
 AVMCMD
     chmod +x "$HOME/.local/bin/avm"
     echo "'avm' command: $HOME/.local/bin/avm"
@@ -645,9 +560,7 @@ fi
 say "Radios Soapy can see now"
 timeout 20 SoapySDRUtil --find 2>/dev/null | grep -E 'driver|label' | sed 's/^ */  /' || echo "  (none found)"
 say "Done"
-echo "Start AVM from the menu / desktop icon, or:  cd $AVM_DIR && $VENV/bin/python touch_gui.py"
-echo "(use $VENV/bin/python, not plain python3: some modules, e.g. numba on Ubuntu 24.04, are only in the venv)"
-echo "The first TX/RX start compiles the modem and codec (a minute or two); later starts are quick."
+echo "Start AVM from the menu / desktop icon, or with the command:  avm"
 echo "If this run added you to any groups, log out and back in first."
 [ -n "${LOG:-}" ] && echo "Install log (everything above): $LOG"
 exit 0

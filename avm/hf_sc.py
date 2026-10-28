@@ -279,17 +279,35 @@ def detect(z):
         return None
     d = z[SPS:] * np.conj(z[:-SPS])
     c = _xcorr_valid(d, _T1)
-    # energy under the template: a running sum (|d| varies slowly next to
-    # the symbol stride, so all samples / SPS ~ the strided ones)
-    cs = np.concatenate([[0.0], np.cumsum(np.abs(d), dtype=np.float64)])
+    # energy under the template's own taps (every SPS-th sample), exactly:
+    # running sums along each of the SPS phases. (Was all samples / SPS,
+    # which reads low where a burst starts out of quieter noise -- a few
+    # strided samples then hold most of the energy, the metric passed 1 a
+    # template span before the real peak, and the search below locked there:
+    # 11-17 of 20 bursts after a gap lost at 6-30 dB SNR. Now <= 1.)
     span = len(_T1)
-    e = (cs[span:span + len(c)] - cs[:len(c)]) / SPS
+    a = np.abs(d).astype(np.float64)
+    n_ph = -(-len(a) // SPS)
+    run = np.zeros(n_ph * SPS)
+    run[:len(a)] = a
+    run = np.cumsum(run.reshape(n_ph, SPS), axis=0).reshape(-1)      # run[k] = a[k] + a[k-SPS] + ...
+    before = np.concatenate([np.zeros(SPS), run[:len(c) - SPS]]) if len(c) > SPS else np.zeros(len(c))
+    e = run[span - 1:span - 1 + len(c)] - before[:len(c)]
     m = np.abs(c) / np.maximum(e, 1e-12)
     over = np.flatnonzero(m > DETECT_THRESHOLD)
     if not len(over):
         return None
     i0 = over[0]
-    win = slice(i0, min(len(m), i0 + PRE_LEN * SPS // 2))
+    # The peak can be up to a template span after the first crossing -- and
+    # a crossing that near the end of z may be a burst only just arriving:
+    # out of quiet noise, the first of its symbols alone in the window
+    # scores ~0.9. Locking there (a span early, nonsense frequency) failed
+    # the header, and the skip after a failure sometimes passed the real
+    # preamble (2 fragments in 30 lost with gaps between bursts). Wait for
+    # the full alignment instead (the caller keeps a preamble's overlap).
+    if i0 + span > len(m):
+        return None
+    win = slice(i0, min(len(m), i0 + span + PRE_LEN * SPS // 2))
     i = win.start + int(np.argmax(m[win]))
     return i, float(m[i]), float(np.angle(c[i]) / (2 * np.pi))
 
@@ -362,8 +380,13 @@ def _smooth(v, n):
     """Centred moving average over n points (shorter at the ends)."""
     if n <= 1 or len(v) < 2:
         return v
+    # the full convolution, centred to len(v) -- what mode="same" gives when
+    # len(v) >= n; with fewer points "same" returned n of them, and the
+    # caller's np.interp then failed: S frames under ~40 bytes crashed
     k = np.ones(n)
-    return np.convolve(v, k, mode="same") / np.convolve(np.ones(len(v)), k, mode="same")
+    lo = (n - 1) // 2
+    return (np.convolve(v, k)[lo:lo + len(v)]
+            / np.convolve(np.ones(len(v)), k)[lo:lo + len(v)])
 
 
 def _slice(y, const):
@@ -550,12 +573,19 @@ def receive_one_fragment(cfg, args, reader, state, get_samples):
         if hit is None and quick:
             continue                      # not where expected: the full search
         if hit is None:
+            # Rescan only what's new, keeping TWO preambles' worth of overlap:
+            # detect() holds back a threshold crossing whose full alignment
+            # isn't in z yet, and that crossing can come up to a template
+            # span before the preamble (back-to-back bursts: ~700 samples, the
+            # previous burst filling the window) -- with one preamble's worth
+            # kept, the preamble's start fell outside it and every gapless
+            # burst after the first was lost.
+            keep = 2 * PRE_LEN * SPS + margin
             if avail < chunk and not reader.eof:
                 reader.wait_for_more(reader.total_len, timeout=0.5)
-                # rescan only what's new (keep a preamble's worth of overlap)
-                state["native_search_start"] = max(start, seg_end - PRE_LEN * SPS - margin)
+                state["native_search_start"] = max(start, seg_end - keep)
                 continue
-            state["native_search_start"] = max(start + 1, seg_end - PRE_LEN * SPS - margin)
+            state["native_search_start"] = max(start + 1, seg_end - keep)
             if reader.eof and seg_end >= len(rx):
                 return {"status": "eof"}
             continue

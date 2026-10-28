@@ -75,6 +75,18 @@ def _station_text(engine_text):
 
 MESSAGE_RE = re.compile(r"^\[player\] Message: (\{.*\})$")   # media_rx_player
 
+
+def _audio_choice(saved):
+    """The saved RX audio output as the list now names it: a card from the
+    old list ("2: USB Audio Device: - (hw:4,0)") is PipeWire's name for that
+    card where PipeWire runs (media_rx_gui.list_pipewire_sinks)."""
+    m = re.search(r"\bhw:(\d+)", saved or "")
+    if m:
+        sinks = media_rx_gui.list_pipewire_sinks()
+        if sinks:
+            return next((d for _, d, c in sinks if str(c) == m.group(1)), saved)
+    return saved
+
 class _RxEngine(media_rx_gui.MediaRxWindow):
     """The full RX window, never shown; adds a wider spectrum span and the
     radio choice (PlutoSDR, LimeSDR, RTL-SDR, Airspy or SDRplay)."""
@@ -154,22 +166,15 @@ class RxPage(QtWidgets.QWidget):
         video = self.engine.video_label
         video.setParent(None)
         video.setMinimumSize(160, 90)
-        # the transmitter's callsign/message (station ID), above its picture;
-        # fixed height so the video doesn't jump when it appears
+        # above the picture: the Header / Frame lock lamps, then the
+        # transmitter's callsign/message (station ID) to their right; fixed
+        # height so the video doesn't jump when the callsign appears
         self.station = tw.ElideLabel("")
         self.station.setObjectName("big")
-        self.station.setAlignment(QtCore.Qt.AlignCenter)
+        self.station.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.station.setFixedHeight(round(28 * tw.SCALE))
-        left.addWidget(self.station)
-        left.addWidget(video, 3)
-        # tap the video: full screen; tap again: back (see _toggle_fullscreen)
-        self._video, self._left, self._overlay = video, left, None
-        video.installEventFilter(self)
-        self.status = tw.ElideLabel("Idle")
-        self.status.setObjectName("value")
-        # Header / Frame lock lamps, then the status line, on one row
-        status_row = QtWidgets.QHBoxLayout()
-        status_row.setSpacing(6)
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setSpacing(6)
         self._lamps = {}
         for name in ("Header", "Frame"):
             lamp = QtWidgets.QLabel()
@@ -177,11 +182,28 @@ class RxPage(QtWidgets.QWidget):
             lamp.setFixedSize(size, size)
             lamp.setToolTip(f"{name} lock over the last {LOCK_WINDOW_S:g} s: green all, orange some, red none")
             self._lamps[name] = lamp
-            status_row.addWidget(lamp)
+            top_row.addWidget(lamp)
             text = QtWidgets.QLabel(name)
             text.setObjectName("dim")
-            status_row.addWidget(text)
-            status_row.addSpacing(4)
+            top_row.addWidget(text)
+            top_row.addSpacing(4)
+        top_row.addSpacing(8)
+        top_row.addWidget(self.station, 1)
+        # (a widget of its own: it goes full window with the picture, see _toggle_fullscreen)
+        self._header = QtWidgets.QWidget()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        self._header.setLayout(top_row)
+        left.addWidget(self._header)
+        left.addWidget(video, 3)
+        # tap the video: full screen; tap again: back (see _toggle_fullscreen)
+        self._video, self._left, self._overlay = video, left, None
+        video.installEventFilter(self)
+        self.status = tw.ElideLabel("Idle")
+        self.status.setObjectName("value")
+        self.status.setAlignment(QtCore.Qt.AlignCenter)   # centred under the picture
+        # the status line, under the picture: the whole width now
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setSpacing(6)
         # start-up progress, in the video area while there's no picture:
         # Python preloaded / radio open / samples arriving (orange until the
         # first spectrum update -- made from received samples -- then green).
@@ -191,6 +213,7 @@ class RxPage(QtWidgets.QWidget):
         self.stages.adjustSize()
         status_row.addWidget(self.status, 1)
         left.addLayout(status_row)
+        self._status_row = status_row
         # tap the status line: live constellation (tw.ConstellationDialog)
         self.status.installEventFilter(self)
         self._stage_timer = QtCore.QTimer(self)
@@ -228,7 +251,7 @@ class RxPage(QtWidgets.QWidget):
                               s_get(settings, "rx_mod", "qpsk"))   # 8PSK: modes S/SH; 16PSK: SH
         self.gain = tw.Stepper(0, 73, 1, s_get(settings, "rx_gain", 40), " dB")
         self.audio_out = tw.Picker("Audio output", self._audio_outputs,
-                                   s_get(settings, "rx_audio", self.engine.audio_device.currentText()))
+                                   _audio_choice(s_get(settings, "rx_audio", self.engine.audio_device.currentText())))
         # spectrum reference level (top of the plot), live
         # wide: a KiwiSDR that keeps its own AGC on delivers ~-16 dBFS, which
         # draws at +5..+20 dB here (planet3-style manual gain: ~-60)
@@ -338,21 +361,29 @@ class RxPage(QtWidgets.QWidget):
         return super().eventFilter(obj, event)
 
     def _toggle_fullscreen(self):
-        """Moves the video into a black overlay over the whole window (top
-        bar included) and back. The decoder scales frames to the label's
-        size, so full screen is decoded at full resolution, not stretched."""
+        """Moves the video into an overlay over the whole window (top bar
+        included) and back -- with the lamps / callsign row above it and the
+        status line below, still showing. The decoder scales frames to the
+        label's size, so full screen is decoded at full resolution, not
+        stretched."""
         if self._overlay is None:
             win = self.window()
             self._overlay = QtWidgets.QWidget(win)
-            self._overlay.setStyleSheet("background: #000;")
+            self._overlay.setObjectName("overlay")
+            self._overlay.setStyleSheet(f"QWidget#overlay {{ background: {tw.BG}; }}")
             lay = QtWidgets.QVBoxLayout(self._overlay)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.addWidget(self._video)
+            lay.setContentsMargins(6, 4, 6, 4)
+            lay.setSpacing(4)
+            lay.addWidget(self._header)
+            lay.addWidget(self._video, 1)
+            lay.addWidget(self.status)
             self._overlay.setGeometry(win.rect())
             self._overlay.show()
             self._overlay.raise_()
         else:
-            self._left.insertWidget(0, self._video, 3)
+            self._left.insertWidget(0, self._header)
+            self._left.insertWidget(1, self._video, 3)   # back under the lamps / callsign row
+            self._status_row.insertWidget(0, self.status, 1)
             self._overlay.hide()  # now: deleteLater only acts on a later event-loop pass
             self._overlay.deleteLater()
             self._overlay = None

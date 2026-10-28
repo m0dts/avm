@@ -6,12 +6,13 @@ rem   install_avm.bat -Update    also fetch the latest AVM from GitHub
 rem   install_avm.bat -Check     only report what's missing
 setlocal
 set "REPO=m0dts/avm"
+if "%AVM_BRANCH%"=="" (set "BRANCH=main") else (set "BRANCH=%AVM_BRANCH%")
 set "PS1=%~dp0install_avm_windows.ps1"
 if not exist "%PS1%" set "PS1=%~dp0avm\install_avm_windows.ps1"
 if not exist "%PS1%" (
     set "PS1=%TEMP%\install_avm_windows.ps1"
     echo Fetching the installer from github.com/%REPO% ...
-    powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; $ProgressPreference='SilentlyContinue'; Invoke-WebRequest 'https://raw.githubusercontent.com/%REPO%/main/avm/install_avm_windows.ps1' -OutFile $env:TEMP\install_avm_windows.ps1"
+    powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; $ProgressPreference='SilentlyContinue'; Invoke-WebRequest 'https://raw.githubusercontent.com/%REPO%/%BRANCH%/avm/install_avm_windows.ps1' -OutFile $env:TEMP\install_avm_windows.ps1"
 )
 if not exist "%PS1%" (
     echo Could not get install_avm_windows.ps1 -- check the internet connection.

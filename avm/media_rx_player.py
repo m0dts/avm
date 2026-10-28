@@ -636,25 +636,53 @@ class _Stretch:
         return out.reshape(-1) if x.ndim == 1 else out
 
 
+def _pipewire_sink_for_card(card):
+    """PipeWire's node name for ALSA sound card number card (its playback
+    sink), or None."""
+    import json
+    try:
+        nodes = json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5).stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    for n in nodes:
+        props = (n.get("info") or {}).get("props") or {}
+        if props.get("media.class") == "Audio/Sink" and str(props.get("alsa.card")) == str(card):
+            return props.get("node.name")
+    return None
+
+
 def _use_pw_cat(device):
-    """Play through PipeWire's own pw-cat instead of PortAudio when the
-    output is the system default and PipeWire is there. On a busy Pi 4,
+    """Play through PipeWire's own pw-cat instead of PortAudio, when
+    PipeWire is there: "" for the system default output, or PipeWire's name
+    for the chosen sound card; None to use PortAudio. On a busy Pi 4,
     PortAudio -> PipeWire's ALSA plugin crackled (clean decoded audio,
     PipeWire reporting no xruns) where a native PipeWire client playing at
-    the same time stayed clean. HF_RX_AUDIO_PWCAT=0 turns this off."""
+    the same time stayed clean. A card chosen by name ("USB Audio Device
+    (hw:4,0)") used to be played straight to ALSA, out of PipeWire's sight
+    -- a screen recording of the output (~/record.sh) got no sound -- so it
+    goes through PipeWire too now, aimed at that card. HF_RX_AUDIO_PWCAT=0
+    turns this off."""
+    import re
     import shutil
     if os.environ.get("HF_RX_AUDIO_PWCAT", "1") == "0" or not shutil.which("pw-cat"):
-        return False
+        return None
     if not os.environ.get("XDG_RUNTIME_DIR") or not os.path.exists(
             os.path.join(os.environ["XDG_RUNTIME_DIR"], "pipewire-0")):
-        return False
+        return None
     if device is None:
-        return True
+        return ""
+    if isinstance(device, str) and device.startswith("pw:"):
+        return device[3:]           # a PipeWire output picked from the list (media_rx_gui)
     try:
         name = sd.query_devices(device)["name"] if isinstance(device, int) else str(device)
     except Exception:
-        return False
-    return name.split(" ")[0].lower() in ("default", "pipewire", "pulse", "sysdefault")
+        return None
+    if name.split(" ")[0].lower() in ("default", "pipewire", "pulse", "sysdefault"):
+        return ""
+    m = re.search(r"\bhw:(\d+)", name)
+    if m:
+        return _pipewire_sink_for_card(m.group(1))   # None (not in PipeWire): PortAudio, as before
+    return None
 
 
 class _PwCatStream:
@@ -665,10 +693,11 @@ class _PwCatStream:
     48 kHz): Linux's default 64 KB would add the better part of a second."""
     F_SETPIPE_SZ = 1031
 
-    def __init__(self, sample_rate, channels):
+    def __init__(self, sample_rate, channels, target=""):
         self._p = subprocess.Popen(
             ["pw-cat", "--playback", "--raw", "--format", "s16", "--rate", str(int(sample_rate)),
-             "--channels", str(int(channels)), "--latency", "100ms", "--media-category", "Playback", "-"],
+             "--channels", str(int(channels)), "--latency", "100ms", "--media-category", "Playback",
+             *(["--target", target] if target else []), "-"],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             import fcntl
@@ -838,9 +867,10 @@ class AudioPlaybackWorker:
 
     def _open_stream(self):
         self._conv = None
-        if _use_pw_cat(self.device):
-            self._stream = _PwCatStream(self._sample_rate, self._channels)
-            _log("[audio] output via pw-cat (native PipeWire)")
+        target = _use_pw_cat(self.device)
+        if target is not None:
+            self._stream = _PwCatStream(self._sample_rate, self._channels, target)
+            _log(f"[audio] output via pw-cat (native PipeWire){' to ' + target if target else ''}")
             return
         try:
             self._stream = sd.OutputStream(samplerate=self._sample_rate, channels=self._channels,
@@ -1400,6 +1430,14 @@ def run_player_loop(fh, args, video, audio_worker, record=None):
                   and (audio_decoder is not None or codec2_decoder is not None)):
                 total_len = struct.unpack_from(">I", rpayload, 0)[0]
                 audio_reassembly = {"total_len": total_len, "buf": bytearray(rpayload[4:])}
+                if len(audio_reassembly["buf"]) >= total_len:
+                    # the whole packet in the START (older transmitters did this
+                    # with no CONT after it): it's complete now -- waiting for a
+                    # CONT dropped it
+                    complete = bytes(audio_reassembly["buf"][:total_len])
+                    audio_reassembly = None
+                    audio_fixed_len_state["len"] = len(complete)
+                    _process_audio_packet(complete)
 
             elif rtype == AUDIO_PACKET_CONT_TYPE and (audio_decoder is not None or codec2_decoder is not None):
                 if audio_reassembly is None:

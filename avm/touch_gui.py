@@ -22,6 +22,30 @@ import sys
 import threading
 import time
 
+
+def _hand_over_to_cpp():
+    """AVM is now the C++ program (avm_gui); this Python GUI is kept only so
+    an older AVM's Update button still works: it downloads the new files,
+    runs the installer (which builds or fetches avm_gui) and then restarts
+    "python touch_gui.py" -- which lands here and starts the C++ AVM instead.
+    No avm_gui yet (the installer couldn't run): the Python GUI carries on,
+    and says to finish the update. AVM_PYTHON_GUI=1: always the Python GUI."""
+    if os.environ.get("AVM_PYTHON_GUI") == "1" or __name__ != "__main__":
+        return
+    here = os.path.dirname(os.path.abspath(__file__))
+    for exe in (os.path.join(here, "gui", "build", "avm_gui"),           # Linux: built by install_avm.sh
+                os.path.join(here, "app", "avm_gui.exe")):               # Windows: the release zip
+        if os.path.isfile(exe) and os.access(exe, os.X_OK):
+            os.chdir(os.path.dirname(exe))
+            if sys.platform == "win32":
+                import subprocess
+                subprocess.Popen([exe] + sys.argv[1:], cwd=os.path.dirname(exe))
+                sys.exit(0)
+            os.execv(exe, [exe] + sys.argv[1:])
+
+
+_hand_over_to_cpp()
+
 # One BLAS thread per process (see hf_ofdm_tx.py); before numpy loads.
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
     os.environ.setdefault(_var, "1")

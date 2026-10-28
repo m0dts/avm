@@ -739,6 +739,14 @@ def main():
             # flush this near-empty leftover and split starting fresh.
             flush_block()
             remaining_in_block = budget - len(block)
+            if len(block) + len(rec_whole) <= budget:
+                # ...and in the fresh fragment it fits whole: send it whole.
+                # (It used to go as a START record holding the whole packet
+                # with no CONT after it, which a receiver never completed:
+                # that audio packet was lost with nothing lost on air.)
+                block.extend(rec_whole)
+                state["last_audio_packet_len"] = len(raw)
+                return
         first_chunk_len = remaining_in_block - header_len
         first, rest = raw[:first_chunk_len], raw[first_chunk_len:]
         payload = struct.pack(">I", len(raw)) + first
@@ -813,6 +821,13 @@ def main():
             for i, (au, is_keyframe) in enumerate(video_items):
                 if is_keyframe == "cont":  # remainder of a packet split last tick
                     room = budget - len(block) - RECORD_HEADER_LEN
+                    if room <= 0:
+                        # this tick's audio filled the fragment (to within a record
+                        # header): the remainder waits for the next tick. (A negative
+                        # room used to slice from the END -- au[:-1] -- and wrote a
+                        # fragment bigger than --fragment-size, desyncing the stream.)
+                        video_carry.extend(video_items[i:])
+                        break
                     chunk, rest = au[:room], au[room:]
                     block.extend(struct.pack(">BH", VIDEO_PACKET_CONT_TYPE, len(chunk)) + chunk)
                     if rest:
@@ -1030,9 +1045,14 @@ def main():
                 # AUDIO_PROFILES's own key, so this is a constant, not
                 # something to parse out of opus_head.
                 audio_rate = 48000
+                # (pre-skip, bytes 10-11, aside: Opus's low-delay mode has 120
+                # samples, its default 312 -- the same stream to a receiver,
+                # which only trims the very start by it)
+                def _no_preskip(h):
+                    return bytes(h[:10]) + bytes(h[12:])
                 profile_id = next((pid for pid, p in AUDIO_PROFILES.items()
                                     if p["codec"] == "opus" and p["rate"] == audio_rate
-                                    and p["extradata"] == opus_head), None)
+                                    and _no_preskip(p["extradata"]) == _no_preskip(opus_head)), None)
                 if profile_id is None:
                     print(f"ERROR: this audio format (extradata={opus_head.hex()}) isn't in "
                           f"AUDIO_PROFILES -- add it there (and to media_rx_player.py's matching "

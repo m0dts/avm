@@ -1682,7 +1682,14 @@ def schmidl_cox_sync(rx, cfg, search_start=0, search_len=None, prefer_earliest=F
         # Median of every 64th value: this floor only has to be the right
         # order of magnitude (1e-9 x typical), and a full median over the
         # whole search window was ~10% of a Raspberry Pi 4's decode time.
-        energy_floor = 1e-9 * max(np.median(E12[::64]), 1e-30)
+        # ...and not a near-silent stretch: a transmission fading into a
+        # gap (the resampler's ringing) correlates with itself at the
+        # preamble's lag, so mode D's long symbols found a false "preamble"
+        # in each inter-fragment gap, decoded garbage there, and stepped
+        # past the real one. A preamble is sent at full power: ignore
+        # candidates over 60 dB (E1 E2: ~30 dB a half) below the strongest
+        # in the window (measured: real ones ~6 dB, the gap's ~90-100 dB)
+        energy_floor = max(1e-9 * max(np.median(E12[::64]), 1e-30), 1e-6 * float(np.max(E12)))
         above = np.where((metric > SYNC_METRIC_MIN) & (E12 > energy_floor))[0]
         if len(above):
             # The metric ramps up smoothly through a transition (e.g.

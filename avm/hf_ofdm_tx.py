@@ -47,6 +47,12 @@ import numpy as np
 
 import hf_ofdm_common as ofdm
 
+# AVM_CPP=1: the modem on its C++ kernels (c++/avm_cpp.py; same results)
+if os.environ.get("AVM_CPP", "0") not in ("", "0"):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "c++"))
+    import avm_cpp
+    avm_cpp.install_if_enabled()
+
 FRAG_HEADER = struct.Struct(">HHI")  # frag_index, total_frags, total_len -- see hf_ofdm_rx.py
 
 

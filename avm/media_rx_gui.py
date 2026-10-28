@@ -138,27 +138,59 @@ def list_audio_output_devices(rescan=False):
     return devices
 
 
+def list_pipewire_sinks():
+    """PipeWire's audio outputs [(node name, description, ALSA card or None)],
+    or None where PipeWire isn't running (Windows, a system without it). With
+    PipeWire, the output list offers these only: what AVM plays through it
+    is what a screen recording (~/record.sh) and the system's own volume
+    controls see -- a card played to directly bypassed both."""
+    import json
+    import shutil
+    import subprocess
+    run = os.environ.get("XDG_RUNTIME_DIR")
+    if not sys.platform.startswith("linux") or not shutil.which("pw-dump") or not run \
+            or not os.path.exists(os.path.join(run, "pipewire-0")):
+        return None
+    try:
+        nodes = json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5).stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    out = []
+    for n in nodes:
+        p = (n.get("info") or {}).get("props") or {}
+        if p.get("media.class") == "Audio/Sink" and p.get("node.name"):
+            out.append((p["node.name"], p.get("node.description") or p["node.name"], p.get("alsa.card")))
+    return out
+
+
 def set_output_full_volume(device):
     """Linux: every playback volume control of the output device's sound
     card to 100% and unmuted, as playback starts -- the volume is meant to
     be set outside (a volume knob after the device), not left low inside it
     (seen: a USB adapter's Speaker at 14/37). Controls named Mic are left
     alone: on USB adapters that is the microphone fed back into the speaker.
-    device: a sounddevice index or name ('... (hw:5,0)'); the system default
-    and aliases without a card number are left as they are."""
+    device: a sounddevice index or name ('... (hw:5,0)'), or 'pw:<node>' (a
+    PipeWire output: its card); the system default and aliases without a
+    card number are left as they are."""
     import shutil
     import subprocess
     if not sys.platform.startswith("linux") or not shutil.which("amixer") or device is None:
         return
-    try:
-        import sounddevice as sd
-        name = sd.query_devices(device)["name"] if isinstance(device, int) else str(device)
-    except Exception:
-        return
-    m = re.search(r"\(hw:(\d+),", name) or re.search(r"CARD=(\w+)", name)
-    if not m:
-        return
-    card = m.group(1)
+    if isinstance(device, str) and device.startswith("pw:"):
+        card = next((c for node, _, c in (list_pipewire_sinks() or []) if node == device[3:]), None)
+        if card is None:
+            return
+        card = str(card)
+    else:
+        try:
+            import sounddevice as sd
+            name = sd.query_devices(device)["name"] if isinstance(device, int) else str(device)
+        except Exception:
+            return
+        m = re.search(r"\(hw:(\d+),", name) or re.search(r"CARD=(\w+)", name)
+        if not m:
+            return
+        card = m.group(1)
     try:
         controls = subprocess.run(["amixer", "-c", card, "scontrols"], capture_output=True, text=True,
                                   timeout=3).stdout
@@ -730,6 +762,22 @@ class MediaRxWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _refresh_audio_devices(self):
+        sinks = list_pipewire_sinks()
+        if sinks is not None:
+            # PipeWire's outputs only, by name; a choice saved from the old
+            # list ("2: USB Audio Device: - (hw:4,0)") is matched by its card
+            current = self.audio_device.currentText()
+            self.audio_device.clear()
+            self.audio_device.addItem("(system default)", "")
+            for node, desc, _ in sinks:
+                self.audio_device.addItem(desc, f"pw:{node}")
+            m = re.search(r"\bhw:(\d+)", current)
+            if m:
+                current = next((d for _, d, c in sinks if str(c) == m.group(1)), current)
+            idx = self.audio_device.findText(current)
+            self.audio_device.setCurrentIndex(max(idx, 0))
+            self._append_log(f"[gui] found {len(sinks)} PipeWire audio output(s).")
+            return
         try:
             # a fresh scan (devices plugged in since) only while nothing plays
             devices = list_audio_output_devices(rescan=getattr(self, "_audio_worker", None) is None)

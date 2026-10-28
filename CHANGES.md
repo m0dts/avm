@@ -3,6 +3,18 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.1.0 (C++ test build)
+- AVM is now a C++ program: no Python needed. Faster decoding (about twice as fast), quicker start, smaller install
+- Updating from 1.0.x: the Update button installs it and carries your settings over (callsign, frequencies, radios, modes, gains); choose the microphone again in Config
+- Raspberry Pi / Linux: the installer builds AVM on the machine (about 10 minutes the first time on a Pi 4)
+- Windows: one ready-built download, no Python or conda (RTL-SDR not included)
+- Web page, recordings, messages, duplex, KiwiSDR and the virtual radio as before
+- Config: Motion (Sharp / Smooth: higher frame rate, smaller picture on slow links); RX spectrum and audio output under Receiver; About page
+- RX spectrum: green band where a signal is found; span top right; Ref level is Auto only
+- Audio: no clicks when the buffer trims or runs out; test tone now 400 Hz; fixed dropouts on SH links (the transmitter's fragment timing)
+- Touchscreen: the first tap in a picker, keyboard or message box lands where you touch
+- Licence: GPL-3.0
+
 ## 1.0.21 (2026-10-21)
 - Compatible over the air with 1.0.20: older versions simply don't show the new text messages
 - Text messages: the envelope button beside TX sends a short message (up to 80 characters), repeated until you clear or change it, in the space left over in each fragment. Beside RX, the envelope button lights up with a count when messages arrive

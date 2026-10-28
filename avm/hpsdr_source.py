@@ -61,6 +61,37 @@ def _local_ipv4():
 
 
 def discover(host=None, timeout=0.6, sock=None):
+    """Radios answering discovery in either protocol: [(ip, board name, busy)],
+    protocol 2 first (a radio answering both is used in protocol 2)."""
+    import hpsdr1_source
+    found = {r[0]: r for r in discover_p2(host, timeout)}
+    for ip, board, busy, _ in hpsdr1_source.discover(host, timeout):
+        found.setdefault(ip, (ip, board, busy))
+    return list(found.values())
+
+
+def open_rx(server, freq_hz, sample_rate_hz=None, rx_gain_db=MAX_GAIN_DB, antenna=None,
+            gain_file=None, freq_offset_file=None):
+    """The receive source for the radio found: protocol 2 (HpsdrRxSource) if one
+    answers, else protocol 1 (Hermes-Lite 2, Radioberry: hpsdr1_source)."""
+    import hpsdr1_source
+    host = str(server or "").replace("ip:", "").split(":")[0].strip() or None
+    p2 = discover_p2(host)
+    if host:
+        p2 = [r for r in p2 if r[0] == host]
+    if not p2:
+        p1 = hpsdr1_source.discover(host)
+        if host:
+            p1 = [r for r in p1 if r[0] == host] or p1
+        if p1:
+            return hpsdr1_source.Hpsdr1RxSource(server, freq_hz, sample_rate_hz=sample_rate_hz,
+                                                rx_gain_db=rx_gain_db, gain_file=gain_file,
+                                                freq_offset_file=freq_offset_file, radio=p1[0])
+    return HpsdrRxSource(server, freq_hz, sample_rate_hz=sample_rate_hz, rx_gain_db=rx_gain_db,
+                         antenna=antenna, gain_file=gain_file, freq_offset_file=freq_offset_file)
+
+
+def discover_p2(host=None, timeout=0.6, sock=None):
     """Protocol 2 radios answering discovery: [(ip, board name, busy)].
     host: ask that address too. The broadcast goes out of EVERY interface,
     from each one's own address: an unbound broadcast only leaves by the
@@ -148,7 +179,7 @@ class HpsdrRxSource:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
         self.sock.bind(("", 0))
         host = str(server or "").replace("ip:", "").split(":")[0].strip() or None
-        radios = discover(host)
+        radios = discover_p2(host)
         if host:
             radios = [r for r in radios if r[0] == host] or radios
         if not radios:

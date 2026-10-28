@@ -1,21 +1,15 @@
 # AVM installer for Windows 10/11 (64-bit). Run via install_avm.bat.
 #
 # On a new PC, install_avm.bat on its own is enough: it fetches this script,
-# which downloads AVM from GitHub into %USERPROFILE%\avm.
-#
-# No admin rights needed; everything else goes under %LOCALAPPDATA%\AVM:
-#   0. AVM itself: from GitHub, unless this script sits in / beside an AVM
-#      folder already (a copied release folder). -Update fetches the latest.
-#   1. conda: uses radioconda (preferred) / Miniforge / Anaconda if present,
-#      else installs Miniforge (just for this user)
-#   2. a private Python environment (conda-forge): numpy, scipy, numba, PyQt5,
-#      pyqtgraph, opencv, av, sounddevice, SoapySDR + Pluto / Lime / RTL modules
-#   3. ffmpeg: uses one already on PATH or in C:\ffmpeg\bin, else downloads it
-#   4. AVM.bat launcher in the AVM folder + Desktop and Start-menu shortcuts
-# Safe to re-run: done steps are skipped. "install_avm.bat -Check" only reports.
-# It first shows what it would install and where, and asks (not with -Yes,
-# or -Restart from AVM's Update button). Everything it prints also goes to a
-# log, %LOCALAPPDATA%\AVM\install.log.
+# which downloads AVM -- one ready-built zip, nothing else to install (no
+# Python, no conda, no admin rights) -- into %USERPROFILE%\avm\app:
+#   0. AVM itself: the release zip (AVM-windows.zip) from GitHub's latest
+#      release, or one beside this script, or AVM_ZIP=<file>. -Update fetches
+#      it again; -Restart (an older AVM's Update button) too, then starts AVM.
+#   1. AVM.bat + Desktop and Start-menu shortcuts (older ones switched over)
+# Safe to re-run. "install_avm.bat -Check" only reports. It first shows what
+# it would do and asks (not with -Yes or -Restart). Everything it prints also
+# goes to a log, %LOCALAPPDATA%\AVM\install.log.
 param([switch]$Check, [switch]$Update, [switch]$Restart, [switch]$Yes)
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with the progress bar
@@ -28,31 +22,22 @@ function Die($m)  {
     if ($script:log) { Write-Host "Install log: $script:log"; try { Stop-Transcript | Out-Null } catch { } }
     exit 1
 }
-# What an install would add, collected by -Check for its summary
-$script:plan = @()
-function Plan($what, $where, $mb = 0) { $script:plan += [pscustomobject]@{ What = $what; Where = $where; MB = $mb } }
 
 # ---------------------------------------------------------------- where things are
 $repo = if ($env:AVM_REPO) { $env:AVM_REPO } else { "m0dts/avm" }
-$branch = if ($env:AVM_BRANCH) { $env:AVM_BRANCH } else { "main" }
-# AVM always lives in %USERPROFILE%\avm (or AVM_INSTALL_DIR). Run from a
-# copy elsewhere (an unzipped download or release folder: AVM beside this
-# script, in .\ or .\avm), that copy is copied there; otherwise it's
-# fetched from GitHub.
+# the release zip: AVM_ZIP (a file), else one beside this script, else GitHub's
+# latest release (AVM_RELEASE=<tag> for a particular one, e.g. a test build)
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$local = $null
-if (Test-Path "$here\touch_gui.py") { $local = $here }
-elseif (Test-Path "$here\avm\touch_gui.py") { $local = "$here\avm" }
+$zipUrl = if ($env:AVM_RELEASE) { "https://github.com/$repo/releases/download/$($env:AVM_RELEASE)/AVM-windows.zip" }
+          else { "https://github.com/$repo/releases/latest/download/AVM-windows.zip" }
+$localZip = if ($env:AVM_ZIP) { $env:AVM_ZIP } elseif (Test-Path "$here\AVM-windows.zip") { "$here\AVM-windows.zip" } else { $null }
 $avm = if ($env:AVM_INSTALL_DIR) { $env:AVM_INSTALL_DIR } else { Join-Path $env:USERPROFILE "avm" }
 $avm = [IO.Path]::GetFullPath($avm).TrimEnd("\")
-$fromLocal = $local -and ([IO.Path]::GetFullPath($local).TrimEnd("\") -ne $avm)
-if (-not [Environment]::Is64BitOperatingSystem) { Die "AVM needs 64-bit Windows (numba has no 32-bit builds)." }
+$app = Join-Path $avm "app"
+$exe = Join-Path $app "avm_gui.exe"
+if (-not [Environment]::Is64BitOperatingSystem) { Die "AVM needs 64-bit Windows." }
 $home_ = Join-Path $env:LOCALAPPDATA "AVM"
-$envDir = Join-Path $home_ "env"
-$py = Join-Path $envDir "python.exe"
 New-Item -ItemType Directory -Force $home_ | Out-Null
-# Everything an install prints also goes to a log (the updated installer this
-# one may start appends to it); -Check only reports
 $script:log = $null
 if (-not $Check) {
     $script:log = Join-Path $home_ "install.log"
@@ -60,301 +45,88 @@ if (-not $Check) {
     $env:AVM_INSTALL_LOG = $script:log
     try { Start-Transcript -Path $script:log -Append:$append | Out-Null } catch { $script:log = $null }
 }
-# Look before touching anything: this script's own -Check survey, then ask
-if (-not $Check -and -not $Yes -and -not $Restart) {
-    Write-Host "AVM installer: checking this PC first (nothing is changed yet)..." -ForegroundColor White
-    $chk = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path, "-Check")
-    if ($Update) { $chk += "-Update" }
-    & powershell @chk | Out-Host
-    $ans = Read-Host "`nInstall / change what is listed above? [y/N]"
+$have = if (Test-Path "$app\VERSION") { (Get-Content "$app\VERSION" -TotalCount 1).Trim() } else { $null }
+$fetch = $Update -or $Restart -or -not (Test-Path $exe)
+
+# ---------------------------------------------------------------- survey
+if ($Check -or (-not $Yes -and -not $Restart)) {
+    Write-Host "AVM installer for Windows"
+    Write-Host "  AVM folder: $app"
+    if ($have) { Write-Host "  installed:  AVM $have" } else { Write-Host "  installed:  no" }
+    if ($fetch) {
+        $from = if ($localZip) { $localZip } else { $zipUrl }
+        Write-Host "  would get:  AVM-windows.zip (~100 MB) from $from"
+    }
+    Write-Host "  would set:  AVM.bat, and 'AVM' shortcuts on the Desktop and in the Start menu"
+    Write-Host "  No admin rights are needed; nothing is installed outside your user folders."
+    if ($Check) { exit 0 }
+    $ans = Read-Host "`nInstall / change this? [y/N]"
     if ($ans -notmatch '^(y|yes)$') {
         Write-Host "Nothing changed."
         try { Stop-Transcript | Out-Null } catch { }
         exit 0
     }
-    Write-Host "Installing (log: $script:log)"
 }
-Write-Host "AVM folder : $avm"
-Write-Host "Installs to: $home_"
 
-# ---------------------------------------------------------------- 0. AVM from GitHub
-Say "0. AVM program files"
-if ($fromLocal -and -not $Update) {
-    if ($Check) {
-        Write-Host "would copy AVM from $local into $avm"
-        Plan "AVM program files (copied)" $avm 3
-    } else {
-        # this copy's files into the user folder (its logs and launcher left
-        # out: step 4 writes the launcher for the user folder)
-        New-Item -ItemType Directory -Force $avm | Out-Null
-        Get-ChildItem $local -Exclude "gui_logs", "AVM.bat", "__pycache__" |
-            Copy-Item -Destination $avm -Recurse -Force
-        Write-Host "copied AVM from $local into $avm (the copy in $local can be deleted)"
-    }
-} elseif ((Test-Path "$avm\touch_gui.py") -and -not $Update) {
-    Write-Host "present ($avm); -Update fetches the latest from GitHub"
-} elseif ($Check) {
-    Write-Host "would download github.com/$repo ($branch) into $avm"
-    Plan "AVM program files (from GitHub)" $avm 3
+# ---------------------------------------------------------------- 0. AVM
+Say "0. AVM"
+if (-not $fetch) {
+    Write-Host "present: AVM $have ($app); -Update fetches the latest"
 } else {
-    $url = if ($env:AVM_URL) { $env:AVM_URL } else { "https://github.com/$repo/archive/refs/heads/$branch.zip" }
-    $zip = Join-Path $env:TEMP "avm-download.zip"
-    $tmp = Join-Path $env:TEMP "avm-download"
-    Write-Host "downloading $url"
-    try { Invoke-WebRequest $url -OutFile $zip } catch { Die "download failed: $url ($($_.Exception.Message))" }
-    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-    Expand-Archive $zip -DestinationPath $tmp
-    $src = Get-ChildItem $tmp -Recurse -Filter touch_gui.py | Select-Object -First 1
-    if (-not $src) { Die "the download has no touch_gui.py ($url)" }
-    # copy over the top: settings live in the user profile, gui_logs\ is kept
-    New-Item -ItemType Directory -Force $avm | Out-Null
-    Copy-Item -Path (Join-Path $src.DirectoryName "*") -Destination $avm -Recurse -Force
-    Remove-Item -Recurse -Force $tmp; Remove-Item $zip
-    Write-Host "installed AVM into $avm"
-    # Carry on with the installer just downloaded, not this (older) copy:
-    # otherwise its newer steps (e.g. fetching an ffmpeg with Codec2) would
-    # only run next time. No -Update for it, so this happens once.
-    # (Even when that's this same file: PowerShell has the old text in memory.)
-    $newer = Join-Path $avm "install_avm_windows.ps1"
-    if (Test-Path $newer) {
-        Write-Host "continuing with the updated installer..."
-        try { Stop-Transcript | Out-Null } catch { }   # it appends to the same log
-        if ($Restart) { & powershell -NoProfile -ExecutionPolicy Bypass -File $newer -Restart }
-        else { & powershell -NoProfile -ExecutionPolicy Bypass -File $newer -Yes }
-        exit $LASTEXITCODE
+    if (Get-Process avm_gui -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }) {
+        Write-Host "closing the running AVM first..."
+        Get-Process avm_gui | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
+        Start-Sleep -Seconds 2
     }
-}
-if (-not (Test-Path "$avm\touch_gui.py") -and -not $Check) { Die "touch_gui.py not found in $avm." }
-
-# ---------------------------------------------------------------- 1. conda
-Say "1. conda"
-# radioconda first (an SDR-focused conda: often already there on a radio PC),
-# wherever its installer put it; then any other conda, then conda on PATH
-$condaCandidates = @(
-    "$env:ProgramData\radioconda", "$env:USERPROFILE\radioconda", "$env:LOCALAPPDATA\radioconda",
-    "$env:LOCALAPPDATA\Programs\radioconda", "C:\radioconda",
-    "$env:USERPROFILE\miniforge3", "$env:LOCALAPPDATA\miniforge3", "$env:ProgramData\miniforge3",
-    "$home_\miniforge3", "$env:USERPROFILE\anaconda3", "$env:USERPROFILE\miniconda3",
-    "$env:ProgramData\anaconda3", "$env:ProgramData\miniconda3")
-$onPath = Get-Command conda.exe -ErrorAction SilentlyContinue
-if ($onPath) { $condaCandidates += (Split-Path -Parent (Split-Path -Parent $onPath.Source)) }
-$condaRoot = $condaCandidates | Where-Object { Test-Path "$_\Scripts\conda.exe" } | Select-Object -First 1
-if ($condaRoot -and $condaRoot -like "*radioconda*") { Write-Host "radioconda found" }
-if ($condaRoot) {
-    Write-Host "using $condaRoot"
-} elseif ($Check) {
-    Write-Host "none found (Miniforge would be installed)"
-    Plan "Miniforge (conda, just for this user)" "$home_\miniforge3" 400
-} else {
-    $mf = Join-Path $home_ "miniforge3"
-    $exe = Join-Path $env:TEMP "Miniforge3-Windows-x86_64.exe"
-    Write-Host "downloading Miniforge..."
-    Invoke-WebRequest "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe" -OutFile $exe
-    Write-Host "installing Miniforge to $mf (a few minutes)..."
-    Start-Process -Wait -FilePath $exe -ArgumentList "/InstallationType=JustMe", "/RegisterPython=0", "/AddToPath=0", "/S", "/D=$mf"
-    Remove-Item $exe -ErrorAction SilentlyContinue
-    if (-not (Test-Path "$mf\Scripts\conda.exe")) { Die "Miniforge install failed." }
-    $condaRoot = $mf
-}
-# mamba is much faster at solving where it exists
-$solver = @("$condaRoot\Scripts\mamba.exe", "$condaRoot\Library\bin\mamba.exe", "$condaRoot\condabin\mamba.bat") |
-    Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $solver) { $solver = "$condaRoot\Scripts\conda.exe" }
-
-# ---------------------------------------------------------------- 2. environment
-Say "2. Python environment ($envDir)"
-# headless OpenCV: the default build drags in Qt6 next to AVM's PyQt5
-$pkgs = @("python=3.12", "numpy", "scipy", "numba", "pyqt=5", "pyqtgraph", "py-opencv=*=headless*", "av",
-          "python-sounddevice", "soapysdr", "soapysdr-module-plutosdr", "soapysdr-module-lms7",
-          "soapysdr-module-rtlsdr", "soapysdr-module-airspy", "soapysdr-module-airspyhf")
-$imports = "numpy scipy numba cv2 av PyQt5 pyqtgraph sounddevice SoapySDR"
-function Test-Env {
-    if (-not (Test-Path $py)) { return $false }
-    & $py -c "import $($imports -replace ' ', ', ')" 2>$null
-    return ($LASTEXITCODE -eq 0)
-}
-if (Test-Env) {
-    Write-Host "present, all modules import"
-} elseif ($Check) {
-    Write-Host "missing or incomplete"
-    Plan "Python environment (packages listed below)" $envDir 1500
-    $script:envPkgs = ($pkgs -join ", ") -replace "=\*=headless\*", ""
-    Plan "conda's download cache" "$home_\pkgs" 600
-} else {
-    # package cache in our own folder: a radioconda in ProgramData isn't writable without admin
-    $env:CONDA_PKGS_DIRS = Join-Path $home_ "pkgs"
-    $verb = if (Test-Path $py) { "install" } else { "create" }
-    Write-Host "conda $verb (downloads ~0.5-1 GB the first time; several minutes)..."
-    & $solver $verb -y -p $envDir -c conda-forge --override-channels @pkgs | Out-Host
-    if ($LASTEXITCODE -ne 0) { Die "conda $verb failed (see above)." }
-    if (-not (Test-Env)) {
-        & $py -c "import $($imports -replace ' ', ', ')"
-        Die "environment created but some modules don't import (see above)."
+    $zip = if ($localZip) { $localZip } else { Join-Path $env:TEMP "AVM-windows.zip" }
+    if (-not $localZip) {
+        Write-Host "downloading $zipUrl (~100 MB)..."
+        try { Invoke-WebRequest $zipUrl -OutFile $zip } catch { Die "download failed: $zipUrl ($($_.Exception.Message))" }
     }
-    Write-Host "done"
+    # unpacked beside, then swapped in: a failed download or unpack leaves the old AVM
+    $new = Join-Path $avm "app.new"
+    if (Test-Path $new) { Remove-Item -Recurse -Force $new }
+    try { Expand-Archive $zip -DestinationPath $new } catch { Die "couldn't unpack $zip ($($_.Exception.Message))" }
+    if (-not (Test-Path "$new\avm_gui.exe")) { Die "the zip has no avm_gui.exe ($zip)" }
+    if (Test-Path "$app\gui_logs") { Move-Item "$app\gui_logs" "$new\gui_logs" }    # the logs kept
+    if (Test-Path $app) { Remove-Item -Recurse -Force $app }
+    Move-Item $new $app
+    if (-not $localZip) { Remove-Item $zip -ErrorAction SilentlyContinue }
+    $have = (Get-Content "$app\VERSION" -TotalCount 1).Trim()
+    Write-Host "installed AVM $have into $app"
 }
 
-# ---------------------------------------------------------------- 3. ffmpeg
-Say "3. ffmpeg"
-# AVM needs ffmpeg with Opus and Codec2. Use the first ffmpeg found that has
-# both; otherwise download gyan.dev's "full" build (it has both; the common
-# BtbN builds lack Codec2) into %LOCALAPPDATA%\AVM\ffmpeg. It's a .7z, which
-# Windows' own tar.exe (bsdtar) unpacks -- no 7-Zip needed.
-function Get-FfEncoders($exe) {
-    try { return ((& $exe -hide_banner -encoders 2>$null) -join "`n") } catch { return "" }
-}
-$candidates = @("$avm\ffmpeg\bin", "$home_\ffmpeg\bin", "C:\ffmpeg\bin")
-$onPath = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-if ($onPath) { $candidates += (Split-Path -Parent $onPath.Source) }
-$ffDir = $null
-$partial = $null   # an ffmpeg without Codec2, if that's all there is
-foreach ($d in $candidates) {
-    if (-not (Test-Path "$d\ffmpeg.exe")) { continue }
-    $enc = Get-FfEncoders "$d\ffmpeg.exe"
-    if ($enc -match "libcodec2" -and $enc -match "libopus") { $ffDir = $d; break }
-    if (-not $partial) { $partial = $d }
-}
-if ($ffDir) {
-    Write-Host "using $ffDir\ffmpeg.exe (Opus and Codec2)"
-} elseif ($Check) {
-    if ($partial) { Write-Host "$partial\ffmpeg.exe has no Codec2: the full build would be downloaded" }
-    else { Write-Host "not found: the full build would be downloaded" }
-    Plan "ffmpeg full build (gyan.dev)" "$home_\ffmpeg" 450
-} else {
-    if ($partial) { Write-Host "$partial\ffmpeg.exe has no Codec2 -- getting the full build" }
-    $arc = Join-Path $env:TEMP "ffmpeg-avm-full.7z"
-    $tmp = Join-Path $home_ "ffmpeg_tmp"
-    try {
-        Write-Host "downloading ffmpeg full build (~170 MB, gyan.dev)..."
-        Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z" -OutFile $arc
-        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-        New-Item -ItemType Directory $tmp | Out-Null
-        # Windows 11's tar unpacks .7z; Windows 10's often can't -- then use
-        # 7-Zip's small standalone extractor (7zr.exe, from 7-zip.org)
-        $unpacked = $false
-        try {
-            & "$env:SystemRoot\System32\tar.exe" -xf $arc -C $tmp 2>$null
-            $unpacked = ($LASTEXITCODE -eq 0) -and (Get-ChildItem $tmp -Recurse -Filter ffmpeg.exe)
-        } catch { }
-        if (-not $unpacked) {
-            Write-Host "Windows' tar can't unpack .7z here -- using 7-Zip's 7zr.exe"
-            $7zr = Join-Path $env:TEMP "7zr.exe"
-            Invoke-WebRequest "https://www.7-zip.org/a/7zr.exe" -OutFile $7zr
-            if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-            New-Item -ItemType Directory $tmp | Out-Null
-            & $7zr x -y "-o$tmp" $arc | Out-Null
-            Remove-Item $7zr -ErrorAction SilentlyContinue
-            if ($LASTEXITCODE -ne 0) { throw "couldn't unpack the .7z (tar and 7zr both failed)" }
-        }
-        $exe = Get-ChildItem $tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-        if (-not $exe) { throw "no ffmpeg.exe in the download" }
-        if (Test-Path "$home_\ffmpeg") { Remove-Item -Recurse -Force "$home_\ffmpeg" }
-        Move-Item (Split-Path -Parent $exe.DirectoryName) "$home_\ffmpeg"
-        $ffDir = "$home_\ffmpeg\bin"
-        Write-Host "installed to $ffDir"
-    } catch {
-        Warn "couldn't get the full ffmpeg build ($($_.Exception.Message))"
-        if ($partial) { $ffDir = $partial; Warn "using $partial\ffmpeg.exe: Opus only, no Codec2" }
-        else { Die "no ffmpeg: AVM needs one. Put a 'full' build in C:\ffmpeg and re-run." }
-    } finally {
-        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
-        if (Test-Path $arc) { Remove-Item $arc -ErrorAction SilentlyContinue }
-    }
-}
-if ($ffDir) {
-    $enc = Get-FfEncoders "$ffDir\ffmpeg.exe"
-    if ($enc -notmatch "libopus") { Warn "this ffmpeg has no Opus encoder: Opus audio won't work" }
-    if ($enc -notmatch "libcodec2") { Warn "this ffmpeg has no Codec2 encoder: AVM offers Opus only" }
-}
-
-# ---------------------------------------------------------------- 4. launcher
-Say "4. Launcher"
+# ---------------------------------------------------------------- 1. launcher
+Say "1. Launcher"
+# AVM.bat: where the shortcuts of older AVMs (the Python one) point -- now the C++ program
 $bat = Join-Path $avm "AVM.bat"
-$launcher = @"
+Set-Content -Path $bat -Encoding ascii -Value @"
 @echo off
 rem AVM launcher (written by install_avm.bat)
-set "PATH=$ffDir;$envDir;$envDir\Library\bin;$envDir\Scripts;%PATH%"
-cd /d "$avm"
-if not exist gui_logs mkdir gui_logs
-set "HF_RX_GUI_LOG=$avm\gui_logs\rx_session.log"
-start "AVM" "$envDir\pythonw.exe" touch_gui.py %*
+start "AVM" /d "$app" "$exe" %*
 "@
-if ($Check) {
-    if (Test-Path $bat) { Write-Host "present: $bat" } else { Write-Host "missing" }
-    Plan "AVM.bat launcher" $bat
-    Plan "'AVM' shortcuts" "Desktop and Start menu"
-} else {
-    Set-Content -Path $bat -Value $launcher -Encoding ascii
-    # AVM itself puts this ffmpeg first on its PATH however it's started
-    # (avm_threads.py), not only when started through AVM.bat
-    if ($ffDir) { Set-Content -Path (Join-Path $avm "ffmpeg_dir.txt") -Value $ffDir -Encoding ascii }
-    $ws = New-Object -ComObject WScript.Shell
-    $icon = "$env:SystemRoot\System32\shell32.dll,18"
-    foreach ($dir in @([Environment]::GetFolderPath("Desktop"), (Join-Path ([Environment]::GetFolderPath("Programs")) ""))) {
-        $lnk = $ws.CreateShortcut((Join-Path $dir "AVM.lnk"))
-        $lnk.TargetPath = $bat
-        $lnk.WorkingDirectory = $avm
-        $lnk.IconLocation = $icon
-        $lnk.WindowStyle = 7   # minimised: the .bat's console only flashes
-        $lnk.Description = "AVM -- Audio Video Modem"
-        $lnk.Save()
-    }
-    Write-Host "AVM.bat + 'AVM' shortcuts on the Desktop and in the Start menu"
+$ws = New-Object -ComObject WScript.Shell
+# (AVM_NO_SHORTCUTS=1: none -- a test install that mustn't replace the real ones)
+$shortcutDirs = if ($env:AVM_NO_SHORTCUTS -eq "1") { @() } else { @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs")) }
+foreach ($dir in $shortcutDirs) {
+    $lnk = $ws.CreateShortcut((Join-Path $dir "AVM.lnk"))
+    $lnk.TargetPath = $exe
+    $lnk.WorkingDirectory = $app
+    $lnk.IconLocation = "$exe,0"
+    $lnk.Description = "AVM -- Audio Video Modem"
+    $lnk.Save()
 }
+Write-Host "'AVM' shortcuts on the Desktop and in the Start menu -> $exe"
 
-# ---------------------------------------------------------------- summary
-if ($Check) {
-    Say "What installing will add or change"
-    if (-not $script:plan) {
-        Write-Host "  nothing: everything AVM needs is already here"
-    } else {
-        Write-Host ("  {0,-46} {1,-38} {2}" -f "WHAT", "WHERE", "SIZE")
-        foreach ($p in $script:plan) {
-            $size = if ($p.MB) { "~$($p.MB) MB" } else { "" }
-            Write-Host ("  {0,-46} {1,-38} {2}" -f $p.What, $p.Where, $size)
-        }
-        $total = ($script:plan | Measure-Object -Property MB -Sum).Sum
-        Write-Host "  ------------------------------------------------------------"
-        if ($script:envPkgs) {
-            # wrapped to the console: the list is long
-            $line = "  conda-forge packages:"
-            foreach ($w in ($script:envPkgs -split ", ")) {
-                if (($line.Length + $w.Length) -gt 96) { Write-Host $line; $line = "   " }
-                $line += " $w,"
-            }
-            Write-Host $line.TrimEnd(",")
-        }
-        Write-Host "  about $total MB of disk space in total (approximate)"
-        $drive = (Get-Item $env:LOCALAPPDATA).PSDrive
-        Write-Host ("  free now: {0:N0} MB on {1}:" -f ($drive.Free / 1MB), $drive.Name)
-        Write-Host "  No admin rights are needed; nothing is installed outside your user folders."
-    }
-}
-Say "Radios SoapySDR can see now"
-if (Test-Path $py) {
-    $env:PATH = "$envDir;$envDir\Library\bin;$env:PATH"
-    # errors only: the Pluto driver warns about search methods that don't
-    # apply on Windows ("Unable to scan local: -19") -- harmless noise; and
-    # libusb's own warnings ("could not infer VID/PID of HCD"). With
-    # $ErrorActionPreference Stop, Windows PowerShell made that stderr text a
-    # terminating error, and the installer ended here, before "Done"
-    $eap = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        & $py -c "import SoapySDR; SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_ERROR); r = SoapySDR.Device.enumerate(); print('\n'.join('  ' + d['driver'] + ': ' + d['label'] for d in r) or '  (none found)')" 2>$null
-    } catch { }
-    $ErrorActionPreference = $eap
-}
 Say "Done"
-Write-Host "Start AVM from the 'AVM' shortcut (or AVM.bat in $avm)."
+Write-Host "Start AVM from the 'AVM' shortcut."
+Write-Host "Radios: PlutoSDR, LimeSDR, Airspy and Airspy HF+ drivers are included (RTL-SDR isn't)."
 if ($script:log) { Write-Host "Install log (everything above): $script:log" }
-if ($Restart -and (Test-Path $bat)) {
-    # run from AVM's Update button: start AVM again, now fully up to date
-    Write-Host "restarting AVM..."
-    Start-Process -FilePath $bat -WorkingDirectory $avm -WindowStyle Minimized
-    Start-Sleep -Seconds 3
-    exit 0
+if ($Restart) {
+    # run from AVM's Update button: start AVM again, now up to date
+    Write-Host "starting AVM..."
+    Start-Process -FilePath $exe -WorkingDirectory $app
+    Start-Sleep -Seconds 2
 }
-Write-Host "The first TX/RX start compiles the modem and codec (a minute or two); later starts are quick."
-Write-Host "RTL-SDR on Windows needs the WinUSB driver (Zadig, zadig.akeo.ie) before it shows up."
 if ($script:log) { try { Stop-Transcript | Out-Null } catch { } }
+exit 0

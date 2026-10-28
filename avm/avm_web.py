@@ -29,6 +29,29 @@ IMAGE_MAGIC = ((b"\xff\xd8\xff", "image/jpeg"), (b"\x89PNG\r\n\x1a\n", "image/pn
                (b"GIF8", "image/gif"), (b"BM", "image/bmp"), (b"RIFF", "image/webp"))
 
 
+# Screen recordings (~/record.sh on the Pi writes them here): listed on the
+# page to play or download. Only plain .mp4 names from this folder are served.
+RECORDINGS_DIR = os.path.join(os.path.expanduser("~"), "recordings")
+RECORDING_RE = re.compile(r"^[\w.-]{1,120}\.mp4$")
+RECORDINGS_SHOWN = 20
+
+
+def _recordings():
+    """[(name, bytes, mtime)] newest first."""
+    try:
+        names = [n for n in os.listdir(RECORDINGS_DIR) if RECORDING_RE.match(n)]
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        try:
+            st = os.stat(os.path.join(RECORDINGS_DIR, n))
+        except OSError:
+            continue
+        out.append((n, st.st_size, st.st_mtime))
+    return sorted(out, key=lambda r: -r[2])
+
+
 def _image_type(data):
     for magic, ctype in IMAGE_MAGIC:
         if data.startswith(magic) and (ctype != "image/webp" or data[8:12] == b"WEBP"):
@@ -191,6 +214,11 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8">
  <img id="shot" alt="AVM screen" style="display:none;max-width:100%;border-radius:6px">
  <p class="dim">A picture of the AVM screen as it is now. Save downloads the one shown as a PNG file (a new one if none was taken).</p>
 </div>
+<div class="card">
+ <label>Recordings ({rec_count})</label>
+ {recordings}
+ <p class="dim">Screen recordings from ~/record.sh, newest first. Tap one to play it here, or Download to save it.</p>
+</div>
 </div></body></html>"""
 
 
@@ -244,12 +272,21 @@ def start(get_kiwi, set_kiwi, title="AVM", grab=None):
                          f'style="max-width:100%;max-height:240px;border-radius:6px"></p>')
             else:
                 image = '<p class="dim">No picture uploaded yet (the test pattern is sent instead).</p>'
+            recs = _recordings()
+            items = []
+            for n, size, mtime in recs[:RECORDINGS_SHOWN]:
+                e = html.escape(n, quote=True)
+                when = time.strftime("%d %b %H:%M", time.localtime(mtime))
+                items.append(f'<details><summary>{when} &middot; {size / 1e6:.1f} MB</summary>'
+                             f'<video controls preload="none" src="/rec/{e}" style="width:100%;border-radius:6px;margin-top:6px"></video>'
+                             f'<p><a href="/rec/{e}?dl=1"><button type="button">Download</button></a></p></details>')
+            recordings = "".join(items) or '<p class="dim">No recordings yet.</p>'
             box = lambda m, good: (f'<div class="msg" style="background:{"#24543a" if good else "#6b2a24"}">'
                                    f'{html.escape(m)}</div>') if m else ""
             body = PAGE.format(title=html.escape(title), kiwi=html.escape(value if value is not None else (get_kiwi() or "")),
                                current=html.escape(current), msg_bg="#24543a" if ok else "#6b2a24",
                                msg=box(msg, ok), image_msg=box(image_msg, image_ok), image=image,
-                               history=history).encode()
+                               history=history, recordings=recordings, rec_count=len(recs)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -291,10 +328,58 @@ def start(get_kiwi, set_kiwi, title="AVM", grab=None):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if path.startswith("/rec/"):
+                self._send_recording(urllib.parse.unquote(path[5:]), "dl=1" in self.path)
+                return
             if path not in ("/", "/index.html"):
                 self.send_error(404)
                 return
             self._page()
+
+        def _send_recording(self, name, download):
+            if not RECORDING_RE.match(name):
+                self.send_error(404)
+                return
+            fn = os.path.join(RECORDINGS_DIR, name)
+            try:
+                size = os.path.getsize(fn)
+                f = open(fn, "rb")
+            except OSError:
+                self.send_error(404)
+                return
+            with f:
+                start, end = 0, size - 1
+                m = re.match(r"bytes=(\d*)-(\d*)$", self.headers.get("Range", ""))
+                if m and (m.group(1) or m.group(2)):
+                    if m.group(1):
+                        start = int(m.group(1))
+                        end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                    else:
+                        start = max(0, size - int(m.group(2)))
+                    if start > end:
+                        self.send_error(416)
+                        return
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                else:
+                    self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(end - start + 1))
+                if download:
+                    self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+                self.end_headers()
+                f.seek(start)
+                left = end - start + 1
+                try:
+                    while left > 0:
+                        chunk = f.read(min(left, 1 << 16))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        left -= len(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass   # the player stopped reading (seek, close): normal
 
         def _upload_image(self):
             n = int(self.headers.get("Content-Length") or 0)

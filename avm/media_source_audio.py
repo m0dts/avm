@@ -23,6 +23,8 @@ import sys
 import avm_threads
 from media_source import build_audio_args, list_devices
 
+OPUS_LOWDELAY_MIN_KBPS = 10.0   # Opus's low-delay mode from this rate up (see main)
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -52,8 +54,8 @@ def main():
                      help="Opus frame duration in ms (default 20). See the old media_source.py's "
                           "docstring for how this affects packing density in hf_ofdm_rx.py's "
                           "fixed-size fragments. Ignored for --audio-codec codec2.")
-    ap.add_argument("--tone-hz", type=float, default=650.0,
-                     help="Test tone frequency in Hz for --source test (default 650).")
+    ap.add_argument("--tone-hz", type=float, default=800.0,
+                     help="Test tone frequency in Hz for --source test (default 800).")
     ap.add_argument("--duration", type=float, default=None,
                      help="Stop after this many seconds (default: run until interrupted).")
     args = ap.parse_args()
@@ -115,6 +117,18 @@ def main():
             # difference for speech at these bitrates
             "-c:a", "libopus", "-compression_level", "5", "-b:a", audio_kbps, "-vbr", "off", "-ac", "1",
             "-frame_duration", f"{args.audio_frame_duration:g}", "-ar", str(args.audio_rate),
+        ]
+        if args.source == "test" and args.audio_bitrate >= OPUS_LOWDELAY_MIN_KBPS:
+            # The test tone from 10 kbit/s: Opus's low-delay mode (its music
+            # coder alone). Its default switches between the speech and music
+            # coders around 12-16 kbit/s, and every switch on a steady tone was
+            # a break -- measured on a 650 Hz tone: 45 breaks in 20 s at 13.8
+            # kbit/s, none in low-delay mode. Not for a microphone: speech
+            # through the music coder alone sounded far worse than the default,
+            # whose speech coder is made for it. Below 10 the music coder alone
+            # is far worse anyway (949 breaks at 6), so the default stays.
+            cmd += ["-application", "lowdelay"]
+        cmd += [
             # -page_duration 20000 (us): one Ogg page per 20ms packet. The
             # muxer's default is ~1s pages, which delivered audio in 1s
             # bursts (measured: max inter-packet gap 1016ms vs 47ms with

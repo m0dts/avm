@@ -1,0 +1,19 @@
+# build output
+avm/gui/build*/
+avm/dist/
+avm/c++/*.dll
+avm/c++/*.so
+avm/c++/*.exe
+avm/c++/*.lib
+avm/c++/*.pdb
+avm/c++/avm_rx
+avm/c++/avm_tx
+avm/c++/_e2e/
+# Windows-only third-party sources (see avm/gui/third_party/README.md)
+avm/gui/third_party/ffmpeg/
+avm/gui/third_party/opus/
+avm/gui/third_party/codec2/
+# run-time
+__pycache__/
+avm/gui_logs/
+avm/BRANCH

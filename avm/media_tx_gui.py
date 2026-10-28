@@ -152,7 +152,7 @@ class MediaTxWindow(QtWidgets.QMainWindow):
         self.audio_device.addItem("Microphone" if sys.platform == "win32" else "default")
         self.tone_hz = QtWidgets.QDoubleSpinBox()
         self.tone_hz.setRange(20, 20000)
-        self.tone_hz.setValue(650)
+        self.tone_hz.setValue(800)
         self.tone_hz.setToolTip("Test tone (Hz)")
         for combo in (self.video_device, self.audio_device):
             # don't let a long device name set the window's minimum width

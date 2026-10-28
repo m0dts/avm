@@ -7,7 +7,7 @@ FULL_NAME = "Audio Video Modem"
 # 1.0.BUILD: BUILD goes up by one each release -- tools/make_release.py bumps
 # it (and writes it here) every time it builds the release folder.
 BUILD = 21
-VERSION = f"1.0.{BUILD}"
+VERSION = "1.1.0"   # the C++ AVM (BUILD: the 1.0.x Python series)
 
 SHORT_TITLE = f"{NAME} v{VERSION}"                   # e.g. top bar
 TITLE = f"{NAME} — {FULL_NAME} v{VERSION}"      # window titles
