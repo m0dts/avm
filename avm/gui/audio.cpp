@@ -10,6 +10,8 @@
 #include "codec2.h"
 
 #include <QJsonArray>
+#include <algorithm>
+#include <cstring>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <atomic>
@@ -52,15 +54,21 @@ struct AudioOut::Impl {
     FILE* pw = nullptr;
     std::thread pwThread;
     std::atomic<bool> pwStop{false};
+    // an output PipeWire doesn't offer, played straight to ALSA ("... (ALSA)")
+    ma_context alsa;
+    bool alsa_init = false;
 };
 
 #ifndef _WIN32
-// PipeWire's node name for an output listed by its description (miniaudio's
-// names through PipeWire's PulseAudio layer: "USB Audio Device Analog Stereo"),
-// from pw-dump; "" if there's none
-static std::string pwSinkFor(const std::string& description) {
+// an output listed from ALSA itself: one PipeWire doesn't offer -- e.g. HDMI on a
+// screen that sends no EDID (PipeWire then assumes it has no speakers)
+static const std::string ALSA_SUFFIX = " (ALSA)";
+
+// PipeWire's outputs (their properties), from pw-dump
+static QJsonArray pwSinks() {
+    QJsonArray out;
     FILE* p = popen("pw-dump 2>/dev/null", "r");
-    if (!p) return "";
+    if (!p) return out;
     QByteArray json;
     char b[65536];
     size_t n;
@@ -68,11 +76,36 @@ static std::string pwSinkFor(const std::string& description) {
     pclose(p);
     for (const QJsonValue& v : QJsonDocument::fromJson(json).array()) {
         QJsonObject props = v.toObject().value("info").toObject().value("props").toObject();
-        if (props.value("media.class").toString() == "Audio/Sink" &&
-            props.value("node.description").toString().toStdString() == description)
+        if (props.value("media.class").toString() == "Audio/Sink") out.append(props);
+    }
+    return out;
+}
+
+// PipeWire's node name for an output listed by its description (miniaudio's
+// names through PipeWire's PulseAudio layer: "USB Audio Device Analog Stereo");
+// "" if there's none
+static std::string pwSinkFor(const std::string& description) {
+    for (const QJsonValue& v : pwSinks()) {
+        QJsonObject props = v.toObject();
+        if (props.value("node.description").toString().toStdString() == description)
             return props.value("node.name").toString().toStdString();
     }
     return "";
+}
+
+// the ALSA cards PipeWire plays to (their outputs are listed through it already)
+static std::vector<std::string> pwAlsaCards() {
+    std::vector<std::string> cards;
+    for (const QJsonValue& v : pwSinks()) {
+        QString c = v.toObject().value("api.alsa.card.name").toString();
+        if (!c.isEmpty()) cards.push_back(c.toStdString());
+    }
+    return cards;
+}
+
+static bool alsaContext(ma_context* ctx) {
+    ma_backend b = ma_backend_alsa;
+    return ma_context_init(&b, 1, nullptr, ctx) == MA_SUCCESS;
 }
 
 // pw-cat there and PipeWire running (AVM_AUDIO_PWCAT=0: miniaudio instead)
@@ -97,6 +130,8 @@ AudioOut::AudioOut() : impl_(new Impl) {
 void AudioOut::close() {
     if (impl_->init) ma_device_uninit(&impl_->dev);
     impl_->init = false;
+    if (impl_->alsa_init) ma_context_uninit(&impl_->alsa);
+    impl_->alsa_init = false;
     if (impl_->pw) {
         impl_->pwStop = true;
         if (impl_->pwThread.joinable()) impl_->pwThread.join();
@@ -122,6 +157,24 @@ std::vector<std::string> AudioOut::outputs() {
     if (ma_context_get_devices(&ctx, &infos, &n, nullptr, nullptr) == MA_SUCCESS)
         for (ma_uint32 i = 0; i < n; ++i) names.push_back(infos[i].name);
     ma_context_uninit(&ctx);
+#ifndef _WIN32
+    // with PipeWire: also the ALSA outputs on cards it doesn't play to (played directly)
+    if (usePwCat() && alsaContext(&ctx)) {
+        std::vector<std::string> pw = pwAlsaCards();
+        if (ma_context_get_devices(&ctx, &infos, &n, nullptr, nullptr) == MA_SUCCESS)
+            for (ma_uint32 i = 0; i < n; ++i) {
+                std::string name = infos[i].name;
+                bool used = false;
+                for (const auto& c : pw) used = used || name.find(c) != std::string::npos;
+                // hardware only ("card, device"): not ALSA's null device or the
+                // default / PipeWire plugins, which play through PipeWire anyway
+                used = used || name.find(", ") == std::string::npos || name.find("PipeWire") != std::string::npos;
+                if (!used && std::find(names.begin(), names.end(), name + ALSA_SUFFIX) == names.end())
+                    names.push_back(name + ALSA_SUFFIX);
+            }
+        ma_context_uninit(&ctx);
+    }
+#endif
     return names;
 }
 
@@ -170,6 +223,30 @@ bool AudioOut::open(const std::string& device) {
     cfg.periodSizeInMilliseconds = 40;
     cfg.periods = 3;
     ma_device_id id;
+#ifndef _WIN32
+    // an output listed from ALSA itself ("... (ALSA)"): opened through ALSA directly
+    if (device.size() > ALSA_SUFFIX.size() &&
+        device.compare(device.size() - ALSA_SUFFIX.size(), ALSA_SUFFIX.size(), ALSA_SUFFIX) == 0) {
+        const std::string name = device.substr(0, device.size() - ALSA_SUFFIX.size());
+        if (!(impl_->alsa_init = alsaContext(&impl_->alsa))) return false;
+        ma_device_info* infos;
+        ma_uint32 n;
+        if (ma_context_get_devices(&impl_->alsa, &infos, &n, nullptr, nullptr) == MA_SUCCESS)
+            for (ma_uint32 i = 0; i < n; ++i)
+                if (name == infos[i].name) { id = infos[i].id; cfg.playback.pDeviceID = &id; break; }
+        if (!cfg.playback.pDeviceID) return false;       // (gone: unplugged since)
+        // through ALSA's converter (plughw): a Pi's HDMI takes only IEC958 frames on
+        // its raw hw device ("Sample format non available")
+        if (std::strncmp(id.alsa, "hw:", 3) == 0) {
+            std::string p = std::string("plughw:") + (id.alsa + 3);
+            std::snprintf(id.alsa, sizeof id.alsa, "%s", p.c_str());
+        }
+        if (ma_device_init(&impl_->alsa, &cfg, &impl_->dev) != MA_SUCCESS) return false;
+        impl_->init = true;
+        ok_ = ma_device_start(&impl_->dev) == MA_SUCCESS;
+        return ok_;
+    }
+#endif
     if (!device.empty() && impl_->ctx_init) {
         ma_device_info* infos;
         ma_uint32 n;

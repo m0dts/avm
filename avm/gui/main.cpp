@@ -295,6 +295,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "record-test: %s\n", qPrintable(out));
         return 0;
     }
+    if (a.contains("--audio-outputs")) {   // the outputs Config's Audio out offers, for checking
+        for (const auto& n : avm::AudioOut::outputs()) std::printf("%s\n", n.c_str());
+        return 0;
+    }
     if (a.contains("--plan")) {    // the link plans for a range of links (link_plan.h), for checking
         QLibrary lib(avm::avmDir() + "/c++/avm");
         auto fn = (double (*)(const char*, double, const char*, const char*, int, double))lib.resolve("avm_link_bitrate");
