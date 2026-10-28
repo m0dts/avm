@@ -330,7 +330,7 @@ int main(int argc, char** argv) {
     avm::settings().remove("tx/message");   // the TX message lasts one session: none until one is set
     // TX starts on the test picture and tone each session: the camera and
     // microphone only once chosen (not opened just because AVM started)
-    avm::settings().setValue("tx/video", "test");
+    if (!a.contains("--auto")) avm::settings().setValue("tx/video", "test");   // (a trial run: as its settings say)
     avm::MainWindow w(a.contains("--demo"));
     TouchMarker marker;
     if (shots.isEmpty()) app.installEventFilter(&marker);

@@ -15,6 +15,8 @@
 #include <mutex>
 #include <vector>
 
+#include "per_thread.h"
+
 namespace fft {
 
 const int MAX_DIRECT_PRIME = 101;   // beyond this Bluestein (direct is O(p) per point)
@@ -217,9 +219,10 @@ struct Plan {
 // so a transmitter and a receiver in one process (the GUI) sharing one plan of
 // the same size corrupted each other's transforms -- the receiver now and then
 // missed a fragment's sync, silently
+// (per_thread.h: a thread_local map crashed MinGW builds at thread exit)
 template <typename T>
 Plan<T>& plan(int n) {
-    thread_local std::map<int, std::unique_ptr<Plan<T>>> cache;
+    auto& cache = per_thread<std::map<int, std::unique_ptr<Plan<T>>>>();
     auto it = cache.find(n);
     if (it == cache.end()) it = cache.emplace(n, std::make_unique<Plan<T>>(n)).first;
     return *it->second;

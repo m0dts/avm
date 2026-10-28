@@ -16,6 +16,8 @@
 #include <mutex>
 #include <vector>
 
+#include "per_thread.h"
+
 #if defined(_WIN32)
 #define LD_API extern "C" __declspec(dllexport)
 #else
@@ -238,7 +240,8 @@ struct Decoder {
         return max_iter;
     }
 };
-thread_local Decoder g_dec;
+// one per thread (per_thread.h: a thread_local with a destructor crashed MinGW builds at thread exit)
+#define g_dec per_thread<Decoder>()
 
 }  // namespace
 
