@@ -6,6 +6,7 @@
 #include <QElapsedTimer>
 #include <QNetworkDatagram>
 #include <QNetworkInterface>
+#include <QTcpSocket>
 #include <QUdpSocket>
 #include <tuple>
 #include <QScrollArea>
@@ -571,11 +572,28 @@ static QStringList findRadios(bool rx, QMap<QString, QPair<QString, QString>>* m
         std::vector<char> buf(8192);
         int need = fn(rx, buf.data(), (int)buf.size());
         if (need > (int)buf.size()) { buf.resize(need); fn(rx, buf.data(), need); }
+        QList<QStringList> found;
+        bool plutoIp = false;
         for (const QString& line : QString::fromUtf8(buf.data()).split('\n', Qt::SkipEmptyParts)) {
             QStringList f = line.split('\t');
             if (f.size() < 2) continue;
-            // a Pluto shows twice (USB and its network address over the same cable): the IP one only
-            if (f[0] == "pluto" && f.value(2).startsWith("usb:")) continue;
+            found << f;
+            plutoIp = plutoIp || (f[0] == "pluto" && f.value(2).startsWith("ip:"));
+        }
+        // a Pluto shows twice on Linux (USB and its network address over the same
+        // cable): the IP one only. Windows' search finds no network ones: the USB one then
+        if (!plutoIp) {
+            // ... and a Pluto at its usual address answering, though not found (no
+            // network search on Windows; or no USB driver there): offered by IP too
+            QTcpSocket s;
+            s.connectToHost("192.168.2.1", 30431);           // (its IIO server's port)
+            if (s.waitForConnected(400)) {
+                found << QStringList{"pluto", "PlutoSDR (IP 192.168.2.1)", "ip:192.168.2.1"};
+                plutoIp = true;
+            }
+        }
+        for (const QStringList& f : found) {
+            if (f[0] == "pluto" && f.value(2).startsWith("usb:") && plutoIp) continue;
             labels << f[1];
             (*meaning)[f[1]] = {f[0], f.value(2)};
         }

@@ -9,7 +9,7 @@
 #   avm_gui.exe + the Qt, FFmpeg and Codec2 DLLs (windeployqt / the build),
 #   c++\avm.dll (the modem library: where the GUI looks for it),
 #   SoapySDR.dll + the radio modules (SoapySDR\modules0.8: Pluto, Lime,
-#     Airspy, Airspy HF+; not RTL-SDR, see below) and their DLLs, from the conda-forge
+#     RTL-SDR, Airspy, Airspy HF+) and their DLLs, from the conda-forge
 #     environment the Python installer made (%LOCALAPPDATA%\AVM\env, or -SoapyEnv),
 #   VERSION;
 # and zips it as dist\AVM-windows.zip -- the asset install_avm_windows.ps1
@@ -43,9 +43,9 @@ Copy-Item (Join-Path $avm "mer_thresholds.json") $out     # the RX status line's
 $bin = Join-Path $SoapyEnv "Library\bin"
 $mods = Join-Path $SoapyEnv "Library\lib\SoapySDR\modules0.8"
 if (-not (Test-Path "$bin\SoapySDR.dll")) { throw "no SoapySDR in $SoapyEnv (run the Python installer once, or -SoapyEnv)" }
-# (no RTL-SDR: left out of the bundle for now -- its library, librtlsdr, is
-# GPL-2.0-or-later, so compatible with AVM's GPL-3.0 if it's wanted later)
-$moduleNames = "PlutoSDRSupport", "LMS7Support", "airspySupport", "airspyhfSupport"
+# (RTL-SDR: librtlsdr is GPL-2.0-or-later, which AVM's GPL-3.0 allows; on
+# Windows a dongle also needs the WinUSB driver, from Zadig)
+$moduleNames = "PlutoSDRSupport", "LMS7Support", "rtlsdrSupport", "airspySupport", "airspyhfSupport"
 foreach ($m in $moduleNames) { Copy-Item "$mods\$m.dll" "$out\SoapySDR\modules0.8\" }
 $objdump = Join-Path $env:USERPROFILE "Qt\Tools\mingw1310_64\bin\objdump.exe"
 $queue = New-Object System.Collections.Queue
@@ -86,6 +86,7 @@ $srcUrl = @{
     "libairspy" = "https://github.com/airspy/airspyone_host"; "libairspyhf" = "https://github.com/airspy/airspyhf"
     "libiio-c" = "https://github.com/analogdevicesinc/libiio"; "libad9361-iio-c" = "https://github.com/analogdevicesinc/libad9361-iio"
     "libusb" = "https://github.com/libusb/libusb"; "libxml2" = "https://gitlab.gnome.org/GNOME/libxml2"
+    "soapysdr-module-rtlsdr" = "https://github.com/pothosware/SoapyRTLSDR"; "rtl-sdr" = "https://gitea.osmocom.org/sdr/rtl-sdr"
     "libxml2-16" = "https://gitlab.gnome.org/GNOME/libxml2"; "icu" = "https://github.com/unicode-org/icu"
     "vc14_runtime" = "https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files"
     "libiconv" = "https://www.gnu.org/software/libiconv/"; "zstd" = "https://github.com/facebook/zstd"
@@ -132,7 +133,7 @@ $txt = @("AVM -- Audio Video Modem $(Get-Content (Join-Path $avm 'VERSION'))",
          "",
          "This package also contains the following components, each under its own licence",
          "(texts in LICENSES\). Their source code is available from the addresses below.",
-         "Not included: RTL-SDR support (SoapyRTLSDR / librtlsdr); add it yourself if needed.",
+         "RTL-SDR on Windows also needs the WinUSB driver for the dongle (Zadig, https://zadig.akeo.ie).",
          "")
 foreach ($t in $third | Sort-Object Name) {
     $txt += "$($t.Name) $($t.Version)".Trim()
