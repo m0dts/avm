@@ -438,13 +438,37 @@ else
     MEM_MB="$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)"
     [ "$MEM_MB" -lt 3000 ] && [ "$JOBS" -gt 2 ] && JOBS=2
     [ "$MEM_MB" -lt 1500 ] && JOBS=1     # a 1 GB Pi: one at a time (the big files need most of it)
-    echo "building AVM with $JOBS job(s) -- about 10 minutes on a Pi 4 the first time..."
+    echo "building AVM with $JOBS job(s) -- only what changed; the first build takes ~5-10 minutes on a Pi 4"
     BUILD_LOG="$(mktemp)"
-    if cmake -S "$AVM_DIR/gui" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >"$BUILD_LOG" 2>&1 \
-        && nice cmake --build "$BUILD_DIR" -j"$JOBS" 2>&1 | tee -a "$BUILD_LOG" \
-           | awk '/^\[ *[0-9]+%\]/ { if ($2 != last) { last = $2; printf "  %s\n", $0; fflush() } }'; then
-        :
-    fi
+    cmake -S "$AVM_DIR/gui" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release >"$BUILD_LOG" 2>&1
+    # the build in the background; here, each file as it starts ("[ 38%] compiling
+    # audio.cpp", "linking avm_gui") and, while one takes long, "still working
+    # (1 min 20 s)" every 15 s -- a big file compiles for a minute or more
+    ( nice cmake --build "$BUILD_DIR" -j"$JOBS" >>"$BUILD_LOG" 2>&1 ) &
+    BUILD_PID=$!
+    T0=$(date +%s); LAST=$T0; SHOWN=0
+    show_new() {
+        local n
+        n=$(grep -c -E '^\[ *[0-9]+%\] (Building|Linking)' "$BUILD_LOG")
+        if [ "$n" -gt "$SHOWN" ]; then
+            grep -E '^\[ *[0-9]+%\] (Building|Linking)' "$BUILD_LOG" | tail -n +$((SHOWN + 1)) \
+                | sed -E 's#^(\[ *[0-9]+%\]) Building C(XX)? object .*/([^/]+)\.o$#  \1 compiling \3#;
+                          s#^(\[ *[0-9]+%\]) Linking C(XX)? (shared library|executable) (.*/)?([^/ ]+)$#  \1 linking \5#'
+            SHOWN=$n; LAST=$(date +%s)
+        fi
+    }
+    while kill -0 $BUILD_PID 2>/dev/null; do
+        sleep 2
+        show_new
+        NOW=$(date +%s)
+        if [ $((NOW - LAST)) -ge 15 ]; then
+            echo "      ... still working ($(( (NOW - T0) / 60 )) min $(( (NOW - T0) % 60 )) s)"
+            LAST=$NOW
+        fi
+    done
+    wait $BUILD_PID
+    show_new
+    echo "  build time: $(( ($(date +%s) - T0) / 60 )) min $(( ($(date +%s) - T0) % 60 )) s"
     cat "$BUILD_LOG" >> "${LOG:-/dev/null}"
     if [ -x "$AVM_GUI" ] && { [ -f "$AVM_DIR/c++/libavm.so" ] || [ -f "$AVM_DIR/c++/avm.dll" ]; } \
         && ! grep -q -E '^(CMake Error|.*error:)' "$BUILD_LOG"; then
