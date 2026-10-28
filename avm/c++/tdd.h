@@ -44,6 +44,7 @@ public:
         std::lock_guard<std::mutex> g(mu_);
         q_.clear();
         queued_ = 0;
+        head_ = 0;     // (left part-way into the last session's block, a shorter new one underflowed the copy)
         max_ = (size_t)(MAX_AHEAD_S * rate);
         writer_ = true;
         writer_data_ = false;

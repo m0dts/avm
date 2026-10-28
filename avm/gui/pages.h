@@ -208,7 +208,10 @@ public:
     ~TxPage() override { media_.stop(); }
     bool running() const { return link_.running(); }
     void start() { if (!running()) toggleRun(); }
-    void stop() { if (running() || media_.running()) toggleRun(); }
+    // stopped now, not through the button's deferred toggle: in duplex the RX page
+    // stops this one, and by the toggle's turn TX had often ended by itself -- the
+    // toggle then STARTED it again, with no receiver
+    void stop() { if (running() || media_.running()) { media_.stop(); link_.stop(); } }
     QString statusText() const { return status_->text(); }
     void setStatus(const QString& t) { status_->setText(t); }
     QString modeSummary() const;
