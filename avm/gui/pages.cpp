@@ -1704,9 +1704,19 @@ void TxPage::onLine(const QString& t) {
         // "Streamed fragment seq=N (B bytes, D ms)": the count and each one's air time
         static const QRegularExpression re(R"(\(\d+ bytes, ([\d.]+) ms\))");
         auto m = re.match(t);
-        // the framer paced by it (C++ media; not the warmup's filler)
-        if (m.hasMatch() && !t.contains("[warmup]")) media_.setFragmentPeriod(m.captured(1).toDouble() / 1000);
+        // the framer paced by it (C++ media; not the warmup's filler) -- but not in
+        // duplex: there the fragments go out in bursts, in this station's slot, and
+        // paced by one fragment's air time the framer made twice what the slot
+        // carries (the transmitter dropped the rest: half the pictures and audio)
+        if (m.hasMatch() && !t.contains("[warmup]") && duplexRole().isEmpty())
+            media_.setFragmentPeriod(m.captured(1).toDouble() / 1000);
         status_->setText(QString("%1 fragments sent").arg(sent_));
+    } else if (t.contains("[tdd] cycle") && t.contains("--fragment-period-s")) {
+        // duplex: the transmitter's slot plan says what the framer's period must be
+        // ("... framer period for this: --fragment-period-s 0.2500")
+        static const QRegularExpression re(R"(--fragment-period-s ([\d.]+))");
+        auto m = re.match(t);
+        if (m.hasMatch()) media_.setFragmentPeriod(m.captured(1).toDouble());
     } else if (t.startsWith("ERROR")) {
         status_->setText(t);
     } else if (t.startsWith("Warmup:")) {
