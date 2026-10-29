@@ -1,6 +1,8 @@
 #include "recorder.h"
 
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -68,28 +70,56 @@ bool Recorder::start(const QString& path, int w, int h, QString* error) {
 }
 
 bool Recorder::openVideo(int w, int h, QString* error) {
-    const AVCodec* c = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
-    if (!c) { *error = "no MPEG-4 encoder"; return false; }
-    venc_ = avcodec_alloc_context3(c);
-    venc_->width = w;
-    venc_->height = h;
-    venc_->pix_fmt = AV_PIX_FMT_YUV420P;
-    venc_->time_base = VIDEO_TB;
-    venc_->gop_size = 50;
-    venc_->flags |= AV_CODEC_FLAG_QSCALE;          // constant quality: the picture is small
-    venc_->global_quality = FF_QP2LAMBDA * 3;
-    if (fmt_->oformat->flags & AVFMT_GLOBALHEADER) venc_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    int r = avcodec_open2(venc_, c, nullptr);
-    if (r < 0) { *error = "MPEG-4 encoder: " + err_str(r); return false; }
+    // H.264: what every player shows (MPEG-4 part 2 played as sound only in Windows' and phones' players)
+    // (the first that opens: libx264 on Linux; Windows' own, Media Foundation, with the LGPL FFmpeg)
+    const char* names[] = {"libx264", "libopenh264", "h264_mf", "h264_v4l2m2m", "mpeg4"};
+    const AVCodec* c = nullptr;
+    QString why;
+    AVPixelFormat pix = AV_PIX_FMT_YUV420P;
+    for (const char* name : names) {
+        c = avcodec_find_encoder_by_name(name);
+        if (!c) continue;
+        venc_ = avcodec_alloc_context3(c);
+        venc_->width = w;
+        venc_->height = h;
+        pix = AV_PIX_FMT_YUV420P;
+        if (c->pix_fmts) {      // (Media Foundation: NV12)
+            bool has420 = false;
+            for (const AVPixelFormat* p = c->pix_fmts; *p != AV_PIX_FMT_NONE; ++p) has420 |= *p == AV_PIX_FMT_YUV420P;
+            if (!has420) pix = c->pix_fmts[0];
+        }
+        venc_->pix_fmt = pix;
+        venc_->time_base = VIDEO_TB;
+        venc_->framerate = {25, 1};
+        venc_->gop_size = 50;
+        venc_->bit_rate = 1500000;
+        AVDictionary* o = nullptr;
+        if (!std::strcmp(name, "libx264")) {
+            av_dict_set(&o, "preset", "veryfast", 0);
+            av_dict_set(&o, "crf", "20", 0);       // constant quality: the picture is small
+        } else if (!std::strcmp(name, "mpeg4")) {
+            venc_->flags |= AV_CODEC_FLAG_QSCALE;
+            venc_->global_quality = FF_QP2LAMBDA * 3;
+        }
+        if (fmt_->oformat->flags & AVFMT_GLOBALHEADER) venc_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        int r = avcodec_open2(venc_, c, &o);
+        av_dict_free(&o);
+        if (r >= 0) break;
+        why += QString(" %1: %2;").arg(name, err_str(r));
+        avcodec_free_context(&venc_);
+        c = nullptr;
+    }
+    if (!c) { *error = "no video encoder opened:" + why; return false; }
+    std::fprintf(stderr, "record: video %s\n", c->name);
     vst_ = avformat_new_stream(fmt_, nullptr);
     vst_->time_base = VIDEO_TB;
     avcodec_parameters_from_context(vst_->codecpar, venc_);
     vf_ = av_frame_alloc();
-    vf_->format = AV_PIX_FMT_YUV420P;
+    vf_->format = pix;
     vf_->width = w;
     vf_->height = h;
     av_frame_get_buffer(vf_, 0);
-    sws_ = sws_getContext(w, h, AV_PIX_FMT_BGRA, w, h, AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    sws_ = sws_getContext(w, h, AV_PIX_FMT_BGRA, w, h, pix, SWS_BILINEAR, nullptr, nullptr, nullptr);
     return true;
 }
 
