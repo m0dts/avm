@@ -349,6 +349,8 @@ void MainWindow::startWeb() {
         grab().save(&b, "PNG");
         return png;
     };
+    h.recordState = [this] { return rx()->recordState(); };
+    h.setRecording = [this](bool on) { rx()->setRecording(on); };
     new WebServer(shortTitle(), h, this);
 }
 

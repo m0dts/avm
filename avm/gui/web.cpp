@@ -185,8 +185,10 @@ static const char* PAGE = R"(<!doctype html><html><head><meta charset="utf-8">
 </div>
 <div class="card">
  <label>Recordings (%REC_COUNT%)</label>
+ %REC_MSG%
+ %RECORD%
  %RECORDINGS%
- <p class="dim">Screen recordings from ~/record.sh, newest first. Tap one to play it here, or Download to save it.</p>
+ <p class="dim">The received picture and sound (Record), and screen recordings from ~/record.sh, newest first. Tap one to play it here, or Download to save it.</p>
 </div>
 </div></body></html>)";
 
@@ -293,7 +295,7 @@ void WebServer::sendError(QTcpSocket* s, int code, const QByteArray& text) {
 }
 
 void WebServer::sendPage(QTcpSocket* s, const QString& msg, bool ok, const QString* value, const QString& imageMsg,
-                         bool imageOk) {
+                         bool imageOk, const QString& recMsg, bool recOk) {
     QString now = hooks_.kiwi ? hooks_.kiwi() : QString();
     QString live = value && ok ? *value : now;          // just set: may not be applied yet
     remember(live, false);                               // one chosen on the touchscreen joins the list
@@ -342,6 +344,15 @@ void WebServer::sendPage(QTcpSocket* s, const QString& msg, bool ok, const QStri
     page.replace("%HISTORY%", history);
     page.replace("%IMAGE_MSG%", box(imageMsg, imageOk));
     page.replace("%IMAGE%", image);
+    // Record: the received picture and sound, into ~/recordings
+    const int rs = hooks_.recordState ? hooks_.recordState() : 0;
+    QString rec = rs == 2 ? "<form method=\"post\" action=\"/record\"><input type=\"hidden\" name=\"on\" value=\"0\">"
+                            "<button type=\"submit\">&#9632; Stop recording</button> <span class=\"dim\">recording...</span></form>"
+                : rs == 1 ? "<form method=\"post\" action=\"/record\"><input type=\"hidden\" name=\"on\" value=\"1\">"
+                            "<button type=\"submit\">&#9679; Record</button></form>"
+                          : "<p class=\"dim\">Record: start RX first.</p>";
+    page.replace("%RECORD%", rec);
+    page.replace("%REC_MSG%", box(recMsg, recOk));
     page.replace("%REC_COUNT%", QString::number(count));
     page.replace("%RECORDINGS%", items);
     send(s, 200, "text/html; charset=utf-8", page.toUtf8());
@@ -376,6 +387,14 @@ void WebServer::handle(QTcpSocket* s, const QByteArray& method, const QByteArray
     }
     if (method == "POST") {
         if (path == "/image") return uploadImage(s, headers, body);
+        if (path == "/record") {
+            const bool on = QUrlQuery(QString::fromUtf8(body.left(64))).queryItemValue("on") == "1";
+            if (hooks_.setRecording) hooks_.setRecording(on);
+            const bool rec = hooks_.recordState && hooks_.recordState() == 2;
+            return sendPage(s, QString(), true, nullptr, QString(), true,
+                            on ? (rec ? "Recording from the next picture." : "Not recording: start RX first.")
+                               : "Recording stopped and saved.", !on || rec);
+        }
         if (path != "/kiwi" && path != "/kiwi/use" && path != "/kiwi/delete") return sendError(s, 404, "Not found");
         QUrlQuery q(QString::fromUtf8(body.left(1024)).replace('+', ' '));
         QString server = q.queryItemValue("kiwi", QUrl::FullyDecoded).trimmed();

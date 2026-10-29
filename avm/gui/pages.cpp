@@ -660,6 +660,7 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     rec_btn_->setObjectName("msg");
     rec_btn_->setToolTip("Record the received picture and sound (~/recordings)");
     runRow->insertWidget(1, rec_btn_, 1);
+    rec_btn_->hide();               // recording: from the web page only, for now
     connect(rec_btn_, &QPushButton::clicked, this, &RxPage::toggleRecord);
     media_.audio().tap = [this](const float* p, size_t n) { rec_.sound(p, n); };
     connect(&media_, &MediaDecoder::frame, this, [this](const QImage& img) {

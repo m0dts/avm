@@ -31,6 +31,8 @@ public:
         std::function<QString()> image;                 // the TX picture's path now
         std::function<void(const QString&)> setImage;   // use this picture from the next TX start
         std::function<QByteArray()> screenshot;         // the window as PNG
+        std::function<int()> recordState;               // 0 RX off, 1 ready, 2 recording
+        std::function<void(bool)> setRecording;         // start / stop recording the received picture and sound
     };
     WebServer(const QString& title, Hooks hooks, QObject* parent = nullptr);
     ~WebServer() override;
@@ -52,7 +54,8 @@ private:
     void handle(QTcpSocket* s, const QByteArray& method, const QByteArray& target,
                 const QHash<QByteArray, QByteArray>& headers, const QByteArray& body);
     void sendPage(QTcpSocket* s, const QString& msg = QString(), bool ok = true, const QString* value = nullptr,
-                  const QString& imageMsg = QString(), bool imageOk = true);
+                  const QString& imageMsg = QString(), bool imageOk = true,
+                  const QString& recMsg = QString(), bool recOk = true);
     void send(QTcpSocket* s, int code, const QByteArray& type, const QByteArray& body,
               const QList<QPair<QByteArray, QByteArray>>& extra = {});
     void sendError(QTcpSocket* s, int code, const QByteArray& text);

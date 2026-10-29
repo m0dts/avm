@@ -112,6 +112,9 @@ public:
     void start() { if (!running()) toggleRun(); }
     void stop() { if (running()) toggleRun(); }
     void record() { if (!recWant_) toggleRecord(); }
+    // the web page's Record (the screen has no button for now): 0 RX off, 1 ready, 2 recording
+    int recordState() { return recWant_ ? 2 : link_.running() ? 1 : 0; }
+    void setRecording(bool on) { if (on != recWant_) toggleRecord(); }
     int pictures() const { return pictures_; }
     int messages() const { return msgs_.size(); }
     QString statusText() const { return status_->text(); }
