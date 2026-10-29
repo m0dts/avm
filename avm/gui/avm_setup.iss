@@ -83,7 +83,7 @@ procedure CurPageChanged(CurPageID: Integer);
 begin
   if CurPageID = wpFinished then
     WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
-      'Radios: PlutoSDR, LimeSDR, RTL-SDR, Airspy and Airspy HF+ drivers are included. ' +
-      'An RTL-SDR also needs the WinUSB driver once (Zadig, zadig.akeo.ie); a Pluto, Analog Devices'' ' +
+      'Radios: PlutoSDR, LimeSDR, HackRF, RTL-SDR, Airspy and Airspy HF+ drivers are included. ' +
+      'A HackRF or RTL-SDR also needs the WinUSB driver once (Zadig, zadig.akeo.ie); a Pluto, Analog Devices'' ' +
       'PlutoSDR-M2k USB drivers (or use it by its network address, 192.168.2.1).';
 end;

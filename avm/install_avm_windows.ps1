@@ -96,8 +96,8 @@ if (-not $fetch) {
 
 Say "Done"
 Write-Host "Start AVM from the 'AVM' shortcut."
-Write-Host "Radios: PlutoSDR, LimeSDR, RTL-SDR, Airspy and Airspy HF+ drivers are included."
-Write-Host "An RTL-SDR also needs the WinUSB driver once (Zadig, zadig.akeo.ie); a Pluto, Analog Devices'"
+Write-Host "Radios: PlutoSDR, LimeSDR, HackRF, RTL-SDR, Airspy and Airspy HF+ drivers are included."
+Write-Host "A HackRF or RTL-SDR also needs the WinUSB driver once (Zadig, zadig.akeo.ie); a Pluto, Analog Devices'"
 Write-Host "PlutoSDR-M2k USB drivers (or use it by its network address, 192.168.2.1)."
 if ($script:log) { Write-Host "Install log (everything above): $script:log" }
 if ($Restart) {

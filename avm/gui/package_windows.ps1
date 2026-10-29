@@ -9,7 +9,7 @@
 #   avm_gui.exe + the Qt, FFmpeg and Codec2 DLLs (windeployqt / the build),
 #   c++\avm.dll (the modem library: where the GUI looks for it),
 #   SoapySDR.dll + the radio modules (SoapySDR\modules0.8: Pluto, Lime,
-#     RTL-SDR, Airspy, Airspy HF+) and their DLLs, from the conda-forge
+#     HackRF, RTL-SDR, Airspy, Airspy HF+) and their DLLs, from the conda-forge
 #     environment the Python installer made (%LOCALAPPDATA%\AVM\env, or -SoapyEnv),
 #   VERSION;
 # and makes dist\AVM-setup.exe of it (Inno Setup 6, avm_setup.iss) -- the asset
@@ -50,7 +50,7 @@ $mods = Join-Path $SoapyEnv "Library\lib\SoapySDR\modules0.8"
 if (-not (Test-Path "$bin\SoapySDR.dll")) { throw "no SoapySDR in $SoapyEnv (run the Python installer once, or -SoapyEnv)" }
 # (RTL-SDR: librtlsdr is GPL-2.0-or-later, which AVM's GPL-3.0 allows; on
 # Windows a dongle also needs the WinUSB driver, from Zadig)
-$moduleNames = "PlutoSDRSupport", "LMS7Support", "rtlsdrSupport", "airspySupport", "airspyhfSupport"
+$moduleNames = "PlutoSDRSupport", "LMS7Support", "HackRFSupport", "rtlsdrSupport", "airspySupport", "airspyhfSupport"
 foreach ($m in $moduleNames) { Copy-Item "$mods\$m.dll" "$out\SoapySDR\modules0.8\" }
 $objdump = Join-Path $env:USERPROFILE "Qt\Tools\mingw1310_64\bin\objdump.exe"
 $queue = New-Object System.Collections.Queue
@@ -92,6 +92,7 @@ $srcUrl = @{
     "libiio-c" = "https://github.com/analogdevicesinc/libiio"; "libad9361-iio-c" = "https://github.com/analogdevicesinc/libad9361-iio"
     "libusb" = "https://github.com/libusb/libusb"; "libxml2" = "https://gitlab.gnome.org/GNOME/libxml2"
     "soapysdr-module-rtlsdr" = "https://github.com/pothosware/SoapyRTLSDR"; "rtl-sdr" = "https://gitea.osmocom.org/sdr/rtl-sdr"
+    "soapysdr-module-hackrf" = "https://github.com/pothosware/SoapyHackRF"; "libhackrf0" = "https://github.com/greatscottgadgets/hackrf"; "libhackrf" = "https://github.com/greatscottgadgets/hackrf"
     "libxml2-16" = "https://gitlab.gnome.org/GNOME/libxml2"; "icu" = "https://github.com/unicode-org/icu"
     "vc14_runtime" = "https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files"
     "libiconv" = "https://www.gnu.org/software/libiconv/"; "zstd" = "https://github.com/facebook/zstd"

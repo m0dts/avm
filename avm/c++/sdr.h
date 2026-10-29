@@ -1,6 +1,6 @@
 // sdr.h -- radios through SoapySDR's C API, loaded at run time (SoapySDR.dll
 // / libSoapySDR.so -- the one AVM's Python uses, with its modules: Pluto,
-// LimeSDR, RTL-SDR, Airspy, Airspy HF+, SDRplay). No build-time dependency;
+// LimeSDR, HackRF, RTL-SDR, Airspy, Airspy HF+, SDRplay). No build-time dependency;
 // the C API is the same whichever compiler built SoapySDR.
 //
 // RxSource sets a radio up as pluto_soapy_sink.PlutoRxSource does: the
@@ -208,6 +208,9 @@ inline std::vector<Found> find_radios(bool rx) {
         std::string s = tail(kv["serial"], 6);
         out.push_back({"lime", s.empty() ? label : label + " " + s, ""});
     });
+    list("driver=hackrf", [&](std::map<std::string, std::string>& kv) {
+        out.push_back({"hackrf", "HackRF " + tail(kv["serial"], 8), ""});
+    });
     if (rx) {
         list("driver=rtlsdr", [&](std::map<std::string, std::string>& kv) {
             out.push_back({"rtlsdr", "RTL-SDR " + tail(kv["serial"], 8), ""});
@@ -324,6 +327,8 @@ public:
         }
         // an RTL-SDR can't sample at 300-900 kS/s (it stays at its old rate, and reports the asked
         // one: the signal lands off centre): the next rate up, the front end resamples it
+        // a HackRF: 2 MS/s at least (its filters and ADC are made for that), resampled here
+        if (c.driver == "hackrf" && want < 2000000) want = 2000000;
         if (c.driver == "rtlsdr" && want > 300000 && want <= 900000) {
             avm_logf("[rx] rtlsdr: %g kS/s not possible, using 960 kS/s\n", want / 1e3);
             want = 960000;
@@ -346,7 +351,7 @@ public:
             if (A.setGainMode) A.setGainMode(dev_, RX, 0, false);
             A.setGain(dev_, RX, 0, c.gain_db);
         }
-        if (c.bandwidth_hz && c.driver != "rtlsdr" && !fixed && A.setBandwidth) A.setBandwidth(dev_, RX, 0, c.bandwidth_hz);
+        if (c.bandwidth_hz && c.driver != "rtlsdr" && c.driver != "hackrf" && !fixed && A.setBandwidth) A.setBandwidth(dev_, RX, 0, c.bandwidth_hz);
         if (!c.antenna.empty() && c.driver != "lime" && A.setAntenna) A.setAntenna(dev_, RX, 0, c.antenna.c_str());
         size_t ch = 0;
         stream_ = A.setupStream(dev_, RX, "CF32", &ch, 1, nullptr);
@@ -414,7 +419,10 @@ public:
         Api& A = api();
         if (cfg_.agc) { avm_logf("WARNING: gain change ignored -- AGC is active (--rx-agc)\n"); return; }
         if (cfg_.driver == "airspyhf" || cfg_.driver == "sdrplay") return;
-        if (cfg_.driver == "lime" || cfg_.driver == "rtlsdr" || cfg_.driver == "airspy") { A.setGain(dev_, RX, 0, db); return; }
+        if (cfg_.driver == "lime" || cfg_.driver == "rtlsdr" || cfg_.driver == "airspy" || cfg_.driver == "hackrf") {
+            A.setGain(dev_, RX, 0, db);
+            return;
+        }
         if (feeder_) {      // duplex: no settling discard (it would move the own-slot timing)
             if (A.setGainMode) A.setGainMode(dev_, RX, 0, false);
             A.setGain(dev_, RX, 0, db);
@@ -553,14 +561,18 @@ public:
         Api& A = api();
         if (!A.load(error)) return false;
         cfg_ = c;
-        if (c.driver != "pluto" && c.driver != "lime") { error = "--sdr " + c.driver + " can't transmit"; return false; }
-        std::string args = c.driver == "lime" ? "driver=lime"
+        if (c.driver != "pluto" && c.driver != "lime" && c.driver != "hackrf") {
+            error = "--sdr " + c.driver + " can't transmit";
+            return false;
+        }
+        std::string args = c.driver == "lime" ? "driver=lime" : c.driver == "hackrf" ? "driver=hackrf"
                                               : "driver=plutosdr" + (c.uri.empty() ? std::string() : ",uri=" + c.uri);
         avm_logf("Opening %s TX (%s)...\n", c.driver.c_str(), args.c_str());
         dev_ = open_device(args);
         if (!dev_ && c.driver == "pluto" && !c.uri.empty()) dev_ = open_device("driver=plutosdr");
         if (!dev_) { error = std::string("could not open the radio: ") + (A.lastError ? A.lastError() : "?"); return false; }
-        A.setSampleRate(dev_, TX, 0, c.rate);
+        // (a HackRF: 2 MS/s at least; the transmitter builds its waveform at the rate it really runs at)
+        A.setSampleRate(dev_, TX, 0, c.driver == "hackrf" ? std::max(c.rate, 2000000.0) : c.rate);
         rate = A.getSampleRate ? A.getSampleRate(dev_, TX, 0) : c.rate;
         if (rate <= 0) rate = c.rate;
         double tune = c.rf_hz + c.tune_offset_hz;
@@ -571,7 +583,7 @@ public:
             if (ant.empty()) ant = tune < 2.0e9 ? "BAND1" : "BAND2";
             if (A.setAntenna) A.setAntenna(dev_, TX, 0, ant.c_str());
             if (A.setBandwidth) A.setBandwidth(dev_, TX, 0, 5e6);
-        } else if (c.bandwidth_hz && A.setBandwidth) {
+        } else if (c.bandwidth_hz && c.driver != "hackrf" && A.setBandwidth) {
             A.setBandwidth(dev_, TX, 0, c.bandwidth_hz);
         }
         set_gain(c.gain_db);
@@ -592,7 +604,8 @@ public:
         double v = tx_gain_db;
         if (A.getGainRange) {
             Api::Range r = A.getGainRange(dev_, TX, 0);
-            if (cfg_.driver == "lime") v = std::min(std::max(r.maximum + tx_gain_db, r.minimum), r.maximum);
+            // (the LimeSDR's and HackRF's: 0 dB = their maximum, as the Pluto's)
+            if (cfg_.driver == "lime" || cfg_.driver == "hackrf") v = std::min(std::max(r.maximum + tx_gain_db, r.minimum), r.maximum);
             else if (r.minimum >= 0 && r.maximum >= 89.0 - 1) v = std::min(std::max(89.0 + tx_gain_db, r.minimum), r.maximum);
         }
         A.setGain(dev_, TX, 0, v);

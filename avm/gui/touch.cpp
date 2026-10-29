@@ -506,7 +506,8 @@ void radioRange(const QString& d, double* lo, double* hi) {
     struct R { const char* d; double lo, hi; };
     static const R ranges[] = {{"pluto", 70, 6000},     {"lime", 0.1, 3800},     {"rtlsdr", 24, 1766},
                                {"airspy", 24, 1800},    {"airspyhf", 0.01, 260}, {"sdrplay", 0.001, 2000},
-                               {"virtual", 0.001, 6000}, {"kiwi", 0.01, 32},     {"hpsdr", 0.01, 55}};
+                               {"virtual", 0.001, 6000}, {"kiwi", 0.01, 32},     {"hpsdr", 0.01, 55},
+                               {"hackrf", 1, 6000}};
     *lo = 70;
     *hi = 6000;
     for (const R& r : ranges)
@@ -516,7 +517,7 @@ void radioRange(const QString& d, double* lo, double* hi) {
 QString radioName(const QString& d) {
     static const QMap<QString, QString> names = {{"pluto", "PlutoSDR"}, {"lime", "LimeSDR"}, {"rtlsdr", "RTL-SDR"},
                                                  {"airspy", "Airspy"},  {"airspyhf", "Airspy HF+"},
-                                                 {"sdrplay", "SDRplay"}, {"virtual", "Virtual radio"}};
+                                                 {"sdrplay", "SDRplay"}, {"hackrf", "HackRF"}, {"virtual", "Virtual radio"}};
     return names.value(d, d);
 }
 
@@ -642,7 +643,7 @@ QString RadioPicker::shown(const QString&) const {
     if (driver_ == "pluto" && uri_.startsWith("ip:")) return "Pluto IP";
     static const QMap<QString, QString> shortName = {{"pluto", "Pluto"}, {"lime", "Lime"}, {"rtlsdr", "RTL"},
                                                      {"airspy", "Airspy"}, {"airspyhf", "HF+"},
-                                                     {"sdrplay", "SDRplay"}, {"hpsdr", "HPSDR"}, {"kiwi", "Kiwi"},
+                                                     {"sdrplay", "SDRplay"}, {"hpsdr", "HPSDR"}, {"kiwi", "Kiwi"}, {"hackrf", "HackRF"},
                                                      {"virtual", "Virtual"}};
     return shortName.value(driver_, driver_);
 }

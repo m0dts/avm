@@ -213,6 +213,7 @@ static QStringList radioUsbIds(const QString& sdr) {
         {"rtlsdr", {"0bda:2838", "0bda:2832"}},
         {"airspy", {"1d50:60a1"}},
         {"airspyhf", {"03eb:800c"}},
+        {"hackrf", {"1d50:6089", "1d50:cc15", "1d50:604b"}},     // (HackRF One, rad1o, Jawbreaker)
         {"sdrplay", {"1df7:2500", "1df7:3000", "1df7:3010", "1df7:3020", "1df7:3030", "1df7:3050", "1df7:3060"}},
     };
     return ids.value(sdr);

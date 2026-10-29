@@ -255,6 +255,9 @@ AIRSPY_PKG=soapysdr${SOAPY_ABI}-module-airspy
 AIRSPYHF_PKG=soapysdr${SOAPY_ABI}-module-airspyhf
 have_pkg "$AIRSPY_PKG" && PKGS="$PKGS $AIRSPY_PKG"
 have_pkg "$AIRSPYHF_PKG" && PKGS="$PKGS $AIRSPYHF_PKG"
+# HackRF (receive and transmit; its udev rules come with libhackrf)
+HACKRF_PKG=soapysdr${SOAPY_ABI}-module-hackrf
+have_pkg "$HACKRF_PKG" && PKGS="$PKGS $HACKRF_PKG"
 
 # Radio drivers SoapySDR already has (from any source -- e.g. DragonOS ships
 # its own LimeSuite / Soapy builds) are left alone: the distro's packages
@@ -275,6 +278,7 @@ fi
 command -v rtl_test >/dev/null && drop rtl-sdr
 echo "$SOAPY_MODS" | grep -q "airspysupport" && drop "$AIRSPY_PKG"
 echo "$SOAPY_MODS" | grep -q "airspyhfsupport" && drop "$AIRSPYHF_PKG"
+echo "$SOAPY_MODS" | grep -q "hackrfsupport" && drop "$HACKRF_PKG"
 if echo "$SOAPY_MODS" | grep -q plutosdrsupport; then
     drop "$PLUTO_PKG"
     KEPT="${KEPT}PlutoSDR driver already installed (from this system) -- keeping it\n"
