@@ -10,6 +10,9 @@ low-cost SDR hardware. Point a camera at something at one end, and the
 picture and sound appear at the other, with a station callsign, carried by a
 digital OFDM modem 20 to 250 kHz wide.
 
+AVM is now written in **C++** (it was Python), so it runs about **twice as
+fast**, leaving more headroom on a Pi.
+
 It's a complete station in one program, with a full-screen touch interface.
 It's built to run on a **Raspberry Pi 4 or 5 with a 7" touch screen**, which can
 transmit and receive at the same time. See [Install](#install) to set one
@@ -114,53 +117,22 @@ Run `bash install_avm.sh --update` later to get the latest version, or
 `--check` to just see the report. AVM's version (1.0.x, going up by one each
 release) shows in its title bar, and in the [VERSION](VERSION) file here.
 
-The first transmit or receive after installing takes a minute or two while
-the modem and codec are compiled for the Pi. The TX preview shows
-"Preparing video codec..." meanwhile. After that, starts are quick.
-
 ### Windows
 
-AVM also runs on a 64-bit Windows 10 or 11 PC. **The setup uses about
-5 GB of disk space**, most of it for the Python environment AVM runs in.
+AVM also runs on a 64-bit Windows 10 or 11 PC. It's now a single installer:
 
-1. Download AVM as a zip file:
-   [**avm-main.zip**](https://github.com/m0dts/avm/archive/refs/heads/main.zip)
-   (or, on [github.com/m0dts/avm](https://github.com/m0dts/avm): the green
-   **Code** button, then **Download ZIP**). Browsers often block a `.bat`
-   file downloaded on its own; a zip is fine.
-2. Right-click the zip, **Extract All...**, and open the extracted
-   **avm-main** folder. (Running it from inside the zip, without
-   extracting, doesn't work.)
-3. Double-click **install_avm.bat**. If Windows shows "Windows protected
-   your PC", choose **More info**, then **Run anyway**.
-4. It checks the PC first and lists what it will install, where, and
-   roughly how big, with the free disk space. Nothing is changed until you
-   answer **y**.
-5. It then installs, which takes several minutes (most of it downloading):
-   - **AVM's files**, copied from the extracted folder into
-     `%USERPROFILE%\avm` (the extracted folder can be deleted afterwards).
-   - **conda**, the tool that builds the Python environment. It uses
-     radioconda, Miniforge or Anaconda if one is already installed;
-     otherwise it installs **Miniforge**, just for your user.
-   - **A private Python environment** in `%LOCALAPPDATA%\AVM\env`, made by
-     conda from the conda-forge collection: Python and the libraries AVM
-     needs (numpy, scipy, numba, PyQt5, OpenCV, PyAV, sounddevice),
-     SoapySDR, and its PlutoSDR, LimeSDR, RTL-SDR and Airspy drivers. This
-     is the large part: conda downloads ready-built copies of everything,
-     so nothing has to be compiled. It's separate from any other Python on
-     the PC, and doesn't change them.
-   - **ffmpeg**, with Opus and Codec2 audio. It uses one already on the PC
-     if it has both; otherwise it downloads the "full" build (about 450 MB)
-     into `%LOCALAPPDATA%\AVM\ffmpeg`.
-   - An **AVM** shortcut on the Desktop and in the Start menu.
-6. Start AVM from the **AVM** shortcut.
+1. Download **AVM-setup.exe** from the latest
+   [release](https://github.com/m0dts/avm/releases).
+2. Run it. If Windows shows "Windows protected your PC", choose
+   **More info**, then **Run anyway**.
 
-No administrator rights are needed: everything goes into your own user
-folders. Everything the installer printed is saved to
-`%LOCALAPPDATA%\AVM\install.log`. Run **install_avm.bat** again to repair
-an installation; AVM's Update button keeps it up to date.
+It installs into `%USERPROFILE%\avm\app`, just for your user (no
+administrator rights needed), with an **AVM** shortcut in the Start menu
+(and optionally on the Desktop). Nothing else is needed: no Python, conda
+or separate ffmpeg. AVM's Update button downloads and runs the newest
+installer for you.
 
-On Windows, an RTL-SDR needs the WinUSB driver (from
+On Windows, an RTL-SDR (or a HackRF) needs the WinUSB driver (from
 [Zadig](https://zadig.akeo.ie)) before AVM can see it. SDRplay radios
 aren't set up by the Windows installer.
 
@@ -373,7 +345,7 @@ AVM, not that every setting has been tried on it.
 |---|---|
 | **Raspberry Pi 4** with 64-bit Raspberry Pi OS (Trixie, desktop) | What AVM is developed and tested on. Best with the 7" touch screen. |
 | **Raspberry Pi 5** (tested with 1 GB) with 64-bit Raspberry Pi OS (Trixie, desktop) | Tested and working. Installs in about 5 minutes on an average SD card (a Pi 4 takes longer). |
-| **Windows 10 / 11 PC** (64-bit) | Working. Its Python setup takes about 5 GB of disk space: see [Windows](#windows). |
+| **Windows 10 / 11 PC** (64-bit) | Working. One installer from the releases page: see [Windows](#windows). |
 
 ### Radios
 
