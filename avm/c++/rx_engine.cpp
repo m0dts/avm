@@ -1180,6 +1180,21 @@ struct Receiver {
 
     void note_trouble() {
         st.consecutive_failures += 1;
+        // a correction from a bad reading (e.g. the Offset stepped mid-fragment) can push the signal's
+        // edge carriers out of the filter: nothing then decodes to undo it -- start again from none
+        if (st.consecutive_failures >= REACQUISITION_TROUBLE_LIMIT && st.afc_hz != 0 && reader.fe) {
+            {
+                std::lock_guard<std::mutex> g(reader.fe_mu);
+                st.afc_from = reader.fe->n_out;
+                st.afc_hist.push_back({reader.fe->n_out, 0.0});
+                reader.fe->set_lo_offset(st.afc_base);
+            }
+            if (st.afc_hist.size() > 8) st.afc_hist.erase(st.afc_hist.begin(), st.afc_hist.end() - 8);
+            avm_logf("[afc] %d+ fragments without a decode: correction %+.0f Hz dropped\n",
+                     REACQUISITION_TROUBLE_LIMIT, st.afc_hz);
+            st.afc_hz = 0;
+            st.afc_n = 0;
+        }
         if (st.consecutive_failures >= REACQUISITION_TROUBLE_LIMIT && st.last_cfo.has) {
             avm_logf("  ! %d+ consecutive fragments without a confirmed decode -- clearing the "
                          "CFO-continuity prior in case the transmitter was restarted (a real oscillator re-tune "

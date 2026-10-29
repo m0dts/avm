@@ -426,7 +426,7 @@ static const QStringList LIME_RX_PORTS = {"Auto", "LNAL", "LNAW", "LNAH"};
 static const double DEFAULT_FREQ_HZ = 146.5e6;
 
 // the radio arguments both modems take (hf_ofdm_rx/tx's): radio, tuning, LO offset, route, port
-// loOffset: tune the LO off the signal (RX and TX, every mode)
+// loOffset: tune the LO off the signal (RX only: TX tunes straight to the frequency)
 static QStringList radioArgs(const QString& dir, double khz, double hz, bool loOffset = true, double offsetHz = -1) {
     QSettings& s = settings();
     QString sdr = s.value(dir + "/radio", "virtual").toString();
@@ -1659,7 +1659,7 @@ void TxPage::doToggleRun() {
         args[args.indexOf("--output") + 1] = "tdd";
         args += tddArgs();
     } else {
-        args += radioArgs("tx", khz, freq_->hz(), true);
+        args += radioArgs("tx", khz, freq_->hz(), false);   // (no TX LO offset: between two radios it spread the signal)
     }
     // TX peak reduction (Config, Experimental): clip and filter, receiver-transparent
     if (s.value("experimental", false).toBool() && s.value("tx/papr_db", 0).toDouble() > 0)
