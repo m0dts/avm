@@ -321,6 +321,12 @@ public:
                 want = pick;
             }
         }
+        // an RTL-SDR can't sample at 300-900 kS/s (it stays at its old rate, and reports the asked
+        // one: the signal lands off centre): the next rate up, the front end resamples it
+        if (c.driver == "rtlsdr" && want > 300000 && want <= 900000) {
+            avm_logf("[rx] rtlsdr: %g kS/s not possible, using 960 kS/s\n", want / 1e3);
+            want = 960000;
+        }
         A.setSampleRate(dev_, RX, 0, want);
         rate = A.getSampleRate ? A.getSampleRate(dev_, RX, 0) : want;
         if (rate <= 0) rate = want;
