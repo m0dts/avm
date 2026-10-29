@@ -183,6 +183,10 @@ struct Reader {
     // --invert-spectrum: I/Q conjugated as it arrives (an inverting receive path:
     // a high-side-LO converter, some radios' IQ order), as hf_ofdm_rx.py's
     bool invert = false;
+    // a hardware radio tuned LO-offset: its DC spike (well clear of the signal) removed
+    // here, a one-pole blocker (~10 Hz), so it's gone from the spectrum and the AGC too
+    double dc_alpha = 0;         // 0: off (HPSDR, Kiwi, virtual: the signal is at DC)
+    std::complex<double> dc_mean = 0;
     std::mutex fe_mu;            // the front end: the input thread and the AFC
     // pushed input, waiting for the front end
     std::mutex in_mu;
@@ -245,9 +249,14 @@ struct Reader {
     // samples straight from a radio
     void process_samples(const cf* x, long long n) {
         std::vector<cf> conj;
-        if (invert) {
+        if (invert || dc_alpha) {
             conj.assign(x, x + n);
-            for (cf& v : conj) v = std::conj(v);
+            if (invert) for (cf& v : conj) v = std::conj(v);
+            if (dc_alpha)
+                for (cf& v : conj) {
+                    dc_mean += dc_alpha * (std::complex<double>(v) - dc_mean);
+                    v -= cf(dc_mean);
+                }
             x = conj.data();
         }
         keep_raw(x, n);
@@ -1713,6 +1722,7 @@ struct Engine {
         const double lo = a.invert_spectrum ? -a.lo_offset_hz : a.lo_offset_hz;
         fe.reset(new FrontEnd(capture_fs, m.fs, taps, lo));   // a radio tuned this far off: shifted back here
         reader.invert = a.invert_spectrum;
+        if (a.lo_offset_hz) reader.dc_alpha = 2 * fft::PI * 10.0 / capture_fs;   // (no offset: the signal sits on DC)
         if (a.invert_spectrum) avm_logf("Spectrum inverted (--invert-spectrum)\n");
         avm_logf("Front end: %.1f kS/s -> %.2f kS/s (compiled IQ correction, LO shift %+.1f kHz, 129-tap FIR at output points only)\n",
                  capture_fs / 1e3, m.fs / 1e3, lo / 1e3);
