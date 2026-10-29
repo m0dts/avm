@@ -88,6 +88,12 @@ QString avmDir() {
 // the live RX gain file (the receivers' --gain-file)
 static QString rxGainFile() { return QDir::tempPath() + "/avm_gui_rx_gain.txt"; }
 // the live RX offset (Hz; the receivers' --freq-offset-file)
+// the live RTL-SDR correction (ppm; --sdr-ppm-file)
+static QString rxPpmFile() { return QDir::tempPath() + "/avm_gui_rx_ppm.txt"; }
+static void writeRxPpm(double ppm) {
+    QFile f(rxPpmFile());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(QByteArray::number(ppm, 'f', 1) + "\n");
+}
 static QString rxOffsetFile() { return QDir::tempPath() + "/avm_gui_rx_offset.txt"; }
 static void writeRxOffset(double khz) {
     QFile f(rxOffsetFile());
@@ -435,6 +441,10 @@ static QStringList radioArgs(const QString& dir, double khz, double hz, bool loO
     if (sdr == "kiwi") a << "--pluto-uri" << s.value("kiwi_server").toString().trimmed();
     // RTL-SDR: its crystal's correction (RX page, shown with an RTL-SDR)
     if (sdr == "rtlsdr" && s.value(dir + "/ppm", 0).toDouble() != 0) a << "--sdr-ppm" << s.value(dir + "/ppm").toString();
+    if (sdr == "rtlsdr" && dir == "rx") {     // and live, as it's changed
+        writeRxPpm(s.value(dir + "/ppm", 0).toDouble());
+        a << "--sdr-ppm-file" << rxPpmFile();
+    }
     return a;
 }
 
@@ -584,7 +594,7 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     }
     connect(ppm_, &Stepper::changed, this, [this](double v) {
         settings().setValue("rx/ppm", v);
-        markPending();
+        writeRxPpm(v);             // the running receiver follows its file
     });
     writeRxOffset(offset_->value());
     connect(offset_, &Stepper::changed, this, [](double khz) {

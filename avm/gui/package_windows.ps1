@@ -1,4 +1,4 @@
-# package_windows.ps1 -- AVM's Windows release: one zip that runs on any
+# package_windows.ps1 -- AVM's Windows release: one installer that runs on any
 # 64-bit Windows 10/11 PC with nothing else installed (no Python, no conda).
 #
 #   powershell -ExecutionPolicy Bypass -File gui\package_windows.ps1
@@ -12,8 +12,8 @@
 #     RTL-SDR, Airspy, Airspy HF+) and their DLLs, from the conda-forge
 #     environment the Python installer made (%LOCALAPPDATA%\AVM\env, or -SoapyEnv),
 #   VERSION;
-# and zips it as dist\AVM-windows.zip -- the asset install_avm_windows.ps1
-# downloads from the GitHub release (releases/latest/download/AVM-windows.zip).
+# and makes dist\AVM-setup.exe of it (Inno Setup 6, avm_setup.iss) -- the asset
+# install_avm_windows.ps1 downloads from the GitHub release.
 param([string]$SoapyEnv = (Join-Path $env:LOCALAPPDATA "AVM\env"))
 $ErrorActionPreference = "Stop"
 $gui = $PSScriptRoot
@@ -148,18 +148,12 @@ foreach ($t in $third | Sort-Object Name) {
 }
 Set-Content -Path (Join-Path $out "THIRD-PARTY.txt") -Value $txt -Encoding utf8
 
-# ---- zip
-$zip = Join-Path $dist "AVM-windows.zip"
-if (Test-Path $zip) { Remove-Item $zip }
-Compress-Archive -Path "$out\*" -DestinationPath $zip
-$mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-Write-Host "AVM $(Get-Content (Join-Path $avm 'VERSION')) for Windows: $zip ($mb MB)"
-# the installer (AVM-setup.exe), when Inno Setup 6 is installed (winget install JRSoftware.InnoSetup)
+# ---- the installer (AVM-setup.exe: the one release asset; install_avm_windows.ps1 runs it)
 $iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($iscc) {
     $ver = (Get-Content (Join-Path $avm 'VERSION') -TotalCount 1).Trim()
     & $iscc /Q "/DAppVersion=$ver" "/DSrcDir=$out" "/DOutDir=$dist" (Join-Path $PSScriptRoot "avm_setup.iss")
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
     $mb = [math]::Round((Get-Item (Join-Path $dist "AVM-setup.exe")).Length / 1MB, 1)
-    Write-Host "installer: $(Join-Path $dist 'AVM-setup.exe') ($mb MB)"
-} else { Write-Host "(no Inno Setup: AVM-setup.exe not made)" }
+    Write-Host "AVM $ver for Windows: $(Join-Path $dist 'AVM-setup.exe') ($mb MB)"
+} else { throw "Inno Setup 6 is needed (winget install JRSoftware.InnoSetup)" }

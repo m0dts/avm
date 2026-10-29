@@ -227,23 +227,24 @@ inline std::vector<Found> find_radios(bool rx) {
 }
 
 // GainFileWatcher: a number (dB, or Hz) the GUI writes to a file, passed to
-// apply() within ~0.2 s of each change (the file's time and size watched)
+// apply() within ~0.2 s of each change
 class FileWatcher {
 public:
     FileWatcher(const std::string& path, std::function<void(double)> apply) : path_(path), apply_(std::move(apply)) {
         th_ = std::thread([this, sink = log_sink()] {
             log_sink() = sink;
-            long long last_t = -1, last_n = -1;
+            // (the value read each time: two changes within the file time's second, same size, both seen)
+            bool have = false;
+            double last = 0;
             while (!stop_) {
-                struct stat st;
-                if (::stat(path_.c_str(), &st) == 0 && ((long long)st.st_mtime != last_t || (long long)st.st_size != last_n)) {
-                    last_t = (long long)st.st_mtime;
-                    last_n = (long long)st.st_size;
-                    if (FILE* f = std::fopen(path_.c_str(), "r")) {
-                        double v;
-                        if (std::fscanf(f, "%lf", &v) == 1) apply_(v);
-                        std::fclose(f);
+                if (FILE* f = std::fopen(path_.c_str(), "r")) {
+                    double v;
+                    if (std::fscanf(f, "%lf", &v) == 1 && (!have || v != last)) {
+                        have = true;
+                        last = v;
+                        apply_(v);
                     }
+                    std::fclose(f);
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
@@ -261,7 +262,7 @@ struct RxConfig {
     std::string driver = "pluto", uri, antenna;
     double rf_hz = 0, rate = 0, gain_db = 30, bandwidth_hz = 0, tune_offset_hz = 0, ppm = 0, warmup_s = 0.75;
     bool agc = false;
-    std::string gain_file, freq_offset_file;
+    std::string gain_file, freq_offset_file, ppm_file;   // (ppm_file: an RTL-SDR's live correction)
     // duplex (TDD): this receiver's radio also transmits tdd::queue() (a Pluto)
     bool tdd_tx = false, tdd_start_muted = false;
     double tdd_tx_gain = -10;
@@ -333,6 +334,7 @@ public:
         double tune = c.rf_hz + c.tune_offset_hz;
         A.setFrequency(dev_, RX, 0, tune, nullptr);
         if (c.driver == "rtlsdr" && c.ppm && A.setFrequencyCorrection) A.setFrequencyCorrection(dev_, RX, 0, c.ppm);
+        ppm_ = c.ppm;
         if (c.driver == "lime") lime_configure(tune);
         if (c.agc) {
             if (A.setGainMode) A.setGainMode(dev_, RX, 0, true);
@@ -359,6 +361,13 @@ public:
         if (!c.gain_file.empty()) gain_watch_.reset(new FileWatcher(c.gain_file, [this](double db) { set_gain(db); }));
         if (!c.freq_offset_file.empty())
             offset_watch_.reset(new FileWatcher(c.freq_offset_file, [this](double hz) { set_freq_offset(hz); }));
+        if (!c.ppm_file.empty() && c.driver == "rtlsdr" && A.setFrequencyCorrection)
+            ppm_watch_.reset(new FileWatcher(c.ppm_file, [this](double ppm) {
+                if (ppm == ppm_) return;
+                ppm_ = ppm;
+                api().setFrequencyCorrection(dev_, RX, 0, ppm);
+                avm_logf("RX frequency correction %+g ppm\n", ppm);
+            }));
         avm_logf("%s RX: %.4f MHz (LO %.4f MHz, %+.1f kHz), %.1f kS/s, gain=%s\n", c.driver.c_str(),
                      c.rf_hz / 1e6, tune / 1e6, c.tune_offset_hz / 1e3, rate / 1e3,
                      c.agc ? "AGC" : (std::to_string((int)c.gain_db) + "dB").c_str());
@@ -431,6 +440,7 @@ public:
     ~RxSource() override {
         gain_watch_.reset();
         offset_watch_.reset();
+        ppm_watch_.reset();
         Api& A = api();
         if (feeder_) {
             feeder_->stop();
@@ -515,8 +525,8 @@ private:
     std::atomic<long long> count_{0}, discarded_{0};
     std::atomic<long long> warmup_{0};
     int timeouts_ = 0;
-    double tune_ = 0, offset_ = 0;
-    std::unique_ptr<FileWatcher> gain_watch_, offset_watch_;
+    double tune_ = 0, offset_ = 0, ppm_ = 0;
+    std::unique_ptr<FileWatcher> gain_watch_, offset_watch_, ppm_watch_;
 };
 
 // ---------------------------------------------------------------- transmit

@@ -518,7 +518,7 @@ struct Args {
     bool agc = false;
     bool spectrum = false;
     double spectrum_span = 0;     // --spectrum-span-hz: the raw samples, this wide around the signal
-    std::string gain_file, freq_offset_file;
+    std::string gain_file, freq_offset_file, ppm_file;
     long long test_step = 0;
     bool assume_prior = true;
     int sync_fast_symbols = 6;
@@ -1602,6 +1602,7 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         else if (k == "--spectrum-span-hz") a.spectrum_span = std::atof(val().c_str());
         else if (k == "--gain-file") a.gain_file = val();
         else if (k == "--freq-offset-file") a.freq_offset_file = val();
+        else if (k == "--sdr-ppm-file") a.ppm_file = val();
         else if (k == "--tdd-cycle-s") a.tdd_cycle_s = std::atof(val().c_str());
         else if (k == "--tdd-slot-s") a.tdd_slot_s = std::atof(val().c_str());
         else if (k == "--tdd-offset-s") a.tdd_offset_s = std::atof(val().c_str());
@@ -1696,7 +1697,7 @@ struct Engine {
             sdr::RxConfig rc;
             rc.driver = a.sdr; rc.uri = a.uri; rc.antenna = a.antenna; rc.rf_hz = a.rf_freq; rc.rate = capture_fs;
             rc.gain_db = a.rx_gain; rc.agc = a.agc; rc.bandwidth_hz = a.bandwidth; rc.tune_offset_hz = a.lo_offset_hz;
-            rc.ppm = a.ppm; rc.warmup_s = a.warmup_s; rc.gain_file = a.gain_file; rc.freq_offset_file = a.freq_offset_file;
+            rc.ppm = a.ppm; rc.warmup_s = a.warmup_s; rc.gain_file = a.gain_file; rc.freq_offset_file = a.freq_offset_file; rc.ppm_file = a.ppm_file;
             rc.tdd_tx = a.tdd_tx; rc.tdd_tx_gain = a.tdd_tx_gain; rc.tdd_start_muted = !a.tdd_adjust_file.empty();   // (a slave)
             auto* r = new sdr::RxSource;
             radio.reset(r);

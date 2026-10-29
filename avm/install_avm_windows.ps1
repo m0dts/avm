@@ -1,22 +1,23 @@
 # AVM installer for Windows 10/11 (64-bit). Run via install_avm.bat.
 #
 # On a new PC, install_avm.bat on its own is enough: it fetches this script,
-# which downloads AVM -- one ready-built zip, nothing else to install (no
-# Python, no conda, no admin rights) -- into %USERPROFILE%\avm\app:
-#   0. AVM itself: the release zip (AVM-windows.zip) from GitHub's latest
-#      release, or one beside this script, or AVM_ZIP=<file>. -Update fetches
-#      it again; -Restart (an older AVM's Update button) too, then starts AVM.
-#   1. AVM.bat + Desktop and Start-menu shortcuts (older ones switched over)
-# Safe to re-run. "install_avm.bat -Check" only reports. It first shows what
-# it would do and asks (not with -Yes or -Restart). Everything it prints also
-# goes to a log, %LOCALAPPDATA%\AVM\install.log.
+# which downloads AVM's installer (AVM-setup.exe) -- nothing else to install
+# (no Python, no conda, no admin rights) -- and runs it, unattended, into
+# %USERPROFILE%\avm\app:
+#   the installer from GitHub's latest release, or one beside this script, or
+#   AVM_SETUP=<file>; AVM_RELEASE=<tag> for a particular release (a test build).
+#   -Update fetches it again; -Restart (AVM's Update button, the old Python
+#   AVM's too) also, then starts AVM.
+# The installer writes AVM.bat (where older AVMs' shortcuts point) and the
+# 'AVM' shortcuts (AVM_NO_SHORTCUTS=1: none). Safe to re-run. "install_avm.bat
+# -Check" only reports. It first shows what it would do and asks (not with -Yes
+# or -Restart). Everything it prints also goes to %LOCALAPPDATA%\AVM\install.log.
 param([switch]$Check, [switch]$Update, [switch]$Restart, [switch]$Yes)
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with the progress bar
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Say($m)  { Write-Host "`n== $m" -ForegroundColor Cyan }
-function Warn($m) { Write-Host "!! $m" -ForegroundColor Yellow }
 function Die($m)  {
     Write-Host "XX $m" -ForegroundColor Red
     if ($script:log) { Write-Host "Install log: $script:log"; try { Stop-Transcript | Out-Null } catch { } }
@@ -25,12 +26,10 @@ function Die($m)  {
 
 # ---------------------------------------------------------------- where things are
 $repo = if ($env:AVM_REPO) { $env:AVM_REPO } else { "m0dts/avm" }
-# the release zip: AVM_ZIP (a file), else one beside this script, else GitHub's
-# latest release (AVM_RELEASE=<tag> for a particular one, e.g. a test build)
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$zipUrl = if ($env:AVM_RELEASE) { "https://github.com/$repo/releases/download/$($env:AVM_RELEASE)/AVM-windows.zip" }
-          else { "https://github.com/$repo/releases/latest/download/AVM-windows.zip" }
-$localZip = if ($env:AVM_ZIP) { $env:AVM_ZIP } elseif (Test-Path "$here\AVM-windows.zip") { "$here\AVM-windows.zip" } else { $null }
+$setupUrl = if ($env:AVM_RELEASE) { "https://github.com/$repo/releases/download/$($env:AVM_RELEASE)/AVM-setup.exe" }
+            else { "https://github.com/$repo/releases/latest/download/AVM-setup.exe" }
+$localSetup = if ($env:AVM_SETUP) { $env:AVM_SETUP } elseif (Test-Path "$here\AVM-setup.exe") { "$here\AVM-setup.exe" } else { $null }
 $avm = if ($env:AVM_INSTALL_DIR) { $env:AVM_INSTALL_DIR } else { Join-Path $env:USERPROFILE "avm" }
 $avm = [IO.Path]::GetFullPath($avm).TrimEnd("\")
 $app = Join-Path $avm "app"
@@ -54,12 +53,13 @@ if ($Check -or (-not $Yes -and -not $Restart)) {
     Write-Host "  AVM folder: $app"
     if ($have) { Write-Host "  installed:  AVM $have" } else { Write-Host "  installed:  no" }
     if ($fetch) {
-        $from = if ($localZip) { $localZip } else { $zipUrl }
-        Write-Host "  would get:  AVM-windows.zip (~100 MB) from $from"
+        $from = if ($localSetup) { $localSetup } else { $setupUrl }
+        Write-Host "  would get:  AVM-setup.exe (~75 MB) from $from, and run it"
+    } else {
+        Write-Host "  nothing to do (-Update fetches the latest)"
     }
-    Write-Host "  would set:  AVM.bat, and 'AVM' shortcuts on the Desktop and in the Start menu"
     Write-Host "  No admin rights are needed; nothing is installed outside your user folders."
-    if ($Check) { exit 0 }
+    if ($Check -or -not $fetch) { if ($script:log) { try { Stop-Transcript | Out-Null } catch { } }; exit 0 }
     $ans = Read-Host "`nInstall / change this? [y/N]"
     if ($ans -notmatch '^(y|yes)$') {
         Write-Host "Nothing changed."
@@ -68,8 +68,8 @@ if ($Check -or (-not $Yes -and -not $Restart)) {
     }
 }
 
-# ---------------------------------------------------------------- 0. AVM
-Say "0. AVM"
+# ---------------------------------------------------------------- AVM
+Say "AVM"
 if (-not $fetch) {
     Write-Host "present: AVM $have ($app); -Update fetches the latest"
 } else {
@@ -78,45 +78,21 @@ if (-not $fetch) {
         Get-Process avm_gui | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
         Start-Sleep -Seconds 2
     }
-    $zip = if ($localZip) { $localZip } else { Join-Path $env:TEMP "AVM-windows.zip" }
-    if (-not $localZip) {
-        Write-Host "downloading $zipUrl (~100 MB)..."
-        try { Invoke-WebRequest $zipUrl -OutFile $zip } catch { Die "download failed: $zipUrl ($($_.Exception.Message))" }
+    $setup = if ($localSetup) { $localSetup } else { Join-Path $env:TEMP "AVM-setup.exe" }
+    if (-not $localSetup) {
+        Write-Host "downloading $setupUrl (~75 MB)..."
+        try { Invoke-WebRequest $setupUrl -OutFile $setup } catch { Die "download failed: $setupUrl ($($_.Exception.Message))" }
     }
-    # unpacked beside, then swapped in: a failed download or unpack leaves the old AVM
-    $new = Join-Path $avm "app.new"
-    if (Test-Path $new) { Remove-Item -Recurse -Force $new }
-    try { Expand-Archive $zip -DestinationPath $new } catch { Die "couldn't unpack $zip ($($_.Exception.Message))" }
-    if (-not (Test-Path "$new\avm_gui.exe")) { Die "the zip has no avm_gui.exe ($zip)" }
-    if (Test-Path "$app\gui_logs") { Move-Item "$app\gui_logs" "$new\gui_logs" }    # the logs kept
-    if (Test-Path $app) { Remove-Item -Recurse -Force $app }
-    Move-Item $new $app
-    if (-not $localZip) { Remove-Item $zip -ErrorAction SilentlyContinue }
+    Write-Host "installing..."
+    $setupArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$app`"")
+    if ($env:AVM_NO_SHORTCUTS -eq "1") { $setupArgs += @("/NOICONS", "/TASKS=`"`"") }
+    $p = Start-Process -FilePath $setup -ArgumentList $setupArgs -Wait -PassThru
+    if (-not $localSetup) { Remove-Item $setup -ErrorAction SilentlyContinue }
+    if ($p.ExitCode -ne 0) { Die "the installer failed (exit code $($p.ExitCode))" }
+    if (-not (Test-Path $exe)) { Die "the installer left no $exe" }
     $have = (Get-Content "$app\VERSION" -TotalCount 1).Trim()
     Write-Host "installed AVM $have into $app"
 }
-
-# ---------------------------------------------------------------- 1. launcher
-Say "1. Launcher"
-# AVM.bat: where the shortcuts of older AVMs (the Python one) point -- now the C++ program
-$bat = Join-Path $avm "AVM.bat"
-Set-Content -Path $bat -Encoding ascii -Value @"
-@echo off
-rem AVM launcher (written by install_avm.bat)
-start "AVM" /d "$app" "$exe" %*
-"@
-$ws = New-Object -ComObject WScript.Shell
-# (AVM_NO_SHORTCUTS=1: none -- a test install that mustn't replace the real ones)
-$shortcutDirs = if ($env:AVM_NO_SHORTCUTS -eq "1") { @() } else { @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs")) }
-foreach ($dir in $shortcutDirs) {
-    $lnk = $ws.CreateShortcut((Join-Path $dir "AVM.lnk"))
-    $lnk.TargetPath = $exe
-    $lnk.WorkingDirectory = $app
-    $lnk.IconLocation = "$exe,0"
-    $lnk.Description = "AVM -- Audio Video Modem"
-    $lnk.Save()
-}
-Write-Host "'AVM' shortcuts on the Desktop and in the Start menu -> $exe"
 
 Say "Done"
 Write-Host "Start AVM from the 'AVM' shortcut."

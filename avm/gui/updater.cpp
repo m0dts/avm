@@ -161,7 +161,7 @@ static bool runInstallerHere(QWidget* window, const QString& script) {
 
 bool Updater::apply(QWidget* window) {
 #ifdef Q_OS_WIN
-    // the latest installer, in its own console window: it fetches the new zip
+    // the latest installer, in its own console window: it fetches and runs the new AVM-setup.exe
     // (closing this AVM first) and starts AVM again
     QNetworkAccessManager nam;
     QNetworkRequest rq(QUrl(rawUrl("avm/install_avm_windows.ps1")));
