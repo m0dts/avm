@@ -154,3 +154,12 @@ if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path "$out\*" -DestinationPath $zip
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host "AVM $(Get-Content (Join-Path $avm 'VERSION')) for Windows: $zip ($mb MB)"
+# the installer (AVM-setup.exe), when Inno Setup 6 is installed (winget install JRSoftware.InnoSetup)
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($iscc) {
+    $ver = (Get-Content (Join-Path $avm 'VERSION') -TotalCount 1).Trim()
+    & $iscc /Q "/DAppVersion=$ver" "/DSrcDir=$out" "/DOutDir=$dist" (Join-Path $PSScriptRoot "avm_setup.iss")
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+    $mb = [math]::Round((Get-Item (Join-Path $dist "AVM-setup.exe")).Length / 1MB, 1)
+    Write-Host "installer: $(Join-Path $dist 'AVM-setup.exe') ($mb MB)"
+} else { Write-Host "(no Inno Setup: AVM-setup.exe not made)" }
