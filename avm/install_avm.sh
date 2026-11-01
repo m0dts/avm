@@ -116,6 +116,7 @@ IS_PI=0
 grep -qi 'raspberry pi' /proc/device-tree/model 2>/dev/null && IS_PI=1
 echo "System: $PRETTY_NAME, $(uname -m)$([ $IS_PI = 1 ] && echo ', Raspberry Pi')"
 echo "AVM:    $AVM_DIR"
+echo "Note:   installing or updating rebuilds AVM from source -- allow 5-10 minutes (a Pi 4 is the slower end)."
 [ "$(id -u)" = 0 ] && die "Run as your normal user, not root (it uses sudo where needed)."
 SUDO=sudo
 # Debian installed with a root password leaves the user without sudo
