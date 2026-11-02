@@ -88,6 +88,10 @@ struct Api {
     Kwargs* (*enumerate)(const Kwargs*, size_t*) = nullptr;
     Kwargs* (*enumerateStr)(const char*, size_t*) = nullptr;
     void (*kwargsListClear)(Kwargs*, size_t) = nullptr;
+    int (*writeGPIO)(void*, const char*, unsigned) = nullptr;
+    unsigned (*readGPIO)(void*, const char*) = nullptr;
+    int (*writeGPIODir)(void*, const char*, unsigned) = nullptr;
+    unsigned (*readGPIODir)(void*, const char*) = nullptr;
 
     bool load(std::string& err) {
         if (lib) return true;
@@ -126,6 +130,10 @@ struct Api {
         S(readStream, "SoapySDRDevice_readStream");
         S(writeStream, "SoapySDRDevice_writeStream");
         S(errToStr, "SoapySDR_errToStr");
+        S(writeGPIO, "SoapySDRDevice_writeGPIO");
+        S(readGPIO, "SoapySDRDevice_readGPIO");
+        S(writeGPIODir, "SoapySDRDevice_writeGPIODir");
+        S(readGPIODir, "SoapySDRDevice_readGPIODir");
         S(getGainRange, "SoapySDRDevice_getGainRange");
         S(enumerate, "SoapySDRDevice_enumerate");
         S(enumerateStr, "SoapySDRDevice_enumerateStrArgs");
@@ -219,6 +227,190 @@ inline void close_device(void* dev) {
         }
     if (A.unmake) A.unmake(dev);     // (not from the pool)
 }
+
+// ---- LimeRFE: the LimeSDR's RF front end, on its expansion header. Driven as
+// LimeSuite's limeRFE_cmd.cpp does "via SDR": I2C to the board's controller
+// (address 0x51), bit-banged on the LimeSDR's GPIO 6 (SCL) and 7 (SDA) -- here
+// through SoapySDR's GPIO calls on the radio already open (LimeSuite's own handle
+// would open it a second time). The band from the frequency; its mode following
+// this process's receiver and transmitter on that radio.
+struct RfeConfig {
+    bool on = false;
+    int tx_port = 1;        // 1: J3 (TX/RX), 2: J4 (TX only: RX and TX at once possible)
+    bool notch = false;     // the HAM 144/430 MHz FM broadcast notch
+    int atten_db = 0;       // RX attenuation, 0..14 dB in 2 dB steps
+};
+
+// "PORT,NOTCH,ATTEN" (--lime-rfe 2,0,6)
+inline RfeConfig parse_rfe(const std::string& s) {
+    RfeConfig c;
+    int p = 1, n = 0, a = 0;
+    if (std::sscanf(s.c_str(), "%d,%d,%d", &p, &n, &a) >= 1) {
+        c.on = true;
+        c.tx_port = p == 2 ? 2 : 1;
+        c.notch = n != 0;
+        c.atten_db = std::max(0, std::min(14, a));
+    }
+    return c;
+}
+
+class LimeRfe {
+public:
+    // a receiver (tx false) or transmitter on dev starting at rf_hz / stopping
+    static void attach(void* dev, bool tx, double rf_hz, const RfeConfig& c) {
+        if (!c.on || !dev) return;
+        std::lock_guard<std::mutex> g(mu());
+        State& s = states()[dev];
+        s.cfg = c;
+        (tx ? s.tx : s.rx) = true;
+        (tx ? s.cid_tx : s.cid_rx) = channel(rf_hz);
+        update(dev, s);
+    }
+    static void detach(void* dev, bool tx) {
+        if (!dev) return;
+        std::lock_guard<std::mutex> g(mu());
+        auto it = states().find(dev);
+        if (it == states().end()) return;
+        (tx ? it->second.tx : it->second.rx) = false;
+        update(dev, it->second);
+        if (!it->second.rx && !it->second.tx) states().erase(it);
+    }
+
+private:
+    enum { MODE_RX = 0, MODE_TX = 1, MODE_NONE = 2, MODE_TXRX = 3 };
+    static const int SCL = 6, SDA = 7, ADDR = 0x51, CMD_MODE = 0xd1, CMD_CONFIG = 0xd2;
+    struct State {
+        RfeConfig cfg;
+        bool rx = false, tx = false;
+        int cid_rx = 0, cid_tx = 0;
+        int sent_rx = -1, sent_tx = -1, sent_mode = -1;
+        bool failed = false;
+    };
+    static std::mutex& mu() { static std::mutex m; return m; }
+    static std::map<void*, State>& states() { static std::map<void*, State> m; return m; }
+
+    // RFE_CID_*: the HAM bands' filters and amplifiers, else the wideband paths
+    static int channel(double hz) {
+        const double m = hz / 1e6;
+        if (m <= 30) return 3;                  // HAM_0030 (its own port, J5)
+        if (m >= 50 && m <= 72) return 4;       // HAM_0070
+        if (m >= 144 && m <= 148) return 5;     // HAM_0145
+        if (m >= 219 && m <= 225) return 6;     // HAM_0220
+        if (m >= 420 && m <= 450) return 7;     // HAM_0435
+        if (m >= 902 && m <= 928) return 8;     // HAM_0920
+        if (m >= 1240 && m <= 1325) return 9;   // HAM_1280
+        if (m >= 2300 && m <= 2450) return 10;  // HAM_2400
+        if (m >= 3300 && m <= 3500) return 11;  // HAM_3500
+        return m < 1000 ? 1 : 2;                // WB_1000, WB_4000
+    }
+
+    static void update(void* dev, State& s) {
+        if (s.failed) return;
+        const int cid_rx = s.rx ? s.cid_rx : s.cid_tx, cid_tx = s.tx ? s.cid_tx : s.cid_rx;
+        const bool hf = cid_rx == 3 || cid_tx == 3;
+        const int port_rx = hf ? 3 : 1, port_tx = hf ? 3 : s.cfg.tx_port;
+        // both at once: TX+RX only with TX on its own port (J4); on one port, TX wins
+        const int mode = s.rx && s.tx ? (port_tx != port_rx ? MODE_TXRX : MODE_TX)
+                         : s.tx ? MODE_TX : s.rx ? MODE_RX : MODE_NONE;
+        Bus b(dev);
+        if (!b.ok) {
+            avm_logf("LimeRFE: this radio has no GPIO control through SoapySDR -- LimeRFE not set\n");
+            s.failed = true;
+            return;
+        }
+        uint8_t r[16] = {0};
+        if (cid_rx != s.sent_rx || cid_tx != s.sent_tx) {
+            uint8_t c[16] = {(uint8_t)CMD_CONFIG, (uint8_t)cid_rx, (uint8_t)cid_tx, (uint8_t)port_rx, (uint8_t)port_tx,
+                             (uint8_t)mode, (uint8_t)(s.cfg.notch ? 1 : 0), (uint8_t)(s.cfg.atten_db / 2), 0, 0};
+            if (!b.command(c, 16, r)) {
+                avm_logf("LimeRFE: no answer on the LimeSDR's I2C (GPIO 6/7) -- is it fitted? Not set\n");
+                s.failed = true;
+                return;
+            }
+            s.sent_rx = cid_rx;
+            s.sent_tx = cid_tx;
+            s.sent_mode = mode;
+            avm_logf("LimeRFE: band RX %d / TX %d, ports J%d / J%d, mode %s, notch %s, RX atten %d dB (status %d)\n",
+                     cid_rx, cid_tx, port_rx == 1 ? 3 : port_rx == 2 ? 4 : 5, port_tx == 1 ? 3 : port_tx == 2 ? 4 : 5,
+                     mode_name(mode), s.cfg.notch ? "on" : "off", s.cfg.atten_db, r[1]);
+            return;
+        }
+        if (mode == s.sent_mode) return;
+        uint8_t c[2] = {(uint8_t)CMD_MODE, (uint8_t)mode};
+        if (!b.command(c, 2, r)) {
+            avm_logf("LimeRFE: no answer setting the mode\n");
+            return;
+        }
+        s.sent_mode = mode;
+        avm_logf("LimeRFE: mode %s\n", mode_name(mode));
+    }
+    static const char* mode_name(int m) {
+        return m == MODE_RX ? "RX" : m == MODE_TX ? "TX" : m == MODE_TXRX ? "TX+RX" : "off";
+    }
+
+    // I2C on two GPIO lines, open-drain style: a 1 released (an input, pulled up), a 0 driven low
+    struct Bus {
+        void* dev;
+        unsigned dir = 0, out = 0;
+        bool ok = false;
+        explicit Bus(void* d) : dev(d) {
+            Api& A = api();
+            if (!A.writeGPIO || !A.writeGPIODir || !A.readGPIO || !A.readGPIODir) return;
+            dir = A.readGPIODir(dev, "MAIN");
+            out = A.readGPIO(dev, "MAIN");
+            ok = true;
+        }
+        void set(int bit, int v) {
+            Api& A = api();
+            if (v) dir &= ~(1u << bit); else dir |= 1u << bit;
+            if (v) out |= 1u << bit; else out &= ~(1u << bit);
+            A.writeGPIODir(dev, "MAIN", dir);
+            A.writeGPIO(dev, "MAIN", out);
+        }
+        int get(int bit) { return (api().readGPIO(dev, "MAIN") >> bit) & 1; }
+        void start() { set(SDA, 1); set(SCL, 1); set(SDA, 0); set(SCL, 0); }
+        void stop() { set(SDA, 0); set(SCL, 1); set(SDA, 1); }
+        bool tx(uint8_t d) {        // true: acknowledged
+            for (int i = 7; i >= 0; --i) { set(SDA, (d >> i) & 1); set(SCL, 1); set(SCL, 0); }
+            set(SDA, 1);
+            set(SCL, 1);
+            bool ack = get(SDA) == 0;
+            set(SCL, 0);
+            return ack;
+        }
+        bool rx(bool ack, uint8_t& d) {
+            set(SDA, 1);
+            d = 0;
+            for (int i = 0; i < 8; ++i) {
+                set(SCL, 1);
+                int k = 0;
+                while (get(SCL) == 0 && ++k < 100) {}     // (the controller stretching the clock)
+                if (k >= 100) return false;
+                d = (uint8_t)(d << 1 | get(SDA));
+                set(SCL, 0);
+            }
+            set(SDA, ack ? 0 : 1);
+            set(SCL, 1);
+            set(SCL, 0);
+            set(SDA, 1);
+            return true;
+        }
+        // a command written, its reply (the same length) read back
+        bool command(const uint8_t* c, int n, uint8_t* r) {
+            start();
+            bool ok_ = tx((uint8_t)(ADDR << 1));
+            for (int i = 0; ok_ && i < n; ++i) tx(c[i]);
+            stop();
+            if (!ok_) return false;
+            start();
+            if (!tx((uint8_t)(ADDR << 1 | 1))) { stop(); return false; }
+            for (int i = 0; i < n; ++i)
+                if (!rx(i < n - 1, r[i])) { stop(); return false; }
+            stop();
+            return true;
+        }
+    };
+};
 
 // The radios connected now (touch_widgets.detect_radios / detect_rx_radios):
 // one per Pluto route (USB, or its address), LimeSDR by model and serial, and
@@ -328,6 +520,7 @@ private:
 
 struct RxConfig {
     std::string driver = "pluto", uri, antenna;
+    std::string lime_rfe;      // --lime-rfe: a LimeRFE on the LimeSDR (parse_rfe)
     double rf_hz = 0, rate = 0, gain_db = 30, bandwidth_hz = 0, tune_offset_hz = 0, ppm = 0, warmup_s = 0.75;
     bool agc = false;
     std::string gain_file, freq_offset_file, ppm_file;   // (ppm_file: an RTL-SDR's live correction)
@@ -376,6 +569,7 @@ public:
             if (!dev_) dev_ = open_device("driver=plutosdr");
         }
         if (!dev_) { error = std::string("could not open the radio: ") + (A.lastError ? A.lastError() : "?"); return false; }
+        if (c.driver == "lime" && !c.lime_rfe.empty()) LimeRfe::attach(dev_, false, c.rf_hz, parse_rfe(c.lime_rfe));
         double want = c.rate;
         if (fixed && A.listSampleRates) {
             size_t n = 0;
@@ -539,6 +733,7 @@ public:
             if (A.deactivateStream) A.deactivateStream(dev_, stream_, 0, 0);
             if (A.closeStream) A.closeStream(dev_, stream_);
         }
+        if (cfg_.driver == "lime") LimeRfe::detach(dev_, false);
         close_device(dev_);     // (the shared radio: closed once its last user is done)
     }
 
@@ -627,6 +822,7 @@ private:
 // the LimeSDR paced to at most 0.25 s ahead of real time.
 struct TxConfig {
     std::string driver = "pluto", uri, antenna;
+    std::string lime_rfe;
     double rf_hz = 0, rate = 0, gain_db = -10, bandwidth_hz = 0, tune_offset_hz = 0;
     size_t queue_depth = 8;
     std::string gain_file;
@@ -651,6 +847,7 @@ public:
         dev_ = open_device(args);
         if (!dev_ && c.driver == "pluto" && !c.uri.empty()) dev_ = open_device("driver=plutosdr");
         if (!dev_) { error = std::string("could not open the radio: ") + (A.lastError ? A.lastError() : "?"); return false; }
+        if (c.driver == "lime" && !c.lime_rfe.empty()) LimeRfe::attach(dev_, true, c.rf_hz, parse_rfe(c.lime_rfe));
         // (a HackRF: 2 MS/s at least; the transmitter builds its waveform at the rate it really runs at)
         set_rate_if_changed(dev_, TX, c.driver == "hackrf" ? std::max(c.rate, 2000000.0) : c.rate);
         rate = A.getSampleRate ? A.getSampleRate(dev_, TX, 0) : c.rate;
@@ -735,6 +932,7 @@ public:
             if (A.deactivateStream) A.deactivateStream(dev_, stream_, 0, 0);
             if (A.closeStream) A.closeStream(dev_, stream_);
         }
+        if (cfg_.driver == "lime") LimeRfe::detach(dev_, true);
         close_device(dev_);     // (the shared radio: closed once its last user is done)
     }
 

@@ -449,6 +449,11 @@ static QStringList radioArgs(const QString& dir, double khz, double hz, bool loO
     if ((sdr == "pluto" || sdr == "hpsdr") && !uri.isEmpty()) a << "--pluto-uri" << uri;
     QString port = s.value(dir + "/port", "Auto").toString();
     if (sdr == "lime" && port != "Auto") a << "--sdr-antenna" << port;
+    // a LimeRFE on the LimeSDR (Config, RFE): its band, ports and mode set by the modems
+    if (sdr == "lime" && s.value("rfe/on", false).toBool())
+        a << "--lime-rfe" << QString("%1,%2,%3").arg(s.value("rfe/tx_port", "1").toString(),
+                                                     s.value("rfe/notch", false).toBool() ? "1" : "0",
+                                                     s.value("rfe/atten_db", "0").toString());
     // KiwiSDR: the server set in Config (Receiver), always the current one
     if (sdr == "kiwi") a << "--pluto-uri" << s.value("kiwi_server").toString().trimmed();
     // RTL-SDR: its crystal's correction (RX page, shown with an RTL-SDR)
@@ -909,7 +914,11 @@ void RxPage::doToggleRun() {
         double period = bps > 0 ? fragmentSize(khz) * 8 / bps : 0.5;
         double target = std::max(0.5, period + 0.25);
         if (!duplexRole().isEmpty()) target = std::max(target, TDD_PLAYER_LATENCY_S);   // bursts a cycle apart
-        media_.audio().setLatency(target, std::max(0.2, 0.6 * period + 0.05));
+        // hold: the backlog's average -- it saws down by a fragment's air time between
+        // bursts, so its low point is hold - period/2: 0.25 s kept there for a fragment
+        // arriving late (0.6 x period + 0.05 left 0.1 s with S 20's 0.62 s fragments, and
+        // one 80 ms late was a break in the sound)
+        media_.audio().setLatency(std::max(target, 0.5 * period + 0.3), std::max(0.2, 0.5 * period + 0.25));
     }
     QStringList args = modemArgs();
     QStringList radio = radioArgs("rx", khz, freq_->hz());
@@ -1345,7 +1354,7 @@ TxPage::TxPage(QWidget* parent) : QWidget(parent) {
         settings().setValue("tx/resolution", res_->value());
         settings().setValue("tx/fps", fps_->value());
         settings().setValue("tx/audio_codec", audio_->value());
-        if (!link_.running()) showPlan();
+        showPlan();
     };
     connect(res_, &Picker::changed, this, pickSaved);
     connect(fps_, &Picker::changed, this, pickSaved);
@@ -1447,6 +1456,7 @@ TxPage::TxPage(QWidget* parent) : QWidget(parent) {
     });
     connect(&link_, &Link::stateChanged, this, [this](bool on) {
         if (!on) pending_ = false;
+        refreshInfo();
         if (on || !restarting_) {
             run_->setText(on ? "STOP" : "TX");
             run_->setStyleSheet(on ? QString("background: %1;").arg(STOP) : QString());
@@ -1534,6 +1544,10 @@ void TxPage::refreshInfo() {
         w = "NO VIDEO: link too slow, sending audio only -- use a wider kHz or faster mode";
     warn_->setText(w);
     warn_->setVisible(!w.isEmpty());
+    // changed while transmitting: what the restart will send, in the button's colour
+    const QString c = pending_ && running() ? QString("color: %1;").arg(WARN) : QString();
+    rates_->setStyleSheet(c);
+    linkInfo_->setStyleSheet(c);
 }
 
 // a new link: the picture and audio it suits (touch_tx_page._changed)
@@ -1547,7 +1561,7 @@ void TxPage::linkChanged() {
         settings().setValue("tx/fps", fps_->value());
         settings().setValue("tx/audio_codec", audio_->value());
     }
-    if (!link_.running()) showPlan();
+    showPlan();
 }
 
 // the Stream source's URL (Config, TX media): SRT, listening for OBS
@@ -1601,6 +1615,7 @@ void TxPage::markPending() {
     pending_ = true;
     run_->setText("RESTART TO APPLY");
     run_->setStyleSheet(QString("background: %1; color: #111;").arg(WARN));
+    refreshInfo();
 }
 
 void TxPage::applyModeType() {
@@ -1611,7 +1626,7 @@ void TxPage::applyModeType() {
     settings().setValue("tx/bw", bw_->value());
     settings().setValue("tx/mod", mod_->value());
     if (mode_->value() + bw_->value() + mod_->value() != before) linkChanged();
-    else if (!link_.running()) showPlan();     // (Config's Content may have changed)
+    else showPlan();     // (Config's Content may have changed)
 }
 
 QString TxPage::modeSummary() const {
@@ -1976,6 +1991,69 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         emit rxSettingChanged();
     });
 
+    // RFE: a LimeRFE front end fitted to the LimeSDR (driven over its GPIO/I2C, through the radio)
+    auto* rfe = new QWidget;
+    auto* ff = new QFormLayout(rfe);
+    ff->setVerticalSpacing(ui.px(6));
+    auto* rfeOn = new Segmented({{"off", "Off"}, {"on", "On"}}, s.value("rfe/on", false).toBool() ? "on" : "off");
+    ff->addRow(rowLabel("LimeRFE"), rfeOn);
+    auto* rfePort = new Segmented({{"1", "TX on J3 (TX/RX)"}, {"2", "TX on J4"}}, s.value("rfe/tx_port", "1").toString());
+    ff->addRow(rowLabel("TX port"), rfePort);
+    auto* rfeNotch = new Segmented({{"off", "Off"}, {"on", "On"}}, s.value("rfe/notch", false).toBool() ? "on" : "off");
+    ff->addRow(rowLabel("FM notch"), rfeNotch);
+    auto* rfeAtt = new Segmented({{"0", "0"}, {"2", "2"}, {"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}, {"14", "14"}},
+                                 s.value("rfe/atten_db", "0").toString());
+    ff->addRow(rowLabel("RX atten dB"), rfeAtt);
+    // the band the LimeRFE gets from the RX and TX frequencies (as sdr.h's LimeRfe::channel)
+    auto* rfeBand = new QLabel;
+    rfeBand->setWordWrap(true);
+    ff->addRow(rowLabel("Band"), rfeBand);
+    auto bandName = [](double hz) -> QString {
+        const double m = hz / 1e6;
+        if (m <= 30) return "HAM 30 MHz (J5)";
+        if (m >= 50 && m <= 72) return "HAM 70 MHz";
+        if (m >= 144 && m <= 148) return "HAM 145 MHz";
+        if (m >= 219 && m <= 225) return "HAM 220 MHz";
+        if (m >= 420 && m <= 450) return "HAM 435 MHz";
+        if (m >= 902 && m <= 928) return "HAM 920 MHz";
+        if (m >= 1240 && m <= 1325) return "HAM 1280 MHz";
+        if (m >= 2300 && m <= 2450) return "HAM 2400 MHz";
+        if (m >= 3300 && m <= 3500) return "HAM 3500 MHz";
+        return m < 1000 ? "Wideband 1-1000 MHz" : "Wideband 1000-4000 MHz";
+    };
+    auto showBand = [rfeBand, bandName] {
+        QSettings& st = settings();
+        // only the sides with the LimeSDR as their radio drive the LimeRFE
+        const bool rl = st.value("rx/radio").toString() == "lime", tl = st.value("tx/radio").toString() == "lime";
+        QString r = bandName(st.value("rx/freq_hz", DEFAULT_FREQ_HZ).toDouble());
+        QString t = bandName(st.value("tx/freq_hz", DEFAULT_FREQ_HZ).toDouble());
+        if (!rl && !tl) {
+            rfeBand->setText("(no LimeSDR selected for RX or TX)");
+            rfeBand->setStyleSheet("");
+        } else if (!rl || !tl || r == t) {
+            rfeBand->setText(rl && tl ? r : rl ? "RX " + r + " (TX on another radio)" : "TX " + t + " (RX on another radio)");
+            rfeBand->setStyleSheet("");
+        } else {
+            rfeBand->setText("RX " + r + ", TX " + t + " -- different bands: RX and TX at once may not work");
+            rfeBand->setStyleSheet(QString("color: %1").arg(WARN));
+        }
+    };
+    showBand();
+    auto* bandTimer = new QTimer(rfe);
+    connect(bandTimer, &QTimer::timeout, rfe, showBand);
+    bandTimer->start(1000);
+    auto* rnote = new QLabel("With a LimeSDR as the radio: the LimeRFE on its expansion header follows AVM -- its band "
+                             "from the frequency, TX while transmitting, RX while receiving, off when stopped. "
+                             "TX on J4 lets RX (J3) and TX run at once; on J3, TX takes the port. "
+                             "Applies at the next start of TX or RX.");
+    rnote->setObjectName("dim");
+    rnote->setWordWrap(true);
+    ff->addRow(rnote);
+    connect(rfeOn, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/on", v == "on"); });
+    connect(rfePort, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/tx_port", v); });
+    connect(rfeNotch, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/notch", v == "on"); });
+    connect(rfeAtt, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/atten_db", v); });
+
     // Experimental: can badly distort a transmission if misused -- off until switched on (asks first)
     auto* exp = new QWidget;
     auto* ef = new QFormLayout(exp);
@@ -2070,7 +2148,7 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);   // dragged by a finger
     al->addWidget(scroll, 1);
 
-    for (auto p : QList<QPair<QString, QWidget*>>{{"Station", station}, {"Modes", modes}, {"TX media", media}, {"Receiver", receiver}, {"Experimental", exp}, {"About", about}}) {
+    for (auto p : QList<QPair<QString, QWidget*>>{{"Station", station}, {"Modes", modes}, {"TX media", media}, {"Receiver", receiver}, {"Lime RFE", rfe}, {"Experimental", exp}, {"About", about}}) {
         list_->addItem(p.first);
         stack_->addWidget(p.second);
     }

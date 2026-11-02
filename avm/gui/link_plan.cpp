@@ -116,11 +116,18 @@ LinkPlan planLinkFor(double link_bps, int frag_bytes, double width_khz, bool sta
         p.video_kbps = 0;
         p.frame_bytes = 0;
         if (codec == "opus") {
+            // as the framer packs them: whole bytes a packet (+1, its type), after the
+            // length, the audio config and the callsign piece each fragment opens with;
+            // 3% over a fragment's packets spare (the radio's clock, the estimate) -- the
+            // fractional sizes and no callsign of before chose 12.6 kbps for S 20 QPSK,
+            // ~5 bytes a fragment over: extra fragments the link couldn't send, and the
+            // transmitter dropped them (gaps in the sound)
+            const double budget = frag_bytes - 2 - AUDIO_PROFILE_CONFIG_BYTES - (station_id ? RECORD_HEADER_LEN + 2 : 0);
+            const double need = std::ceil(p.fragment_s / AUDIO_PACKET_INTERVAL_S * 1.03);
             double best = AUDIO_MIN_KBPS;
             for (double c = AUDIO_MIN_KBPS; c <= std::min(p.usable_kbps, 48.0) + 1e-9; c += 0.1) {
-                double pkt = c * 1000 * AUDIO_PACKET_INTERVAL_S / 8 + 1;
-                int per = std::max(1, (int)((frag_bytes - 2 - AUDIO_PROFILE_CONFIG_BYTES) / pkt));
-                if ((1 / AUDIO_PACKET_INTERVAL_S) / per <= 1 / p.fragment_s) best = c;
+                double pkt = std::ceil(c * 1000 * AUDIO_PACKET_INTERVAL_S / 8 - 1e-9) + 1;
+                if (std::floor(budget / pkt) >= need) best = c;
             }
             p.opus_kbps = std::floor(best * 10) / 10;
         }

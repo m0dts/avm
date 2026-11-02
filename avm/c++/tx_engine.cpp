@@ -62,7 +62,7 @@ struct Args {
     double occupancy = 20, sample_rate = 0, amplitude = 0.1, papr_db = 0, fragment_gap_ms = 300, warmup_s = 2.0;
     int fragment_size = 0, max_input_backlog = 0;
     // --output pluto: a radio through SoapySDR (sdr.h), hf_ofdm_tx.py's radio options
-    std::string output = "pipe", sdr = "pluto", uri, antenna;
+    std::string output = "pipe", sdr = "pluto", uri, antenna, lime_rfe;
     double rf_freq = 0, tx_gain = -10, bandwidth = 0, lo_offset_hz = 0;
     int tx_queue_depth = 8;
     std::string gain_file;
@@ -571,6 +571,7 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         else if (k == "--pluto-uri") a.uri = val();
         else if (k == "--pluto-bandwidth") a.bandwidth = std::atof(val().c_str());
         else if (k == "--sdr-antenna") a.antenna = val();
+        else if (k == "--lime-rfe") a.lime_rfe = val();
         else if (k == "--tx-queue-depth") a.tx_queue_depth = std::atoi(val().c_str());
         else if (k == "--gain-file") a.gain_file = val();
         else if (k == "--lo-offset-hz") a.lo_offset_hz = std::atof(val().c_str());
@@ -641,7 +642,7 @@ struct Engine {
                 return true;
             }
             sdr::TxConfig tc;
-            tc.driver = a.sdr; tc.uri = a.uri; tc.antenna = a.antenna; tc.rf_hz = a.rf_freq;
+            tc.driver = a.sdr; tc.uri = a.uri; tc.antenna = a.antenna; tc.lime_rfe = a.lime_rfe; tc.rf_hz = a.rf_freq;
             tc.rate = a.sample_rate ? a.sample_rate : m.fs; tc.gain_db = a.tx_gain; tc.bandwidth_hz = a.bandwidth;
             tc.tune_offset_hz = a.lo_offset_hz; tc.queue_depth = (size_t)std::max(1, a.tx_queue_depth);
             tc.gain_file = a.gain_file;

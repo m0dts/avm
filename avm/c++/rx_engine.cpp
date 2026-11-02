@@ -536,7 +536,7 @@ struct Args {
     int fragment_size = 0, rx_queue_depth = 2;
     bool no_output_pacing = false, drop_if_slow = false, invert_spectrum = false;
     // --input pluto: a radio through SoapySDR (sdr.h), hf_ofdm_rx.py's radio options
-    std::string input = "pipe", sdr = "pluto", uri, antenna;
+    std::string input = "pipe", sdr = "pluto", uri, antenna, lime_rfe;
     double rf_freq = 0, rx_gain = 30, bandwidth = 0, ppm = 0, warmup_s = 0.75;
     bool agc = false;
     bool spectrum = false;
@@ -1671,6 +1671,7 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         else if (k == "--pluto-uri") a.uri = val();
         else if (k == "--pluto-bandwidth") a.bandwidth = std::atof(val().c_str());
         else if (k == "--sdr-antenna") a.antenna = val();
+        else if (k == "--lime-rfe") a.lime_rfe = val();
         else if (k == "--sdr-ppm") a.ppm = std::atof(val().c_str());
         else if (k == "--rx-warmup-s") a.warmup_s = std::atof(val().c_str());
         else if (k == "--verbose") {}
@@ -1771,7 +1772,7 @@ struct Engine {
                 a.lo_offset_hz = 0;     // its DDC centres the signal
             } else {
             sdr::RxConfig rc;
-            rc.driver = a.sdr; rc.uri = a.uri; rc.antenna = a.antenna; rc.rf_hz = a.rf_freq; rc.rate = capture_fs;
+            rc.driver = a.sdr; rc.uri = a.uri; rc.antenna = a.antenna; rc.lime_rfe = a.lime_rfe; rc.rf_hz = a.rf_freq; rc.rate = capture_fs;
             rc.gain_db = a.rx_gain; rc.agc = a.agc; rc.bandwidth_hz = a.bandwidth; rc.tune_offset_hz = a.lo_offset_hz;
             rc.ppm = a.ppm; rc.warmup_s = a.warmup_s; rc.gain_file = a.gain_file; rc.freq_offset_file = a.freq_offset_file; rc.ppm_file = a.ppm_file;
             rc.tdd_tx = a.tdd_tx; rc.tdd_tx_gain = a.tdd_tx_gain; rc.tdd_start_muted = !a.tdd_adjust_file.empty();   // (a slave)
