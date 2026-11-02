@@ -22,6 +22,12 @@ struct CaptureInput {
     bool video = true;                          // the stream taken: video, or audio
     std::string filter;                         // the filter chain, e.g. "scale=..,fps=6,format=yuv420p"
     bool realtime = false;                      // -re: paced to its timestamps (the test sources)
+    // a network stream (SRT / UDP from OBS): its audio too, through audio_filter to
+    // start()'s audio callback; and when it ends or breaks, opened again (waiting for
+    // the sender) until stopped
+    bool with_audio = false;
+    std::string audio_filter;
+    bool reconnect = false;
 };
 
 class Capture {
@@ -30,7 +36,7 @@ public:
     using LogFn = std::function<void(const std::string&)>;
     ~Capture() { stop(); }
     // opens on the capture thread; failures come as log lines, then the thread ends
-    void start(const CaptureInput& in, FrameFn frame, LogFn log);
+    void start(const CaptureInput& in, FrameFn frame, LogFn log, FrameFn audio = nullptr);
     void stop();
     bool running() const { return running_; }
     // the devices FFmpeg's input lists (dshow / v4l2 / pulse / alsa): their names
@@ -39,7 +45,8 @@ public:
 private:
     std::thread th_;
     std::atomic<bool> stop_{false}, running_{false};
-    void run(CaptureInput in, FrameFn frame, LogFn log);
+    void run(CaptureInput in, FrameFn frame, LogFn log, FrameFn audio);
+    bool session(const CaptureInput& in, const FrameFn& frame, const LogFn& log, const FrameFn& audio, bool quiet);
 };
 
 }  // namespace avm

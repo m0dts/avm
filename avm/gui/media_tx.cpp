@@ -64,6 +64,7 @@ static double mono() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 static const double AUDIO_LOST_S = 4.0;
+static const double STREAM_GAP_S = 0.6;     // no stream frames this long: the picture held, silence sent
 
 MediaTx::MediaTx() {
     lib_.setFileName(avmDir() + "/c++/avm");
@@ -100,7 +101,11 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
     frames_ = 0;
     enc_s_ = 0;
     audio_pkts_ = 0;
-    audio_watch_ = c.audio != "off" && c.audio != "test";
+    audio_watch_ = c.audio == "mic";
+    stream_ = c.video == "stream" || c.audio == "stream";
+    stream_gap_ = stream_lost_ = have_pic_ = false;
+    fill_audio_ = fill_video_ = 0;
+    stream_vlast_ = stream_alast_ = mono();
     audio_lost_ = false;
     audio_last_ = mono();
     {
@@ -110,6 +115,7 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
         pcm_.clear();
     }
     const int W = c.width, H = c.height;
+    CaptureInput stream_in;     // SRT / UDP: one input, its picture and its sound
     if (c.video != "off") {
         // the wavelet encoder as media_source_wavelet.py makes it: leak 0.996,
         // a whole-picture refresh every 5 s (at least 20 frames), motion while it's cheap
@@ -135,6 +141,7 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
         CaptureInput in;
         in.video = true;
         std::string w = std::to_string(W), h = std::to_string(H);
+        // (a stream: started below, once the audio encoder is there)
         std::string fit = "scale=" + w + ":" + h + ":force_original_aspect_ratio=decrease,pad=" + w + ":" + h +
                           ":(ow-iw)/2:(oh-ih)/2,fps=" + fps + ",format=yuv420p";
         if (c.video == "test") {
@@ -142,6 +149,8 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
             in.url = "testsrc=size=" + std::to_string(W) + "x" + std::to_string(H) + ":rate=" + fps;
             in.realtime = true;
             in.filter = "format=yuv420p";
+        } else if (c.video == "stream") {
+            in.filter = fit;
         } else if (c.video == "image") {
             // media_source.py's --source image: -re -loop 1 -framerate FPS -i PATH
             in.format = "image2";
@@ -166,7 +175,8 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
 #endif
             in.filter = fit;
         }
-        video_cap_.start(in, [this](AVFrame* f) { videoFrame(f); }, log_);
+        if (c.video != "stream") video_cap_.start(in, [this](AVFrame* f) { videoFrame(f); }, log_);
+        else stream_in.filter = in.filter;
     }
     if (c.audio != "off") {
         bool opus = c.audio_codec == "opus";
@@ -193,7 +203,9 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
         in.video = false;
         std::string rate = opus ? "48000" : "8000";
         std::string to8k = "aformat=sample_fmts=s16:sample_rates=" + rate + ":channel_layouts=mono";
-        if (c.audio == "test") {     // 400 Hz: clean through Opus and Codec2 alike (1 kHz warbled in Opus)
+        if (c.audio == "stream") {
+            stream_in.audio_filter = "aresample=async=1000," + to8k;
+        } else if (c.audio == "test") {     // 400 Hz: clean through Opus and Codec2 alike (1 kHz warbled in Opus)
             in.format = "lavfi";
             in.url = "sine=f=400:r=" + rate;
             in.realtime = true;
@@ -212,7 +224,28 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
 #endif
             in.filter = "aresample=async=1000," + to8k;
         }
-        audio_cap_.start(in, [this](AVFrame* f) { audioFrame(f); }, log_);
+        if (c.audio != "stream") audio_cap_.start(in, [this](AVFrame* f) { audioFrame(f); }, log_);
+    }
+    if (stream_) {
+        if (c.stream_url.empty()) { log_("ERROR: no stream URL (Config, TX media)"); stop(); return false; }
+        stream_in.url = c.stream_url;
+        // OBS's SRT / UDP output: MPEG-TS; probed far enough to find its picture size
+        stream_in.format = "mpegts";
+        stream_in.options["probesize"] = "500000";
+        stream_in.options["analyzeduration"] = "1000000";
+        stream_in.options["fflags"] = "discardcorrupt";   // (not nobuffer: it threw away the probed packets, the first keyframe with them)
+        stream_in.reconnect = true;
+        auto audio = [this](AVFrame* f) { audioFrame(f); };
+        if (c.video == "stream") {
+            stream_in.video = true;
+            stream_in.with_audio = c.audio == "stream";
+            stream_cap_.start(stream_in, [this](AVFrame* f) { videoFrame(f); }, log_, audio);
+        } else {    // its sound alone
+            stream_in.video = false;
+            stream_in.filter = stream_in.audio_filter;
+            stream_cap_.start(stream_in, audio, log_);
+        }
+        log_("[stream] waiting for " + c.stream_url);
     }
     stop_ = false;
     running_ = true;
@@ -224,6 +257,7 @@ void MediaTx::stop() {
     stop_ = true;
     video_cap_.stop();
     audio_cap_.stop();
+    stream_cap_.stop();
     if (asm_th_.joinable()) asm_th_.join();
     running_ = false;
     if (wvt_) { wvtFree_(wvt_); wvt_ = nullptr; }
@@ -263,6 +297,8 @@ void MediaTx::setMessage(const QString& text) {
 void MediaTx::videoFrame(AVFrame* f) {
     const int W = cfg_.width, H = cfg_.height;
     if (f->width != W || f->height != H) return;
+    stream_vlast_ = mono();
+    std::lock_guard<std::mutex> e(enc_mu_);
     for (int r = 0; r < H; ++r) std::memcpy(&y_[(size_t)r * W], f->data[0] + (size_t)r * f->linesize[0], W);
     if (cfg_.mono) {
         std::fill(u_.begin(), u_.end(), 128);
@@ -273,7 +309,12 @@ void MediaTx::videoFrame(AVFrame* f) {
             std::memcpy(&v_[(size_t)r * (W / 2)], f->data[2] + (size_t)r * f->linesize[2], W / 2);
         }
     }
+    have_pic_ = true;
     if (preview_) preview_(i420ToImage(W, H, y_.data(), u_.data(), v_.data()));
+    encodePicture();
+}
+
+void MediaTx::encodePicture() {
     double t0 = mono();
     int n = wvtEncode_(wvt_, y_.data(), u_.data(), v_.data(), pkt_.data());
     enc_s_ += mono() - t0;
@@ -297,9 +338,13 @@ void MediaTx::countAudioPacket(double expected_per_s) {
 // mono s16 -> 20 ms frames: Codec2 3200 (8 kHz, 160 samples) or Opus (48 kHz, 960)
 void MediaTx::audioFrame(AVFrame* f) {
     audio_last_ = mono();
-    const short* s = (const short*)f->data[0];
+    stream_alast_ = audio_last_.load();
     std::lock_guard<std::mutex> g(mu_);
-    pcm_.insert(pcm_.end(), s, s + f->nb_samples);
+    addPcm((const short*)f->data[0], f->nb_samples);
+}
+
+void MediaTx::addPcm(const short* s, int count) {
+    pcm_.insert(pcm_.end(), s, s + count);
     size_t used = 0;
     if (opus_) {
         uint8_t pkt[1500];
@@ -322,6 +367,46 @@ void MediaTx::audioFrame(AVFrame* f) {
     pcm_.erase(pcm_.begin(), pcm_.begin() + used);
 }
 
+// once a fragment period: the stream away -- its last picture again at the frame rate
+// and silence in place of its sound, so the far end stays locked and new receivers
+// still get a picture; gone stream_lost_s: TX stopped (pages.cpp)
+void MediaTx::fillStreamGap() {
+    const double now = mono();
+    const bool v = cfg_.video == "stream", a = cfg_.audio == "stream";
+    const double vgap = now - stream_vlast_, agap = now - stream_alast_;
+    double gap = v && a ? std::max(vgap, agap) : v ? vgap : agap;     // (either missing: a break)
+    if (gap < STREAM_GAP_S) {
+        if (stream_gap_) log_("[stream] back");
+        stream_gap_ = false;
+        fill_audio_ = fill_video_ = 0;
+        return;
+    }
+    if (!stream_gap_) {
+        stream_gap_ = true;
+        log_(have_pic_ ? "[stream] lost -- holding the picture, sending silence" : "[stream] nothing yet -- sending silence");
+    }
+    if (!stream_lost_ && cfg_.stream_lost_s > 0 && std::min(v ? vgap : 1e9, a ? agap : 1e9) > cfg_.stream_lost_s) {
+        stream_lost_ = true;
+        char b[160];
+        snprintf(b, sizeof b, "ERROR: the stream stopped (nothing for %.0f s) -- TX stopped", cfg_.stream_lost_s);
+        log_(b);
+    }
+    double p = period_.load();
+    if (a && agap >= STREAM_GAP_S && (opus_ || c2_)) {
+        fill_audio_ += p / 0.020;      // 20 ms frames
+        int n = (int)fill_audio_;
+        fill_audio_ -= n;
+        std::vector<short> zero((size_t)n * (opus_ ? OPUS_SAMPLES : CODEC2_SAMPLES), 0);
+        std::lock_guard<std::mutex> g(mu_);
+        addPcm(zero.data(), (int)zero.size());
+    }
+    if (v && vgap >= STREAM_GAP_S && wvt_ && have_pic_) {
+        fill_video_ += p * cfg_.fps;
+        std::lock_guard<std::mutex> e(enc_mu_);
+        for (; fill_video_ >= 1; fill_video_ -= 1) encodePicture();
+    }
+}
+
 // media_tx_framer.py's assembler: every fragment period, whatever has
 // arrived packed into fragments (drift-corrected; resynced when late)
 void MediaTx::assemble() {
@@ -329,6 +414,7 @@ void MediaTx::assemble() {
     double next = mono();
     std::vector<uint8_t> frag(cfg_.fragment_size);
     while (!stop_) {
+        if (stream_) fillStreamGap();
         if (audio_watch_ && !audio_lost_ && mono() - audio_last_ > AUDIO_LOST_S) {
             audio_lost_ = true;
             log_("ERROR: the audio input stopped (unplugged?) -- TX stopped");

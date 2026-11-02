@@ -40,7 +40,9 @@
 #endif
 #include <windows.h>
 #else
+#include <arpa/inet.h>
 #include <dlfcn.h>
+#include <netdb.h>
 #endif
 
 namespace sdr {
@@ -150,14 +152,36 @@ struct DevicePool {
 };
 inline DevicePool& device_pool() { static DevicePool p; return p; }
 
+// the args with a network radio's host name as its address -- "uri=ip:pluto.local"
+// and "uri=ip:192.168.2.1" are one Pluto (a second one on USB took the name pluto.local):
+// opened apart, stopping RX closed the radio under the running TX and libiio crashed
+inline std::string device_key(const std::string& args) {
+#ifndef _WIN32
+    size_t i = args.find("uri=ip:");
+    if (i == std::string::npos) return args;
+    size_t h = i + 7, e = args.find_first_of(",:", h);
+    std::string host = args.substr(h, e == std::string::npos ? std::string::npos : e - h);
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_INET;
+    if (host.empty() || getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) return args;
+    char ip[INET_ADDRSTRLEN] = {0};
+    inet_ntop(AF_INET, &((sockaddr_in*)res->ai_addr)->sin_addr, ip, sizeof ip);
+    freeaddrinfo(res);
+    return args.substr(0, h) + ip + (e == std::string::npos ? std::string() : args.substr(e));
+#else
+    return args;
+#endif
+}
+
 inline void* open_device(const std::string& args) {
     Api& A = api();
     DevicePool& P = device_pool();
+    const std::string key = device_key(args);
     std::lock_guard<std::mutex> g(P.mu);
     for (auto& e : P.open)
-        if (e.args == args) { ++e.users; return e.dev; }
+        if (e.args == key) { ++e.users; return e.dev; }
     void* d = A.make ? A.make(args.c_str()) : nullptr;
-    if (d) P.open.push_back({args, d, 1});
+    if (d) P.open.push_back({key, d, 1});
     return d;
 }
 
@@ -220,13 +244,28 @@ inline std::vector<Found> find_radios(bool rx) {
         s.erase(0, std::min(s.find_first_not_of('0'), s.size()));
         return s.size() > n ? s.substr(s.size() - n) : s;
     };
+    // each Pluto once, by its address: "ip:pluto.local" (found once over IPv4, again over
+    // IPv6) as the address it resolves to; and its USB route left out when its USB network
+    // address (192.168.2.x) is listed -- one radio, three entries, and RX and TX chosen by
+    // different ones opened it twice (stopping RX crashed TX)
     list("driver=plutosdr", [&](std::map<std::string, std::string>& kv) {
         std::string uri = kv["uri"];
+        if (uri.rfind("ip:", 0) == 0) {
+            std::string k = device_key("uri=" + uri);
+            uri = k.substr(4);
+        }
         std::string label = uri.rfind("usb:", 0) == 0 ? "PlutoSDR (USB)"
                             : uri.rfind("ip:", 0) == 0 ? "PlutoSDR (IP " + uri.substr(3) + ")" : "PlutoSDR";
         for (const Found& f : out) if (f.label == label) return;
         out.push_back({"pluto", label, uri});
     });
+    {
+        bool usb_net = false;
+        for (const Found& f : out) usb_net |= f.driver == "pluto" && f.uri.rfind("ip:192.168.2.", 0) == 0;
+        if (usb_net)
+            out.erase(std::remove_if(out.begin(), out.end(), [](const Found& f) { return f.driver == "pluto" && f.uri.rfind("usb:", 0) == 0; }),
+                      out.end());
+    }
     list("driver=lime", [&](std::map<std::string, std::string>& kv) {
         std::string name = kv.count("name") ? kv["name"] : kv["label"].substr(0, kv["label"].find(" ["));
         if (name.empty()) name = "LimeSDR";

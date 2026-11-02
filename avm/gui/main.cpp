@@ -213,6 +213,8 @@ static int media_test(const QString& path, double seconds, bool camera) {
     }
     int ii = qApp->arguments().indexOf("--image");
     if (ii >= 0 && ii + 1 < qApp->arguments().size()) { c.video = "image"; c.image_path = qApp->arguments()[ii + 1].toStdString(); }
+    int si = qApp->arguments().indexOf("--stream");   // URL: its picture and sound (e.g. srt://0.0.0.0:9000?mode=listener)
+    if (si >= 0 && si + 1 < qApp->arguments().size()) { c.video = c.audio = "stream"; c.stream_url = qApp->arguments()[si + 1].toStdString(); c.stream_lost_s = 10; }
     int mi = qApp->arguments().indexOf("--message");
     if (mi >= 0 && mi + 1 < qApp->arguments().size()) tx.setMessage(qApp->arguments()[mi + 1]);
     QImage last;      // the TX preview: the last picture saved beside FILE

@@ -23,13 +23,16 @@ struct MediaTxConfig {
     int fragment_size = 1024;
     double fragment_period_s = 0.24;   // the assembler's cadence (media_tx_framer.py's default)
     std::string station_id;
-    // video: "off", "test" (the testsrc pattern), "camera", or "image" (a still, repeated)
+    // video: "off", "test" (the testsrc pattern), "camera", "image" (a still, repeated) or
+    // "stream" (SRT / UDP, e.g. from OBS: stream_url)
     std::string video = "test", video_device, image_path;
     int width = 256, height = 144;
     double fps = 6;
     bool mono = false;     // black and white: the colour planes flat grey (media_source_wavelet.py --mono)
     int frame_bytes = 416;
-    // audio: "off", "test" (a 1 kHz tone) or "mic"
+    std::string stream_url;
+    double stream_lost_s = 30;   // a stream gone this long: TX stops (0: never)
+    // audio: "off", "test" (a 1 kHz tone), "mic" or "stream" (the stream's sound)
     std::string audio = "test", audio_device;
     std::string audio_codec = "codec2";   // "codec2" (3200) or "opus" (48 kHz mono)
     double opus_kbps = 10;
@@ -60,6 +63,9 @@ public:
 private:
     void videoFrame(struct AVFrame* f);
     void audioFrame(struct AVFrame* f);
+    void addPcm(const short* s, int n);     // (mu_ held)
+    void encodePicture();                   // y_/u_/v_ (enc_mu_ held)
+    void fillStreamGap();
     void assemble();
 
     QLibrary lib_;
@@ -91,7 +97,14 @@ private:
     std::vector<short> pcm_;                         // Codec2: samples waiting for a whole frame
     std::vector<uint8_t> y_, u_, v_, pkt_;
     std::vector<uint8_t> message_;
-    Capture video_cap_, audio_cap_;
+    Capture video_cap_, audio_cap_, stream_cap_;
+    // a stream's last frame; while it's away (a short break, the sender restarting) the
+    // picture held and silence sent, the carrier and the receivers kept locked
+    std::mutex enc_mu_;                              // the encoder and y_/u_/v_
+    std::atomic<double> stream_vlast_{0}, stream_alast_{0};   // (each filled on its own: OBS's sound
+                                                               // starts seconds before its first keyframe)
+    bool stream_ = false, stream_gap_ = false, stream_lost_ = false, have_pic_ = false;
+    double fill_audio_ = 0, fill_video_ = 0;
     std::thread asm_th_;
     std::atomic<bool> stop_{false}, running_{false};
     std::atomic<double> period_{0.24};   // the framer's cadence (setFragmentPeriod)

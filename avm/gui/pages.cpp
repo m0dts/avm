@@ -1360,7 +1360,7 @@ TxPage::TxPage(QWidget* parent) : QWidget(parent) {
     mode_ = new Segmented(pairs(MODES), s.value("tx/mode", "A").toString());
     bw_ = new Segmented(pairs(BANDWIDTHS), s.value("tx/bw", "80").toString());
     mod_ = new Segmented(MODULATIONS, s.value("tx/mod", "qpsk").toString());
-    video_src_ = new Segmented({{"camera", "Camera"}, {"image", "Image"}, {"test", "Test"}, {"off", "Off"}},
+    video_src_ = new Segmented({{"camera", "Camera"}, {"image", "Image"}, {"stream", "Stream"}, {"test", "Test"}, {"off", "Off"}},
                                s.value("tx/video", "test").toString());
     freq_ = new FreqButton("TX frequency", s.value("tx/freq_hz", DEFAULT_FREQ_HZ).toDouble());
     radio_pick_ = new RadioPicker("TX radio (connected now)", false, s.value("tx/radio", "virtual").toString(),
@@ -1550,6 +1550,12 @@ void TxPage::linkChanged() {
     if (!link_.running()) showPlan();
 }
 
+// the Stream source's URL (Config, TX media): SRT, listening for OBS
+static QString streamUrl() {
+    QString u = settings().value("tx/stream_url").toString().trimmed();
+    return u.isEmpty() ? QString("srt://0.0.0.0:9000?mode=listener&latency=200000") : u;
+}
+
 // the camera's v4l2 device, if it's a Logitech C920 and v4l2-ctl is there: "" otherwise
 static QString c920Device() {
 #ifdef Q_OS_WIN
@@ -1693,6 +1699,9 @@ void TxPage::doToggleRun() {
         c.video = video_src_->value().toStdString();
         if (lp.ok && !lp.video) c.video = "off";
         c.audio = video_src_->value() == "camera" ? "mic" : "test";   // (the camera's microphone even with video off)
+        if (video_src_->value() == "stream") c.audio = "stream";       // (its sound, also with video off)
+        c.stream_url = streamUrl().toStdString();
+        c.stream_lost_s = s.value("tx/stream_lost_s", 30).toDouble();
         if (lp.ok && !lp.audio) c.audio = "off";                       // video only (Config: Content)
         c.audio_codec = s.value("tx/audio_codec", "codec2").toString().toStdString();
         c.opus_kbps = s.value("tx/opus_kbps", 10).toDouble();
@@ -1738,7 +1747,7 @@ void TxPage::doToggleRun() {
                         if (l.startsWith("ERROR")) status_->setText(l);
                         Notices::get().addIfError("TX media", l);
                         // the microphone unplugged (media_tx.cpp): TX stops, as for the radio
-                        if (l.startsWith("ERROR: the audio input stopped") && running()) {
+                        if ((l.startsWith("ERROR: the audio input stopped") || l.startsWith("ERROR: the stream stopped")) && running()) {
                             stop();
                             status_->setText(l);
                         }
@@ -1883,6 +1892,21 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         emit txSettingChanged();
         emit motionChanged();     // the TX page re-plans its picture size and frame rate
     });
+    {   // the Stream source: OBS (Settings, Stream: Custom, srt://THIS-IP:9000?mode=caller) calls in
+        auto* url = new TextButton("Stream URL", streamUrl(), 200, "srt://0.0.0.0:9000?mode=listener");
+        mf->addRow(rowLabel("Stream"), url);
+        connect(url, &TextButton::changed, this, [](const QString& t) { settings().setValue("tx/stream_url", t.trimmed()); });
+        auto* lost = new Segmented({{"10", "10 s"}, {"30", "30 s"}, {"120", "2 min"}, {"0", "Never"}},
+                                   s.value("tx/stream_lost_s", 30).toString());
+        mf->addRow(rowLabel("Stream lost"), lost);
+        connect(lost, &Segmented::changed, this, [](const QString& v) { settings().setValue("tx/stream_lost_s", v.toInt()); });
+        auto* note = new QLabel("Stream: AVM listens for SRT. In OBS: Settings, Stream, Custom, server "
+                                "srt://<this computer>:9000?mode=caller&latency=200000. A break holds the picture "
+                                "and sends silence; after \"Stream lost\" TX stops.");
+        note->setObjectName("dim");
+        note->setWordWrap(true);
+        mf->addRow(note);
+    }
     {   // the picture for the Image source
         auto* img = new ElideLabel(s.value("tx/image").toString().isEmpty() ? QString("(none)") : s.value("tx/image").toString());
         image_ = img;
