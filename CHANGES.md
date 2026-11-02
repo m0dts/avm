@@ -4,7 +4,7 @@ Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
 ## 1.1.2
-- Updates without your password: when sudo needs one, the installer asks once whether AVM may update without it, and adds an admin rule (/etc/sudoers.d/avm) so later updates need no password. Remove it with: sudo rm /etc/sudoers.d/avm
+- Linux / Raspberry Pi: updates without your password. When sudo needs one, the installer asks once whether AVM may update without it, and adds an admin rule (/etc/sudoers.d/avm) so later updates need no password. Remove it with: sudo rm /etc/sudoers.d/avm
 - PTT outputs: Raspberry Pi pin 40 (BCM 21, as Portsdown 4) and, with a Pluto, its GPO0 (as F5OEO's firmware; a G0MJW PTT board). PTT goes high only once RF is out -- after a LimeSDR's calibration tones and start-up spike -- and drops only after RF has stopped
 - LimeRFE support: Config, Lime RFE tab. Its band follows the frequency, its mode follows TX and RX; TX port, FM notch and RX attenuation settings
 - Stream TX source: send pictures and sound from OBS (or anything else) over SRT or UDP. A break holds the picture and sends silence; TX stops if the stream stays away (Config, TX media)
