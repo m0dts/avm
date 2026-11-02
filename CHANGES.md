@@ -3,6 +3,15 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.1.1
+- Mode VU: much cleaner reception -- the outer carriers were losing about 15 dB of MER (now about 28 dB, level across the band). Works with 1.1.0 at the other end, but both ends on 1.1.1 is best
+- TX spectrum: no 'shelf' at the edges; the signal rolls off cleanly
+- RX spectrum: VU's view no longer shows the DC spike or empty edges; the green tuning band is accurate for SH and VU, and hidden when it would fill the whole view
+- Unplugging the radio no longer freezes AVM: TX/RX stop with a message within a few seconds
+- Unplugging the microphone stops TX, and unplugging the audio output stops RX, each with a message
+- Restarting RX no longer makes a Pluto's transmission stutter
+- Raspberry Pi: rebuilding after an update is quicker
+
 ## 1.1.0 (C++ test build)
 - AVM is now a C++ program: no Python needed. Faster decoding (about twice as fast), quicker start, smaller install
 - Updating from 1.0.x: the Update button installs it and carries your settings over (callsign, frequencies, radios, modes, gains); choose the microphone again in Config
