@@ -195,7 +195,12 @@ bool Updater::apply(QWidget* window) {
     }
     const QString exe = QCoreApplication::applicationFilePath();
     const QStringList args = QCoreApplication::arguments().mid(1);
-    if (QProcess::execute("sudo", {"-n", "true"}) == 0) {
+    // sudo without a password for good (a NOPASSWD: ALL rule: a Pi's first user, or the
+    // installer's /etc/sudoers.d/avm) -- not just a login still cached, which a rebuild outlasts
+    QProcess sl;
+    sl.start("sudo", {"-n", "-l"});
+    const bool nopasswd = sl.waitForFinished(5000) && sl.exitCode() == 0 && sl.readAllStandardOutput().contains("NOPASSWD: ALL");
+    if (nopasswd) {
         // (a Pi, normally): in the window -- a terminal would bring the on-screen keyboard up over it
         if (!runInstallerHere(window, script)) return false;
         QProcess::startDetached(exe, args, avmDir());

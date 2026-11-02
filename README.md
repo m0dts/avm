@@ -106,12 +106,17 @@ wget https://raw.githubusercontent.com/m0dts/avm/main/install_avm.sh
 bash install_avm.sh
 ```
 
-First it checks the Pi and lists what it would install or change. Nothing is
-touched until you answer **y**. It then downloads AVM into `~/avm` and
+It downloads AVM into `~/avm` and
 installs everything it needs. On a Pi 5 with an average SD card this
 takes about 5 minutes; a Pi 4 takes longer. When it's done it adds an
 **AVM** icon to the menu and desktop, and an `avm` command. Reboot, then
 start AVM from the desktop icon.
+
+If sudo asks for your password, the installer offers to let AVM update
+without asking again. Answer **y** and it adds `/etc/sudoers.d/avm`, so sudo
+no longer needs a password for your user, as for a stock Raspberry Pi's first
+user. Any program you run can then use sudo without one. To be asked again,
+remove it: `sudo rm /etc/sudoers.d/avm`.
 
 Run `bash install_avm.sh --update` later to get the latest version, or
 `--check` to just see the report. AVM's version (1.0.x, going up by one each
