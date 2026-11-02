@@ -202,7 +202,9 @@ bool Updater::apply(QWidget* window) {
         qApp->quit();
         return true;
     }
-    // sudo asks for a password: in a terminal, which starts AVM again when done
+    // sudo asks for a password: in a terminal, which starts AVM again when done -- in a
+    // session of its own (setsid -f): with nohup ... & the terminal closing as the script
+    // ended took AVM with it (lxterminal), and it never came back
     QDir().mkpath(avmDir() + "/gui_logs");
     QString sh = avmDir() + "/gui_logs/update_then_restart.sh";
     QFile f(sh);
@@ -213,7 +215,7 @@ bool Updater::apply(QWidget* window) {
                     "export AVM_BRANCH='%1' AVM_REPO='%2'\n"
                     "if bash '%3' --update --yes; then\n"
                     "  echo; echo 'AVM restarts in 10 s...'; sleep 10\n"
-                    "  cd '%4' && nohup '%5'%6 >/dev/null 2>&1 &\n"
+                    "  cd '%4' && setsid -f '%5'%6 >/dev/null 2>&1 </dev/null\n"
                     "else\n"
                     "  echo; echo 'The update did not finish (see above). Press Enter to close.'; read -r _\n"
                     "fi\n")
