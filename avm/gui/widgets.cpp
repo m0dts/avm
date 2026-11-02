@@ -59,6 +59,8 @@ Lamp::Lamp(int size, QWidget* parent) : QLabel(parent), size_(size) {
 }
 
 void Lamp::setState(State s) {
+    if (s == state_) return;
+    state_ = s;
     const char* c = s == Good ? GO : s == Some ? TX_ACCENT : s == None ? STOP : BUTTON;
     setStyleSheet(QString("background: %1; border-radius: %2px;").arg(c).arg(size_ / 2));
 }
@@ -206,9 +208,10 @@ void SpectrumView::paintEvent(QPaintEvent*) {
     if (bandHi_ > bandLo_ && step_ > 0) {     // the capture band
         double w = step_ * (db_.size() - 1);
         double x0 = r.left() + (bandLo_ - f0_) / w * r.width(), x1 = r.left() + (bandHi_ - f0_) / w * r.width();
+        const bool whole = x0 <= r.left() && x1 >= r.right();     // (filling the whole view: says nothing)
         x0 = std::max(x0, r.left());
         x1 = std::min(x1, r.right());
-        if (x1 > x0) p.fillRect(QRectF(x0, r.top(), x1 - x0, r.height()), QColor(102, 187, 106, 60));
+        if (x1 > x0 && !whole) p.fillRect(QRectF(x0, r.top(), x1 - x0, r.height()), QColor(102, 187, 106, 60));
     }
     QPolygonF poly;
     for (int i = 0; i < db_.size(); ++i) {

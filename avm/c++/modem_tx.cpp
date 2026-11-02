@@ -21,10 +21,14 @@
 #include "npy_rng.h"
 #include "ldpc.h"
 
+// (tx_engine.cpp sets it to static: the library's modem functions exported from the
+// receiver's unit, rx_engine.cpp, alone -- the two engines compile apart, in parallel)
+#ifndef TX_API
 #if defined(_WIN32)
 #define TX_API extern "C" __declspec(dllexport)
 #else
 #define TX_API extern "C" __attribute__((visibility("default")))
+#endif
 #endif
 
 namespace {

@@ -19,7 +19,10 @@
 // (per-fragment) or --tx-normalize fixed peak normalisation, --amplitude.
 // Not here yet (the Python keeps them): the virtual radio, duplex (--tdd-*),
 // --dpd-file, --amplitude-sweep, the non-stream (whole message) mode.
-#include "modem_rx.cpp"      // (#pragma once: the library has both engines in one unit)
+// the modem's C functions this unit's own (static): the library exports them from
+// rx_engine.cpp, compiled apart (in parallel) -- one definition each
+#define TX_API static
+#include "modem_rx.cpp"
 #include "sdr.h"
 #include "virtual_radio.h"
 #include "hpsdr1.h"
@@ -45,7 +48,12 @@ namespace {
 namespace txe {     // apart from the receiver's names (rx_engine.cpp) in the library
 
 const int FRAG_HEADER_SIZE = 8;
-const double TX_CUT_SPACINGS = 2.0, TX_TAPER_SPACINGS = 1.5;
+// the TX's soft cut: from half a carrier spacing past the last carrier, a raised-cosine
+// taper over 2 more. Starting it 2 spacings out (then 1.5 of taper) left the carriers'
+// sidelobes at full strength until then: a 'shelf' ~10 dB down on the spectrum's edges.
+// Now the skirts reach the TX's own floor (~-41 dB) 2.5 spacings out (VU 80: 43 kHz), for
+// ~1 dB of MER overall (VU's edge carriers 26-28 dB rather than ~30).
+const double TX_CUT_SPACINGS = 0.5, TX_TAPER_SPACINGS = 2.0;
 
 double mono() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -281,6 +289,11 @@ struct Transmitter {
             }
         }
         sink->write(std::move(o));
+        if (!sink->ok() && !radio_lost) {     // unplugged (sdr.h): TX ends, as the HPSDR's
+            radio_lost = true;
+            avm_logf("ERROR: the radio stopped responding -- TX stopped\n");
+            stopping = true;
+        }
     }
     void write_out(const std::vector<cf>& w) { if (out) out(w.data(), w.size()); }
 
@@ -670,6 +683,7 @@ struct Engine {
         stopping = true;
         if (a.output == "tdd") tdd::queue().detach();     // (a push waiting for room returns)
         in.close();
+        if (radio) radio->abort();     // (a radio gone: its writes stall -- nothing waits on them)
         if (th.joinable()) th.join();
         radio.reset();
         vradio_.reset();

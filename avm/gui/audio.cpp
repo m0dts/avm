@@ -178,11 +178,36 @@ std::vector<std::string> AudioOut::outputs() {
     return names;
 }
 
+bool AudioOut::lost() {
+    if (!ok_) return false;      // (no output at all: nothing to lose)
+    auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        auto since = lastCb_.time_since_epoch().count() ? lastCb_ : openedT_;
+        if (now - since > std::chrono::seconds(3)) return true;
+    }
+#ifndef _WIN32
+    if (namedPw_ && now - lostCheckT_ > std::chrono::seconds(5)) {
+        lostCheckT_ = now;
+        if (pwSinkFor(device_).empty()) return true;
+    }
+#endif
+    return false;
+}
+
 bool AudioOut::open(const std::string& device) {
     close();
+    device_ = device;
+    namedPw_ = false;
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        openedT_ = lostCheckT_ = std::chrono::steady_clock::now();
+        lastCb_ = {};
+    }
 #ifndef _WIN32
     // the default output, or a card PipeWire knows (aimed at with --target)
     std::string target = device.empty() || !usePwCat() ? std::string() : pwSinkFor(device);
+    namedPw_ = !target.empty();
     if ((device.empty() || !target.empty()) && usePwCat()) {
         // 20 ms blocks from pull(), written as s16; the pipe's blocking write
         // paces it at the playback rate. A small pipe (~16 KB, 0.17 s): Linux's

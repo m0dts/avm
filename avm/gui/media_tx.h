@@ -95,6 +95,10 @@ private:
     std::thread asm_th_;
     std::atomic<bool> stop_{false}, running_{false};
     std::atomic<double> period_{0.24};   // the framer's cadence (setFragmentPeriod)
+    // a sound device's last samples: none for AUDIO_LOST_S, it's gone (unplugged) -- the
+    // capture's read fails, or it just goes quiet -- and an error line stops TX (pages.cpp)
+    std::atomic<double> audio_last_{0};
+    bool audio_watch_ = false, audio_lost_ = false;
     void countAudioPacket(double expected_per_s);
     long long frames_ = 0;
     long long audio_pkts_ = 0;   // encoded (logged every 500: their rate)

@@ -21,6 +21,9 @@ public:
     ~AudioOut();
     bool ok() const { return ok_; }
     bool open(const std::string& device);       // by name; empty: the default output
+    // the output gone (unplugged): it stopped asking for sound for 3 s, or the
+    // PipeWire output it was opened on has left the system (checked every 5 s)
+    bool lost();
     void setVolume(float v) { volume_ = v; }     // 0..1
     // media_rx_player's two: preroll -- waited for before playing (max(0.5 s, a
     // fragment's air time + 0.25 s): its audio arrives at once); hold -- kept
@@ -60,6 +63,9 @@ private:
     // _hold_latency): the transmitter's clock and the sound card's drift apart
     double backlog_ema_ = -1, rate_ = 1.0, frac_ = 0;
     std::chrono::steady_clock::time_point lastCb_{};
+    std::chrono::steady_clock::time_point openedT_{}, lostCheckT_{};
+    std::string device_;          // as opened
+    bool namedPw_ = false;        // a named PipeWire output (it can leave the system)
     double maxGapMs_ = 0;
     size_t maxFrames_ = 0, callbacks_ = 0;
     size_t pushed_ = 0;          // samples pushed since the last stats (the arrival rate)

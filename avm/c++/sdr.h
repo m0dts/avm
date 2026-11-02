@@ -47,6 +47,11 @@ namespace sdr {
 
 const int RX = 1, TX = 0;
 const int TIMEOUT = -1, OVERFLOW_ = -4;
+// no samples in, or writes failing, this long: the radio has gone (unplugged)
+const double RADIO_GONE_S = 3.0;
+inline double mono_s() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 struct Kwargs { size_t size; char** keys; char** vals; };
 
@@ -64,6 +69,7 @@ struct Api {
     int (*setGain)(void*, int, size_t, double) = nullptr;
     int (*setGainMode)(void*, int, size_t, bool) = nullptr;
     int (*setBandwidth)(void*, int, size_t, double) = nullptr;
+    double (*getBandwidth)(void*, int, size_t) = nullptr;
     int (*setAntenna)(void*, int, size_t, const char*) = nullptr;
     char** (*listAntennas)(void*, int, size_t, size_t*) = nullptr;
     void (*stringsClear)(char***, size_t) = nullptr;
@@ -106,6 +112,7 @@ struct Api {
         S(setGain, "SoapySDRDevice_setGain");
         S(setGainMode, "SoapySDRDevice_setGainMode");
         S(setBandwidth, "SoapySDRDevice_setBandwidth");
+        S(getBandwidth, "SoapySDRDevice_getBandwidth");
         S(setAntenna, "SoapySDRDevice_setAntenna");
         S(listAntennas, "SoapySDRDevice_listAntennas");
         S(stringsClear, "SoapySDRStrings_clear");
@@ -152,6 +159,25 @@ inline void* open_device(const std::string& args) {
     void* d = A.make ? A.make(args.c_str()) : nullptr;
     if (d) P.open.push_back({args, d, 1});
     return d;
+}
+
+// the sample rate, unless the radio already runs at it (within 2 Hz: a Pluto reports
+// 549999 for 550000). On a Pluto RX and TX share one clock chain: setting it again
+// reloads the AD9361's rates and filters for both, and RX restarting under a running
+// TX made the transmission stutter.
+inline void set_rate_if_changed(void* dev, int dir, double want) {
+    Api& A = api();
+    double have = A.getSampleRate ? A.getSampleRate(dev, dir, 0) : 0;
+    if (have > 0 && std::fabs(have - want) <= 2.0) return;
+    A.setSampleRate(dev, dir, 0, want);
+}
+// the analog bandwidth likewise (a change re-runs the AD9361's filter calibration)
+inline void set_bandwidth_if_changed(void* dev, int dir, double want) {
+    Api& A = api();
+    if (!A.setBandwidth) return;
+    double have = A.getBandwidth ? A.getBandwidth(dev, dir, 0) : 0;
+    if (have > 0 && std::fabs(have - want) <= 2.0) return;
+    A.setBandwidth(dev, dir, 0, want);
 }
 
 inline void close_device(void* dev) {
@@ -333,7 +359,7 @@ public:
             avm_logf("[rx] rtlsdr: %g kS/s not possible, using 960 kS/s\n", want / 1e3);
             want = 960000;
         }
-        A.setSampleRate(dev_, RX, 0, want);
+        set_rate_if_changed(dev_, RX, want);
         rate = A.getSampleRate ? A.getSampleRate(dev_, RX, 0) : want;
         if (rate <= 0) rate = want;
         double tune = c.rf_hz + c.tune_offset_hz;
@@ -351,7 +377,7 @@ public:
             if (A.setGainMode) A.setGainMode(dev_, RX, 0, false);
             A.setGain(dev_, RX, 0, c.gain_db);
         }
-        if (c.bandwidth_hz && c.driver != "rtlsdr" && c.driver != "hackrf" && !fixed && A.setBandwidth) A.setBandwidth(dev_, RX, 0, c.bandwidth_hz);
+        if (c.bandwidth_hz && c.driver != "rtlsdr" && c.driver != "hackrf" && !fixed) set_bandwidth_if_changed(dev_, RX, c.bandwidth_hz);
         if (!c.antenna.empty() && c.driver != "lime" && A.setAntenna) A.setAntenna(dev_, RX, 0, c.antenna.c_str());
         size_t ch = 0;
         stream_ = A.setupStream(dev_, RX, "CF32", &ch, 1, nullptr);
@@ -388,14 +414,28 @@ public:
         int flags = 0;
         long long t = 0;
         int r = A.readStream(dev_, stream_, bufs, out.size(), &flags, &t, 1000000);
-        if (r == TIMEOUT) {
-            if (++timeouts_ % 5 == 0)
+        const double now = mono_s();
+        if (last_data_ < 0) last_data_ = now;
+        if (r == TIMEOUT || r == OVERFLOW_ || r == 0) {
+            if (r == TIMEOUT && ++timeouts_ % 5 == 0)
                 avm_logf("%s RX: no samples for %ds -- the radio is open but not delivering data\n",
                              cfg_.driver.c_str(), timeouts_);
+            if (r == OVERFLOW_ && now - overflow_logged_ >= 1.0) {     // (at most once a second)
+                avm_logf("WARNING: %s RX overflow -- samples dropped.\n", cfg_.driver.c_str());
+                overflow_logged_ = now;
+            }
             out.clear();
+            // nothing for RADIO_GONE_S however fast the driver answers: unplugged (a Pluto's
+            // driver then answers every read at once, and the reader spun, flooding the log)
+            if (now - last_data_ > RADIO_GONE_S) {
+                avm_logf("ERROR: %s RX: no samples for %.0f s -- the radio has gone (unplugged?)\n",
+                         cfg_.driver.c_str(), RADIO_GONE_S);
+                return -1;
+            }
+            if (r != TIMEOUT) std::this_thread::sleep_for(std::chrono::milliseconds(5));
             return 0;
         }
-        if (r == OVERFLOW_) { avm_logf("WARNING: %s RX overflow -- samples dropped.\n", cfg_.driver.c_str()); out.clear(); return 0; }
+        last_data_ = now;
         if (r < 0) {
             avm_logf("%s RX stream error: %s -- stopping.\n", cfg_.driver.c_str(), A.errToStr ? A.errToStr(r) : "?");
             return -1;
@@ -515,7 +555,7 @@ private:
                 int flags = 0;
                 int r = A.writeStream(dev_, tx_stream_, bufs, n - pos, &flags, 0, 1000000);
                 if (r == TIMEOUT) continue;
-                if (r < 0) return false;
+                if (r <= 0) return false;      // (0: unplugged -- see TxSink::write_all)
                 pos += (size_t)r;
             }
             return true;
@@ -533,6 +573,7 @@ private:
     std::atomic<long long> count_{0}, discarded_{0};
     std::atomic<long long> warmup_{0};
     int timeouts_ = 0;
+    double last_data_ = -1, overflow_logged_ = -1;
     double tune_ = 0, offset_ = 0, ppm_ = 0;
     std::unique_ptr<FileWatcher> gain_watch_, offset_watch_, ppm_watch_;
 };
@@ -572,7 +613,7 @@ public:
         if (!dev_ && c.driver == "pluto" && !c.uri.empty()) dev_ = open_device("driver=plutosdr");
         if (!dev_) { error = std::string("could not open the radio: ") + (A.lastError ? A.lastError() : "?"); return false; }
         // (a HackRF: 2 MS/s at least; the transmitter builds its waveform at the rate it really runs at)
-        A.setSampleRate(dev_, TX, 0, c.driver == "hackrf" ? std::max(c.rate, 2000000.0) : c.rate);
+        set_rate_if_changed(dev_, TX, c.driver == "hackrf" ? std::max(c.rate, 2000000.0) : c.rate);
         rate = A.getSampleRate ? A.getSampleRate(dev_, TX, 0) : c.rate;
         if (rate <= 0) rate = c.rate;
         double tune = c.rf_hz + c.tune_offset_hz;
@@ -584,7 +625,7 @@ public:
             if (A.setAntenna) A.setAntenna(dev_, TX, 0, ant.c_str());
             if (A.setBandwidth) A.setBandwidth(dev_, TX, 0, 5e6);
         } else if (c.bandwidth_hz && c.driver != "hackrf" && A.setBandwidth) {
-            A.setBandwidth(dev_, TX, 0, c.bandwidth_hz);
+            set_bandwidth_if_changed(dev_, TX, c.bandwidth_hz);
         }
         set_gain(c.gain_db);
         size_t ch = 0;
@@ -611,21 +652,38 @@ public:
         A.setGain(dev_, TX, 0, v);
     }
 
+    // false once the radio has gone (writes failing, or falling behind real time, for RADIO_GONE_S)
+    bool ok() const { return !failed_; }
+
+    // stopping: the writer gives up what's queued and nothing waits on it any more
+    // (an unplugged Pluto's writes each stall in the network for a while)
+    void abort() {
+        abort_ = true;
+        std::lock_guard<std::mutex> g(mu_);
+        stop_ = true;
+        q_.clear();
+        ready_.notify_all();
+        space_.notify_all();
+        done_.notify_all();
+    }
+
     // queued for the writer; blocks while queue_depth waveforms are waiting
     void write(std::vector<std::complex<float>>&& w) {
         std::unique_lock<std::mutex> lk(mu_);
-        space_.wait(lk, [&] { return q_.size() < cfg_.queue_depth || stop_; });
+        space_.wait(lk, [&] { return q_.size() < cfg_.queue_depth || stop_ || failed_; });
+        if (abort_ || failed_) return;
         q_.push_back(std::move(w));
         ready_.notify_all();
     }
     // everything queued sent
     void drain() {
         std::unique_lock<std::mutex> lk(mu_);
-        done_.wait(lk, [&] { return q_.empty() && !busy_; });
+        done_.wait(lk, [&] { return (q_.empty() && !busy_) || abort_; });
     }
 
     ~TxSink() {
         gain_watch_.reset();
+        abort_ = true;
         {
             std::lock_guard<std::mutex> g(mu_);
             stop_ = true;
@@ -665,20 +723,50 @@ private:
     }
     void write_all(const std::vector<std::complex<float>>& s) {
         Api& A = api();
+        if (failed_) return;      // (the radio gone: the queue drains, ok() says so)
         if (cfg_.driver == "lime") pace(s.size());
         size_t pos = 0;
-        while (pos < s.size()) {
+        while (pos < s.size() && !abort_) {      // (closing: given up at once)
             size_t n = std::min<size_t>(1 << 16, s.size() - pos);
             const void* bufs[1] = {s.data() + pos};
             int flags = 0;
             int r = A.writeStream(dev_, stream_, bufs, n, &flags, 0, 1000000);
-            if (r == TIMEOUT) continue;
-            if (r < 0) {
-                avm_logf("SoapySDR writeStream error: %s -- dropping the rest of this chunk.\n",
-                             A.errToStr ? A.errToStr(r) : "?");
+            // (0 written: a Pluto unplugged answers every write so, at once -- this loop spun
+            // on it, and closing TX waited for it for ever)
+            if (r == TIMEOUT || r <= 0) {
+                // failing for RADIO_GONE_S: unplugged, TX ends (before, it retried for ever)
+                const double now = mono_s();
+                if (fail_since_ < 0) {
+                    fail_since_ = now;
+                    if (r != TIMEOUT)
+                        avm_logf("SoapySDR writeStream error: %s -- dropping the rest of this chunk.\n",
+                                 A.errToStr ? A.errToStr(r) : "?");
+                }
+                if (now - fail_since_ > RADIO_GONE_S) {
+                    avm_logf("ERROR: %s TX: writes failing for %.0f s -- the radio has gone (unplugged?)\n",
+                             cfg_.driver.c_str(), RADIO_GONE_S);
+                    failed_ = true;
+                    return;
+                }
+                if (r == TIMEOUT) continue;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                if (r == 0) continue;
                 return;
             }
+            fail_since_ = -1;
             pos += (size_t)r;
+            // the writer sends all the time (silence between waveforms), so it keeps pace
+            // with the radio: RADIO_GONE_S behind real time, the radio has stopped taking
+            // samples (an unplugged Pluto's writes "succeed", each after a network stall)
+            const double now = mono_s();
+            if (rt_t0_ < 0) rt_t0_ = now;
+            rt_sent_ += (double)r;
+            if ((now - rt_t0_) - rt_sent_ / rate > RADIO_GONE_S) {
+                avm_logf("ERROR: %s TX: %.0f s behind real time -- the radio has gone (unplugged?)\n",
+                         cfg_.driver.c_str(), RADIO_GONE_S);
+                failed_ = true;
+                return;
+            }
         }
     }
     void pace(size_t n) {
@@ -697,6 +785,8 @@ private:
     std::condition_variable ready_, space_, done_;
     std::deque<std::vector<std::complex<float>>> q_;
     bool stop_ = false, busy_ = false;
+    std::atomic<bool> failed_{false}, abort_{false};
+    double fail_since_ = -1, rt_t0_ = -1, rt_sent_ = 0;
     double pace_t0_ = -1, pace_sent_ = 0;
     std::unique_ptr<FileWatcher> gain_watch_;
 };

@@ -7,6 +7,9 @@
 #include <QFile>
 #include <QLibrary>
 #include <cstdio>
+#include <future>
+#include <memory>
+#include <thread>
 #include <vector>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -369,7 +372,15 @@ void Link::stop() {
     if (eng_) {
         file_stop_ = true;
         if (file_th_.joinable()) file_th_.join();
-        api_->destroy(eng_);
+        // destroyed on a thread of its own, waited for up to 2 s: a stop or restart is done
+        // well within that (the old stream closed before a new one opens), but a radio
+        // unplugged holds the close in its driver's network timeouts (a Pluto: ~30 s),
+        // and the GUI froze for all of it -- now that finishes in the background
+        auto done = std::make_shared<std::promise<void>>();
+        std::future<void> f = done->get_future();
+        std::thread([api = api_, e = eng_, done] { api->destroy(e); done->set_value(); }).detach();
+        if (f.wait_for(std::chrono::seconds(2)) != std::future_status::ready)
+            emit line("Radio not responding: its connection is closing in the background");
         eng_ = nullptr;
         emit stateChanged(false);
         return;
@@ -1159,6 +1170,15 @@ void RxPage::updateLamps() {
         lastAudioLog = now;
         guiLog("AUDIO", QString("buffered %1 s, underruns %2, %3").arg(media_.audio().buffered_s(), 0, 'f', 2)
                             .arg(media_.audio().underruns).arg(media_.audio().callbackStats()));
+        // the audio output unplugged: RX stops (as for the radio), with a notice
+        if (media_.audio().lost()) {
+            const QString m = "ERROR: the audio output stopped (unplugged?) -- RX stopped";
+            guiLog("AUDIO", m);
+            stop();
+            status_->setText(m);
+            Notices::get().add("RX", "The audio output disconnected while RX was running (RX stopped)");
+            return;
+        }
     }
     while (!frameTimes_.empty() && now - frameTimes_.front() > 4000) frameTimes_.pop_front();
     if (link_.running() && !status_->text().startsWith("ERROR") && !status_->text().startsWith("Recording"))
@@ -1716,6 +1736,11 @@ void TxPage::doToggleRun() {
                         guiLog("MEDIA", l);
                         if (l.startsWith("ERROR")) status_->setText(l);
                         Notices::get().addIfError("TX media", l);
+                        // the microphone unplugged (media_tx.cpp): TX stops, as for the radio
+                        if (l.startsWith("ERROR: the audio input stopped") && running()) {
+                            stop();
+                            status_->setText(l);
+                        }
                     }, Qt::QueuedConnection);
                 });
             if (!ok) link_.stop();

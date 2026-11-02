@@ -39,6 +39,7 @@ public:
     void setState(State s);
 private:
     int size_;
+    int state_ = -1;      // (restyled only on a change: each stylesheet is parsed)
 };
 
 class ElideLabel : public QLabel {

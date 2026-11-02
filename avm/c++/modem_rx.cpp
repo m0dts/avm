@@ -6,7 +6,7 @@
 // the retry passes on a CRC failure. Includes modem_tx.cpp (one library:
 // the transmitter's tables are shared). Checked against the Python by
 // test_modem_rx.py. Part of the AVM library: build.py.
-#pragma once   // included by both engines (avm_engines.cpp)
+#pragma once   // included by both engines (rx_engine.cpp, tx_engine.cpp)
 #include "modem_tx.cpp"
 #include "evm_tables.h"
 
@@ -85,6 +85,15 @@ void eq_comb(const Cfg& c, const Grid& F, int ns, int hw, const std::vector<char
         unwrap(ang, ph);
         interp_clamped(n, xp, mag, mi);
         interp_clamped(n, xp, ph, pi_);
+        // the phase beyond the outer pilots: on along the end pilots' slope, not held. A timing
+        // offset turns the phase steadily across the carriers (2 pi / n_fft per sample per
+        // carrier: 11 deg in VU), and held, it cost VU's edge carriers ~20 dB of MER
+        int m = (int)xp.size();
+        if (m >= 2) {
+            double s0 = (ph[1] - ph[0]) / (xp[1] - xp[0]), s1 = (ph[m - 1] - ph[m - 2]) / (xp[m - 1] - xp[m - 2]);
+            for (int j = 0; j < xp[0]; ++j) pi_[j] = ph[0] + s0 * (j - xp[0]);
+            for (int j = xp[m - 1] + 1; j < n; ++j) pi_[j] = ph[m - 1] + s1 * (j - xp[m - 1]);
+        }
         for (int j = 0; j < n; ++j) hr[j] = mi[j] * std::exp(cd(0, pi_[j]));
     }
     eq.assign(F.size(), cd(NaN, 0));
@@ -370,6 +379,9 @@ struct Result {
     double ber = NaN, evm = NaN;
     std::vector<uint8_t> payload;
     std::vector<cd> constellation;
+    // per data carrier (Cfg::fft_bins order), a decoded frame's: error power vs the
+    // re-encoded symbols, and those symbols' power (empty unless the CRC passed)
+    std::vector<double> carrier_err, carrier_sig;
 };
 
 // one decode pass over equalised symbols: payload soft bits -> decoded
@@ -423,6 +435,29 @@ void decode_pass(const Cfg& c, const Grid& eq, const Grid& eqs, int first, int n
     for (size_t i = 0; i < cw.size(); ++i) P.re_encoded[i] = cw[p2[i]];
     P.bytes.assign(nb / 8, 0);
     for (long long i = 0; i < (nb / 8) * 8; ++i) P.bytes[i / 8] |= P.bits[i] << (7 - i % 8);
+}
+
+// per-carrier error of a decoded frame: the re-encoded bits as the true symbols
+void carrier_errors(const Cfg& c, const Grid& eq, const Pass& P, int nh, int ns, Result& R) {
+    int n = c.n_data;
+    R.carrier_err.assign(n, 0.0);
+    R.carrier_sig.assign(n, 0.0);
+    std::vector<uint8_t> re = P.re_encoded;
+    const std::vector<uint8_t>& prbs = prbs_table();
+    for (size_t i = 0; i < re.size(); ++i) re[i] ^= prbs[i % prbs.size()];
+    size_t pos = 0;
+    for (int k = nh; k < ns; ++k) {
+        for (int j = 0; j < n; ++j) {
+            if (c.is_pilot(k, j)) continue;
+            if (pos + c.bpc > re.size()) return;
+            cd ref = data_map(c.bpc, re.data() + pos);
+            pos += c.bpc;
+            cd y = eq[(size_t)k * n + j];
+            if (!std::isfinite(y.real()) || !std::isfinite(y.imag())) continue;
+            R.carrier_err[j] += std::norm(y - ref);
+            R.carrier_sig[j] += std::norm(ref);
+        }
+    }
 }
 
 double pass_ber(const Pass& P) {
@@ -485,6 +520,7 @@ void decode_frame(const Cfg& c, const cd* rx, long long n_rx, long long max_wait
     R.payload = P.bytes;
     R.ber = pass_ber(P);
     R.crc_ok = crc32(P.bytes.data(), P.bytes.size()) == expected_crc;
+    if (R.crc_ok) carrier_errors(c, eq, P, nh, ns, R);
     if (R.crc_ok || R.ber >= HOPELESS_BER || c.full_training()) return;
 
     // retries: the other equaliser (time-first <-> per-symbol), shorter smoothing
@@ -2130,9 +2166,13 @@ TX_API long long shrx_decode_r(void* hh, const cd* r, long long n, int variant, 
 // interpolates between, single precision, as the numba kernel). hist: the
 // previous nt processed samples (in), replaced by the last nt (out).
 // iq: [apply, mean_I, mean_Q, slope, scale]. Returns the outputs written.
+// bank ((phases + 1) x (nt + 1), or null: the line): the FIR at each output's own
+// fractional delay, the nearest of `phases`. The line between two native samples
+// leaks the signal's images at the native rate (550 - 80 kHz) into the output,
+// ~30 dB down: on the spectrum, and in the signal itself at some rates.
 TX_API long long fe_process(const cf* x, long long n, cf* hist, const float* taps_rev, int nt, long long n_in0,
                             long long n_out0, double step, const double* iq, int lo_on, const cd* lo_table,
-                            long long period, long long lo_phase0, cf* out) {
+                            long long period, long long lo_phase0, cf* out, const float* bank, int phases) {
     const int nh = nt;
     std::vector<float> wr(nh + n), wi(nh + n);
     for (int i = 0; i < nh; ++i) { wr[i] = hist[i].real(); wi[i] = hist[i].imag(); }
@@ -2163,6 +2203,14 @@ TX_API long long fe_process(const cf* x, long long n, cf* hist, const float* tap
         if (j + 1 > last) break;
         const float* pr = &wr[j - base - nt + 1];
         const float* pi = &wi[j - base - nt + 1];
+        if (bank) {
+            int p = std::min(phases, (int)std::nearbyint((pos - (double)j) * phases));
+            const float* t = bank + (size_t)p * (nt + 1);
+            float yr = 0, yi = 0;
+            for (int q = 0; q <= nt; ++q) { yr += t[q] * pr[q]; yi += t[q] * pi[q]; }
+            out[k++] = cf(yr, yi);
+            continue;
+        }
         float yr0 = 0, yi0 = 0, yr1 = 0, yi1 = 0;
         for (int q = 0; q < nt; ++q) {
             float t = taps_rev[q];

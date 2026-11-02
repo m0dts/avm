@@ -97,6 +97,15 @@ bool build_mode(const std::string& mode, double occ, const std::string& mod, con
     m.spacing = sp->spacing;
     m.fs = sp->spacing * m.n_fft;
     m.n_cp = (int)std::nearbyint(m.n_fft * sp->guard);
+    // VU at twice its rate (64 points, 160 kS/s; the same carriers and guard): at 80 its
+    // carriers ran to the Nyquist edge, so the TX had no room for its usual soft cut and a
+    // receiver off the TX's sample grid (every real one) lost the edge carriers (~13 dB
+    // MER at +-15, vs ~30 now). The signal on air is the same: either end can be the older.
+    if (mode == "VU") {
+        m.n_fft *= 2;
+        m.n_cp *= 2;
+        m.fs *= 2;
+    }
     m.freq_int = sp->freq_int;
     m.time_int = sp->time_int;
     m.halves = sp->halves;

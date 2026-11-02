@@ -63,6 +63,7 @@ static std::string v4l2_capture_size(const std::string& dev, int tw, int th) {
 static double mono() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+static const double AUDIO_LOST_S = 4.0;
 
 MediaTx::MediaTx() {
     lib_.setFileName(avmDir() + "/c++/avm");
@@ -99,6 +100,9 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
     frames_ = 0;
     enc_s_ = 0;
     audio_pkts_ = 0;
+    audio_watch_ = c.audio != "off" && c.audio != "test";
+    audio_lost_ = false;
+    audio_last_ = mono();
     {
         std::lock_guard<std::mutex> g(mu_);
         video_q_.clear();
@@ -292,6 +296,7 @@ void MediaTx::countAudioPacket(double expected_per_s) {
 
 // mono s16 -> 20 ms frames: Codec2 3200 (8 kHz, 160 samples) or Opus (48 kHz, 960)
 void MediaTx::audioFrame(AVFrame* f) {
+    audio_last_ = mono();
     const short* s = (const short*)f->data[0];
     std::lock_guard<std::mutex> g(mu_);
     pcm_.insert(pcm_.end(), s, s + f->nb_samples);
@@ -324,6 +329,10 @@ void MediaTx::assemble() {
     double next = mono();
     std::vector<uint8_t> frag(cfg_.fragment_size);
     while (!stop_) {
+        if (audio_watch_ && !audio_lost_ && mono() - audio_last_ > AUDIO_LOST_S) {
+            audio_lost_ = true;
+            log_("ERROR: the audio input stopped (unplugged?) -- TX stopped");
+        }
         {
             std::lock_guard<std::mutex> g(mu_);
             for (auto& a : audio_q_) frAddAudio_(fr_, a.data(), (int)a.size());

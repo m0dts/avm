@@ -65,7 +65,7 @@ option(AVM_NATIVE "build the library for this machine's CPU" ON)
 set(AVM_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../c++)
 find_package(Threads REQUIRED)
 add_library(avm SHARED ${AVM_CPP_DIR}/wavelet_core.cpp ${AVM_CPP_DIR}/framing.cpp ${AVM_CPP_DIR}/ldpc.cpp
-            ${AVM_CPP_DIR}/avm_engines.cpp)
+            ${AVM_CPP_DIR}/rx_engine.cpp ${AVM_CPP_DIR}/tx_engine.cpp)   # (the engines apart: compiled in parallel)
 target_compile_options(avm PRIVATE -O3 -ffp-contract=off -fno-fast-math)
 if(AVM_NATIVE AND NOT MSVC)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm")

@@ -82,11 +82,13 @@ std::vector<double> design_lowpass_fir(double cutoff, double fs, int nt) {
 
 TX_API long long fe_process(const cf* x, long long n, cf* hist, const float* taps_rev, int nt, long long n_in0,
                             long long n_out0, double step, const double* iq, int lo_on, const cd* lo_table,
-                            long long period, long long lo_phase0, cf* out);
+                            long long period, long long lo_phase0, cf* out, const float* bank, int phases);
 
 struct FrontEnd {
     double step, in_fs, lo_hz = 0;
     std::vector<float> taps_rev;
+    std::vector<float> bank;          // polyphase: FE_PHASES + 1 rows of nt + 1 (a fractional rate ratio)
+    static const int FE_PHASES = 256;
     std::vector<cf> hist;
     long long n_in = 0, n_out = 0;
     double iq[5] = {0, 0, 0, 0, 0}, acc[5] = {0, 0, 0, 0, 0};
@@ -94,10 +96,22 @@ struct FrontEnd {
     std::vector<cd> table;
     bool have_table = true;
 
-    FrontEnd(double fs_in, double fs_out, const std::vector<double>& taps, double lo)
+    FrontEnd(double fs_in, double fs_out, const std::vector<double>& taps, double lo, double cut_hz = 0)
         : step(fs_in / fs_out), in_fs(fs_in) {
         taps_rev.resize(taps.size());
         for (size_t i = 0; i < taps.size(); ++i) taps_rev[i] = (float)taps[taps.size() - 1 - i];
+        // a fractional ratio: the same filter at FE_PHASES fractional delays (the nearest:
+        // within 1/512 of a native sample), not a line between two native samples
+        if (cut_hz > 0 && std::fabs(step - std::nearbyint(step)) > 1e-9) {
+            const int nt = (int)taps.size(), P = FE_PHASES;
+            std::vector<double> h = design_lowpass_fir(cut_hz, fs_in * P, (nt - 1) * P + 1);
+            bank.assign((size_t)(P + 1) * (nt + 1), 0.0f);
+            for (int p = 0; p <= P; ++p)
+                for (int q = 0; q <= nt; ++q) {
+                    long long u = (long long)(nt - 1 - q) * P + p;
+                    if (u >= 0 && u < (long long)h.size()) bank[(size_t)p * (nt + 1) + q] = (float)(h[u] * P);
+                }
+        }
         hist.assign(taps.size(), cf(0, 0));
         iq_first = std::max(1LL, (long long)std::nearbyint(1.0 * fs_in));
         iq_step = std::max(1LL, (long long)std::nearbyint(0.25 * fs_in));
@@ -137,7 +151,7 @@ struct FrontEnd {
         if (have_table) {
             k = fe_process(x, n, hist.data(), taps_rev.data(), (int)taps_rev.size(), n_in, n_out, step, iq,
                            lo_hz != 0, table.data(), (long long)table.size(), n_in % (long long)table.size(),
-                           out.data() + o0);
+                           out.data() + o0, bank.empty() ? nullptr : bank.data(), FE_PHASES);
         } else {
             std::vector<cd> t(n);
             for (long long i = 0; i < n; ++i) {
@@ -145,7 +159,7 @@ struct FrontEnd {
                 t[i] = cd(std::cos(th), std::sin(th));
             }
             k = fe_process(x, n, hist.data(), taps_rev.data(), (int)taps_rev.size(), n_in, n_out, step, iq,
-                           lo_hz != 0, t.data(), n, 0, out.data() + o0);
+                           lo_hz != 0, t.data(), n, 0, out.data() + o0, bank.empty() ? nullptr : bank.data(), FE_PHASES);
         }
         n_in += n;
         n_out += k;
@@ -824,6 +838,7 @@ struct Receiver {
         R.ber = res.ber;
         R.evm = res.evm;
         R.constellation = res.constellation;
+        if (res.crc_ok) note_carriers(c, res);
         R.has_next = true;
         R.next = start_index + M.preamble_len + n_symbols * M.symbol_len;
         R.has_frame_start = true;
@@ -1176,6 +1191,43 @@ struct Receiver {
         st.afc_n = 0;
         st.last_cfo.has = false;
         avm_logf("[afc] re-centred by %+.0f Hz (total correction %+.0f Hz)\n", -ema, st.afc_hz);
+    }
+
+    // per-carrier MER, summed over decoded frames and logged every CARRIER_LOG_FRAMES:
+    // a flat floor is inter-symbol interference, a dip at bin 0 the TX's LO leakage,
+    // a fall at the edges the filters
+    static const int CARRIER_LOG_FRAMES = 20;
+    std::vector<double> car_err_, car_sig_;
+    int car_frames_ = 0;
+    void note_carriers(const Cfg& c, const Result& res) {
+        size_t n = res.carrier_err.size();
+        if (!n || n != c.fft_bins.size()) return;
+        if (car_err_.size() != n) { car_err_.assign(n, 0.0); car_sig_.assign(n, 0.0); car_frames_ = 0; }
+        for (size_t j = 0; j < n; ++j) { car_err_[j] += res.carrier_err[j]; car_sig_[j] += res.carrier_sig[j]; }
+        if (++car_frames_ < CARRIER_LOG_FRAMES) return;
+        // carriers in frequency order, grouped into at most 32 bands
+        std::vector<size_t> ord(n);
+        for (size_t j = 0; j < n; ++j) ord[j] = j;
+        std::sort(ord.begin(), ord.end(), [&](size_t a, size_t b) { return c.fft_bins[a] < c.fft_bins[b]; });
+        size_t per = (n + 31) / 32;
+        std::string line;
+        double te = 0, ts = 0;
+        for (size_t g = 0; g < n; g += per) {
+            double e = 0, sg = 0;
+            size_t last = std::min(n, g + per) - 1;
+            for (size_t i = g; i <= last; ++i) { e += car_err_[ord[i]]; sg += car_sig_[ord[i]]; }
+            te += e; ts += sg;
+            char b[48];
+            if (per == 1) std::snprintf(b, sizeof b, " %d:%.1f", c.fft_bins[ord[g]], 10 * std::log10(sg / std::max(e, 1e-12)));
+            else std::snprintf(b, sizeof b, " %d..%d:%.1f", c.fft_bins[ord[g]], c.fft_bins[ord[last]],
+                               10 * std::log10(sg / std::max(e, 1e-12)));
+            line += b;
+        }
+        avm_logf("[carriers] MER dB over %d frames (all %.1f), bin:dB%s\n", car_frames_,
+                 10 * std::log10(ts / std::max(te, 1e-12)), line.c_str());
+        std::fill(car_err_.begin(), car_err_.end(), 0.0);
+        std::fill(car_sig_.begin(), car_sig_.end(), 0.0);
+        car_frames_ = 0;
     }
 
     void note_trouble() {
@@ -1732,15 +1784,20 @@ struct Engine {
             }
             }
         }
-        std::vector<double> taps = design_lowpass_fir(std::min(m.fs / 2, 0.45 * capture_fs), capture_fs, 129);
+        // taps enough for the transition to fit between the last carrier and the mode's Nyquist
+        // edge (~6% of its rate; Hamming: ~3.3 / taps of the capture rate). A fixed 129 at a
+        // capture rate far above the mode's left the wide modes' (VU) outer carriers in it.
+        int n_taps = std::max(129, std::min(2049, (int)std::ceil(60.0 * capture_fs / m.fs)) | 1);
+        const double cut_hz = std::min(m.fs / 2, 0.45 * capture_fs);
+        std::vector<double> taps = design_lowpass_fir(cut_hz, capture_fs, n_taps);
         // (inverted: the LO offset mirrors with the spectrum, so it's removed the other way)
         const double lo = a.invert_spectrum ? -a.lo_offset_hz : a.lo_offset_hz;
-        fe.reset(new FrontEnd(capture_fs, m.fs, taps, lo));   // a radio tuned this far off: shifted back here
+        fe.reset(new FrontEnd(capture_fs, m.fs, taps, lo, cut_hz));   // a radio tuned this far off: shifted back here
         reader.invert = a.invert_spectrum;
         if (a.lo_offset_hz) reader.dc_alpha = 2 * fft::PI * 10.0 / capture_fs;   // (no offset: the signal sits on DC)
         if (a.invert_spectrum) avm_logf("Spectrum inverted (--invert-spectrum)\n");
-        avm_logf("Front end: %.1f kS/s -> %.2f kS/s (compiled IQ correction, LO shift %+.1f kHz, 129-tap FIR at output points only)\n",
-                 capture_fs / 1e3, m.fs / 1e3, lo / 1e3);
+        avm_logf("Front end: %.1f kS/s -> %.2f kS/s (compiled IQ correction, LO shift %+.1f kHz, %d-tap FIR at output points only)\n",
+                 capture_fs / 1e3, m.fs / 1e3, lo / 1e3, n_taps);
         reader.fe = fe.get();
         return true;
     }
@@ -1815,18 +1872,16 @@ struct Engine {
                 for (const auto& h : hist) s += h[k];
                 db[k] = (float)(10 * std::log10(s / hist.size() + 1e-12));
             }
-            static const char* B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            const unsigned char* d = (const unsigned char*)db.data();
-            size_t n = db.size() * 4;
-            std::string b64;
-            for (size_t i = 0; i < n; i += 3) {
-                unsigned v = d[i] << 16 | (i + 1 < n ? d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
-                b64 += B64[(v >> 18) & 63];
-                b64 += B64[(v >> 12) & 63];
-                b64 += i + 1 < n ? B64[(v >> 6) & 63] : '=';
-                b64 += i + 2 < n ? B64[v & 63] : '=';
+            // just the span asked for, when narrower than the modem's rate (VU runs at twice
+            // its width: shown whole, its edges and the RX LO offset's DC point were in view)
+            const double step = m.fs / N;
+            int k0 = 0;
+            if (a.spectrum_span > 0 && a.spectrum_span < m.fs) {
+                int half = (int)std::ceil(a.spectrum_span / 2 / step);
+                k0 = std::max(0, N / 2 - half);
+                db = std::vector<float>(db.begin() + k0, db.begin() + std::min(N, N / 2 + half + 1));
             }
-            avm_logf("[spectrum] %.6f %.6f %d %s\n", -N / 2 * m.fs / N, m.fs / N, N, b64.c_str());
+            avm_logf("[spectrum] %.6f %.6f %d %s\n", (k0 - N / 2) * step, step, (int)db.size(), base64(db).c_str());
         }
     }
 
@@ -1996,8 +2051,11 @@ AVM_RX_API void avm_rx_destroy(void* h) {
 // the mode's own rate: resampling's few samples of rounding aren't counted.)
 // where a signal is found and decoded, Hz from the tuned frequency (the RX
 // spectrum's capture band; touch_rx_page._tuning_geometry): the signal's own
-// edges widened by the pull-in -- single carrier +-half the symbol rate, OFDM
-// the integer-CFO search (29 carriers) or a quarter of the width, the less.
+// edges widened by the pull-in -- S +-half the symbol rate; SH +-3.5 kHz (its
+// sync's reach, ~3.75-5 kHz measured at every width, not half its symbol rate);
+// OFDM the integer-CFO search (29 carriers) or, the less, a quarter of the width
+// or, if more, the room left in the receiver's band (VU, at twice its width: the
+// signal still whole inside its filter, 3% of the rate kept for the roll-off).
 // 0 if the combination is invalid.
 AVM_RX_API int avm_capture_band(const char* mode, double occupancy, const char* modulation, double* lo_hz,
                                 double* hi_hz) {
@@ -2008,7 +2066,13 @@ AVM_RX_API int avm_capture_band(const char* mode, double occupancy, const char* 
     if (bins.empty()) return 0;
     double lo = (*std::min_element(bins.begin(), bins.end()) - 0.5) * m.spacing;
     double hi = (*std::max_element(bins.begin(), bins.end()) + 0.5) * m.spacing;
-    double pull = m.sc ? m.symbol_rate / 2 : std::min(29 * m.spacing, (hi - lo) / 4);
+    double pull;
+    if (m.sc == 2) pull = std::min(m.symbol_rate / 2, 3500.0);
+    else if (m.sc) pull = m.symbol_rate / 2;
+    else {
+        double room = m.fs / 2 - std::max(-lo, hi) - 0.03 * m.fs;
+        pull = std::min(29 * m.spacing, std::max((hi - lo) / 4, room));
+    }
     *lo_hz = lo - pull;
     *hi_hz = hi + pull;
     return 1;
