@@ -3,6 +3,17 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.1.2
+- PTT outputs: Raspberry Pi pin 40 (BCM 21, as Portsdown 4) and, with a Pluto, its GPO0 (as F5OEO's firmware; a G0MJW PTT board). PTT goes high only once RF is out -- after a LimeSDR's calibration tones and start-up spike -- and drops only after RF has stopped
+- LimeRFE support: Config, Lime RFE tab. Its band follows the frequency, its mode follows TX and RX; TX port, FM notch and RX attenuation settings
+- Stream TX source: send pictures and sound from OBS (or anything else) over SRT or UDP. A break holds the picture and sends silence; TX stops if the stream stays away (Config, TX media)
+- TX page: changing modes while transmitting updates the link details at once, shown in orange until applied
+- Audio-only links no longer stop and start: the sound rate now fits the fragment
+- RX audio: fewer breaks (a deeper hold buffer)
+- One entry per Pluto in the radio lists (pluto.local and 192.168.2.1 are the same radio); stopping RX no longer crashes TX on the same Pluto
+- Test pattern video works again
+- The warning flag turns from red to grey once you've looked at the list, without having to clear it
+
 ## 1.1.1
 - Mode VU: much cleaner reception -- the outer carriers were losing about 15 dB of MER (now about 28 dB, level across the band). Works with 1.1.0 at the other end, but both ends on 1.1.1 is best
 - TX spectrum: no 'shelf' at the edges; the signal rolls off cleanly

@@ -42,6 +42,7 @@
 #else
 #include <arpa/inet.h>
 #include <dlfcn.h>
+#include <unistd.h>
 #include <netdb.h>
 #endif
 
@@ -828,6 +829,97 @@ struct TxConfig {
     std::string gain_file;
 };
 
+// ---- PTT on a Raspberry Pi: physical pin 40 (BCM GPIO 21), high while RF is out --
+// Portsdown 4's "TX LED / PTT drive", so its PTT wiring works as it is. Through
+// Raspberry Pi OS's pinctrl (Pi 4 and Pi 5 alike); elsewhere nothing.
+namespace ptt {
+inline bool available() {
+#ifdef __linux__
+    static int ok = -1;
+    if (ok < 0) {
+        ok = 0;
+        if (FILE* f = std::fopen("/proc/device-tree/model", "r")) {
+            char m[128] = {0};
+            size_t n = std::fread(m, 1, sizeof m - 1, f);
+            std::fclose(f);
+            m[n] = 0;
+            ok = std::strstr(m, "Raspberry Pi") && access("/usr/bin/pinctrl", X_OK) == 0;
+        }
+    }
+    return ok == 1;
+#else
+    return false;
+#endif
+}
+inline void set(bool on) {
+    if (!available()) return;
+    if (std::system(on ? "/usr/bin/pinctrl set 21 op dh" : "/usr/bin/pinctrl set 21 op dl") != 0)
+        avm_logf("PTT: pinctrl failed (GPIO 21)\n");
+    else
+        avm_logf("PTT %s (GPIO 21, pin 40)\n", on ? "on" : "off");
+}
+
+// A Pluto's PTT: its AD9363's GPO0 (as F5OEO's firmware, a G0MJW PTT board on it),
+// set by hand through libiio -- register 0x026 bit 4 the GPOs under manual control,
+// 0x027 bits 7..4 their levels (bit 4: GPO0). Its own context beside SoapySDR's.
+class PlutoGpo {
+public:
+    explicit PlutoGpo(const std::string& uri) : uri_(uri.empty() ? "ip:192.168.2.1" : uri) {}
+    ~PlutoGpo() { if (ctx_) lib().destroy(ctx_); }
+    void set(bool on) {
+        Lib& L = lib();
+        if (!L.ok) { log_once("PTT: libiio not found -- the Pluto's GPO0 not set\n"); return; }
+        if (!ctx_) {
+            ctx_ = L.create(uri_.c_str());
+            if (ctx_) dev_ = L.find(ctx_, "ad9361-phy");
+        }
+        if (!dev_) { log_once("PTT: could not reach the Pluto's ad9361-phy (" + uri_ + ") -- GPO0 not set\n"); return; }
+        uint32_t r26 = 0, r27 = 0;
+        if (L.read(dev_, 0x26, &r26) < 0 || L.read(dev_, 0x27, &r27) < 0) { avm_logf("PTT: Pluto register read failed\n"); return; }
+        r27 = on ? (r27 | 0x10) : (r27 & ~0x10u);
+        if (L.write(dev_, 0x26, r26 | 0x10) < 0 || L.write(dev_, 0x27, r27) < 0) { avm_logf("PTT: Pluto register write failed\n"); return; }
+        avm_logf("PTT %s (Pluto GPO0)\n", on ? "on" : "off");
+    }
+
+private:
+    struct Lib {
+        bool ok = false;
+        void* (*create)(const char*) = nullptr;
+        void (*destroy)(void*) = nullptr;
+        void* (*find)(void*, const char*) = nullptr;
+        int (*read)(void*, uint32_t, uint32_t*) = nullptr;
+        int (*write)(void*, uint32_t, uint32_t) = nullptr;
+        Lib() {
+#ifdef _WIN32
+            HMODULE h = LoadLibraryA("libiio.dll");
+            auto sym = [&](const char* n) { return (void*)GetProcAddress(h, n); };
+#else
+            void* h = nullptr;
+            for (const char* n : {"libiio.so.0", "libiio.so"})
+                if ((h = dlopen(n, RTLD_NOW))) break;
+            auto sym = [&](const char* n) { return dlsym(h, n); };
+#endif
+            if (!h) return;
+            create = (decltype(create))sym("iio_create_context_from_uri");
+            destroy = (decltype(destroy))sym("iio_context_destroy");
+            find = (decltype(find))sym("iio_context_find_device");
+            read = (decltype(read))sym("iio_device_reg_read");
+            write = (decltype(write))sym("iio_device_reg_write");
+            ok = create && destroy && find && read && write;
+        }
+    };
+    static Lib& lib() { static Lib l; return l; }
+    void log_once(const std::string& m) {
+        if (!warned_) avm_logf("%s", m.c_str());
+        warned_ = true;
+    }
+    std::string uri_;
+    void* ctx_ = nullptr;
+    void* dev_ = nullptr;
+    bool warned_ = false;
+};
+}  // namespace ptt
+
 class TxSink {
 public:
     double rate = 0;
@@ -934,9 +1026,25 @@ public:
         }
         if (cfg_.driver == "lime") LimeRfe::detach(dev_, true);
         close_device(dev_);     // (the shared radio: closed once its last user is done)
+        // PTT dropped once RF has stopped: the stream shut down, the radio's own buffer
+        // given time to empty (a relay or amplifier never switched under RF)
+        if (ptt_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            ptt_ = false;
+            key(false);
+        }
     }
 
 private:
+    bool ptt_ = false;
+    std::unique_ptr<ptt::PlutoGpo> pluto_gpo_;
+    // the Pi's pin 40 and, a Pluto, its GPO0
+    void key(bool on) {
+        ptt::set(on);
+        if (cfg_.driver != "pluto") return;
+        if (!pluto_gpo_) pluto_gpo_.reset(new ptt::PlutoGpo(cfg_.uri));
+        pluto_gpo_->set(on);
+    }
     void run() {
         std::vector<std::complex<float>> silence((size_t)std::max(1.0, rate * 0.002));
         while (true) {
@@ -953,6 +1061,9 @@ private:
                 }
             }
             write_all(w.empty() ? silence : w);
+            // PTT once the first waveform has gone to the radio: after its calibration
+            // (a LimeSDR's tones) and the stream's start-up, with RF really coming out
+            if (!w.empty() && !ptt_ && !failed_ && !abort_) { ptt_ = true; key(true); }
             std::lock_guard<std::mutex> g(mu_);
             busy_ = false;
             done_.notify_all();

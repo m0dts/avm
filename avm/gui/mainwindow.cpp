@@ -1,3 +1,4 @@
+#include <memory>
 #include "mainwindow.h"
 
 #include <QApplication>
@@ -51,15 +52,23 @@ MainWindow::MainWindow(bool demo, QWidget* parent) : QWidget(parent) {
     notice->setFocusPolicy(Qt::NoFocus);
     notice->setFixedWidth(ui.px(80));    // room for "⚠ 99"
     notice->setToolTip("Errors and warnings");
-    connect(notice, &QPushButton::clicked, this, [this] { NoticesDialog(this).exec(); });
-    // red with its count while there's something to read, plain otherwise
-    auto showCount = [notice] {
+    // red while there's something not yet looked at; once viewed, plain (the count kept)
+    auto seen = std::make_shared<int>(0);
+    auto showCount = [notice, seen] {
         int n = Notices::get().count();
+        if (*seen > n) *seen = n;      // (cleared)
         notice->setText(n ? QString::fromUtf8("⚠ %1").arg(n) : QString::fromUtf8("⚠"));
-        notice->setStyleSheet(n ? QString("background: %1; color: white; padding: 0px;").arg(STOP)
+        notice->setStyleSheet(n > *seen ? QString("background: %1; color: white; padding: 0px;").arg(STOP)
                                 : QString("background: %1; color: %2; padding: 0px;").arg(BUTTON, TEXT_DIM));
     };
     connect(&Notices::get(), &Notices::changed, notice, showCount);
+    connect(notice, &QPushButton::clicked, this, [this, seen, showCount] {
+        *seen = Notices::get().count();
+        showCount();
+        NoticesDialog(this).exec();
+        *seen = Notices::get().count();     // (and any that came while it was open)
+        showCount();
+    });
     showCount();
     bar->addWidget(notice);
     // a newer AVM on GitHub (updater.h): shown once found

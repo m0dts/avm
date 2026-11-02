@@ -367,6 +367,29 @@ connected isn't offered. AVM checks the chosen radio is there before TX or RX
 starts, and pauses TX/RX if a USB radio disappears, carrying on when it's
 back.
 
+### PTT outputs
+
+AVM keys an amplifier, sequencer or antenna relay from two PTT outputs. Neither
+needs any setting.
+
+| Output | When | Level |
+|---|---|---|
+| **Raspberry Pi pin 40** (BCM GPIO 21) | On a Raspberry Pi, with any TX radio. The same pin as Portsdown 4's PTT, so its wiring works as is. | High (3.3 V) on TX |
+| **Pluto GPO0** | When the TX radio is a Pluto, on a Pi or on Windows. The output F5OEO's firmware uses; drives a G0MJW PTT board. | High on TX |
+
+PTT follows the RF itself, not the TX button:
+
+- **On** only once real RF is coming out: after the radio has opened, finished
+  its calibration and started streaming. A LimeSDR sends calibration tones and
+  a spike as it starts; these are over before PTT goes high, so they never
+  reach the amplifier.
+- **Off** only after RF has stopped: the TX stream is shut down and the radio
+  closed, then a further 100 ms, so a relay never switches with RF on it.
+
+On a Pi, AVM also sets pin 40 low when it starts, in case it stopped while
+transmitting. A Pluto drives its GPO pins high while it boots, so anything
+keyed from GPO0 is keyed until the Pluto has finished starting.
+
 ## Use
 
 1. Plug in your radio and start AVM.

@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QProcess>
 #include <QLibrary>
 #include <cstdio>
 #include <future>
@@ -1287,6 +1288,11 @@ void RxPage::toggleBigVideo() {
 // ---------------------------------------------------------------- TX page
 TxPage::TxPage(QWidget* parent) : QWidget(parent) {
     link_.source = "TX";
+    // the PTT pin (Pi GPIO 21) low at start: a crash while transmitting left it high
+#ifdef __linux__
+    if (QFile::exists("/usr/bin/pinctrl") && QFile::exists("/proc/device-tree/model"))
+        QProcess::execute("/usr/bin/pinctrl", {"set", "21", "op", "dl"});
+#endif
     QSettings& s = settings();
     auto* root = new QHBoxLayout(this);
     root->setContentsMargins(ui.px(8), ui.px(4), ui.px(8), ui.px(8));
