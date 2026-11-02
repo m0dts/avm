@@ -1,6 +1,7 @@
 #include "pages.h"
 
 #include "capture.h"
+#include "updater.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -2013,7 +2014,10 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     // About
     auto* about = new QWidget;
     auto* al = new QVBoxLayout(about);
-    auto* at = new QLabel(QString("AVM GUI (C++, Qt %1)\n%2 layout").arg(qVersion(), ui.touch ? "Touch" : "Desktop"));
+    const QString ver = Updater::localVersion();
+    auto* at = new QLabel(QString("AVM %1\nGUI (C++, Qt %2), %3 layout")
+                              .arg(ver.isEmpty() ? QString("(version unknown)") : "v" + ver, qVersion(),
+                                   ui.touch ? "Touch" : "Desktop"));
     at->setObjectName("value");
     al->addWidget(at);
     auto* ab = new QLabel(
