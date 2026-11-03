@@ -373,7 +373,10 @@ void MediaTx::addPcm(const short* s, int count) {
 void MediaTx::fillStreamGap() {
     const double now = mono();
     const bool v = cfg_.video == "stream", a = cfg_.audio == "stream";
-    const double vgap = now - stream_vlast_, agap = now - stream_alast_;
+    // the picture's own pace counts: at 1 fps a second between frames isn't a break
+    // (taken as one, held copies filled the gaps and the real pictures queued behind them)
+    const double vlimit = std::max(STREAM_GAP_S, 2.5 / std::max(cfg_.fps, 0.1));
+    const double vgap = (now - stream_vlast_) * STREAM_GAP_S / vlimit, agap = now - stream_alast_;
     double gap = v && a ? std::max(vgap, agap) : v ? vgap : agap;     // (either missing: a break)
     if (gap < STREAM_GAP_S) {
         if (stream_gap_) log_("[stream] back");
@@ -385,7 +388,7 @@ void MediaTx::fillStreamGap() {
         stream_gap_ = true;
         log_(have_pic_ ? "[stream] lost -- holding the picture, sending silence" : "[stream] nothing yet -- sending silence");
     }
-    if (!stream_lost_ && cfg_.stream_lost_s > 0 && std::min(v ? vgap : 1e9, a ? agap : 1e9) > cfg_.stream_lost_s) {
+    if (!stream_lost_ && cfg_.stream_lost_s > 0 && std::min(v ? now - stream_vlast_ : 1e9, a ? agap : 1e9) > cfg_.stream_lost_s) {
         stream_lost_ = true;
         char b[160];
         snprintf(b, sizeof b, "ERROR: the stream stopped (nothing for %.0f s) -- TX stopped", cfg_.stream_lost_s);
