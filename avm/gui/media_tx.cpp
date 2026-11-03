@@ -184,10 +184,10 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
             // CBR, complexity 10, 20 ms frames. The test tone from 10 kbit/s in the
             // low-delay mode (the music coder alone: the default's switching between
             // coders around 12-16 kbit/s broke up a steady tone).
-            // Speech (Config, TX media): the VoIP tuning and the signal flagged as voice --
+            // Otherwise speech: the VoIP tuning and the signal flagged as voice --
             // what holds speech together at the slow links' 4-6 kbit/s
             bool lowdelay = c.audio == "test" && c.opus_kbps >= 10;
-            bool speech = c.opus_speech && c.audio != "test";
+            bool speech = c.audio != "test";
             int err = 0;
             opus_ = opus_encoder_create(48000, 1, lowdelay ? OPUS_APPLICATION_RESTRICTED_LOWDELAY
                                                   : speech ? OPUS_APPLICATION_VOIP : OPUS_APPLICATION_AUDIO, &err);

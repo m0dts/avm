@@ -1746,7 +1746,6 @@ void TxPage::doToggleRun() {
         if (lp.ok && !lp.audio) c.audio = "off";                       // video only (Config: Content)
         c.audio_codec = s.value("tx/audio_codec", "codec2").toString().toStdString();
         c.opus_kbps = s.value("tx/opus_kbps", 10).toDouble();
-        c.opus_speech = s.value("tx/opus_speech", true).toBool();
         c.video_device = s.value("tx/video_device").toString().toStdString();
         c.image_path = s.value("tx/image").toString().toStdString();
         if (c.video == "image" && c.image_path.empty()) {
@@ -1923,14 +1922,6 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     mf->addRow(rowLabel("Video"), mono);
     connect(mono, &Segmented::changed, this, [this](const QString& v) {
         settings().setValue("tx/mono", v == "bw");
-        emit txSettingChanged();
-    });
-    // Opus: tuned for a voice (the default) or for music / general sound
-    auto* opusFor = new Segmented({{"speech", "Speech"}, {"music", "Music"}},
-                                  s.value("tx/opus_speech", true).toBool() ? "speech" : "music");
-    mf->addRow(rowLabel("Opus"), opusFor);
-    connect(opusFor, &Segmented::changed, this, [this](const QString& v) {
-        settings().setValue("tx/opus_speech", v == "speech");
         emit txSettingChanged();
     });
     // the automatic plan's picture on links up to 20 kHz (link_plan.h)
