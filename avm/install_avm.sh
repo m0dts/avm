@@ -8,11 +8,10 @@
 #
 #   bash install_avm.sh --update     # also fetch the latest AVM from GitHub
 #   bash install_avm.sh --check      # only report what's there / missing
-#   bash install_avm.sh --yes        # don't ask before installing
+#   bash install_avm.sh --yes        # no questions (e.g. a licence to accept)
 #   (AVM_INSTALL_DIR=/some/dir to put AVM elsewhere than ~/avm)
 #
-# It first surveys the machine (the --check report: what's already there,
-# what it would install or change) and asks before doing anything.
+# It installs straight away; --check first to see what it would install or change.
 #
 # What it does (each step is skipped if already done; safe to re-run):
 #   0. AVM itself: from GitHub, unless this script sits in / beside an AVM
@@ -85,21 +84,6 @@ if [ $CHECK_ONLY = 0 ]; then
     fi
 fi
 
-# Look before touching anything: run this script's own --check survey, show
-# it, and ask. (Skipped with --yes, or when this script isn't a file, e.g.
-# piped into bash -- there's nothing to re-run then.)
-if [ $CHECK_ONLY = 0 ] && [ $ASSUME_YES = 0 ] && [ -n "$SCRIPT_DIR" ]; then
-    printf '\033[1mAVM installer: checking this machine first (nothing is changed yet)...\033[0m\n'
-    bash "${BASH_SOURCE[0]}" --check $([ $UPDATE = 1 ] && echo --update) || exit 1
-    printf '\n\033[1mInstall / change what is listed above? [y/N] \033[0m'
-    ans=""
-    { read -r ans </dev/tty; } 2>/dev/null || true
-    case "$ans" in
-        y|Y|yes|YES) echo "Installing (log: $LOG)" ;;
-        *) echo "Nothing changed."; exit 0 ;;
-    esac
-fi
-
 # ---------------------------------------------------------------- platform
 [ -r /etc/os-release ] || die "No /etc/os-release: unsupported system."
 . /etc/os-release
@@ -128,6 +112,32 @@ if [ $CHECK_ONLY = 0 ] && ! { command -v sudo >/dev/null && { sudo -n true 2>/de
      su -c 'apt-get install -y sudo && usermod -aG sudo $USER'
    then log out and back in, and run this installer again."
 fi
+# sudo wants a password: offered once, a sudoers rule so AVM's Update button (and this
+# installer) needn't ask again -- as Raspberry Pi OS's own first user has. Remove with
+# sudo rm /etc/sudoers.d/avm
+SUDOERS=/etc/sudoers.d/avm
+# (asked unless sudo's own list has a NOPASSWD: ALL rule -- "sudo -n true" passes for a
+# while after any sudo, and /etc/sudoers.d isn't readable to check for the file)
+if [ $CHECK_ONLY = 0 ] && ! sudo -n -l 2>/dev/null | grep -q 'NOPASSWD: ALL' && [ -r /dev/tty ]; then
+    echo
+    echo "Let AVM update without asking for your password? This lets any program you run"
+    printf 'use sudo without one, as on a stock Raspberry Pi. (y/n) [n] '
+    ans=""
+    { read -r ans </dev/tty; } 2>/dev/null || true
+    case "$ans" in
+        [yY]*)
+            RULE="$USER ALL=(ALL) NOPASSWD: ALL"
+            TMPR=$(mktemp)
+            echo "$RULE" > "$TMPR"
+            if sudo visudo -cf "$TMPR" >/dev/null && sudo install -m 0440 -o root -g root "$TMPR" "$SUDOERS"; then
+                echo "added $SUDOERS (remove it to be asked again: sudo rm $SUDOERS)"
+            else
+                warn "couldn't add $SUDOERS -- updates will ask for your password"
+            fi
+            rm -f "$TMPR" ;;
+        *) echo "updates will ask for your password" ;;
+    esac
+fi
 
 # ---------------------------------------------------------------- 0. AVM from GitHub
 say "0. AVM program files"
@@ -137,7 +147,16 @@ elif [ $CHECK_ONLY = 1 ]; then
     echo "would download github.com/$AVM_REPO ($AVM_BRANCH) into $AVM_DIR"
     plan "AVM program files (from GitHub)" "$AVM_DIR" 3
 else
-    URL="${AVM_URL:-https://github.com/$AVM_REPO/archive/refs/heads/$AVM_BRANCH.tar.gz}"
+    # the branch's latest commit, downloaded by its id: GitHub's branch archive
+    # (refs/heads/...) can lag a push by many minutes; a commit's can't (else the branch's)
+    API="https://api.github.com/repos/$AVM_REPO/commits/$AVM_BRANCH"
+    SHA="$( (wget -q -O - --header='Accept: application/vnd.github.sha' "$API" 2>/dev/null ||
+             curl -fsSL -H 'Accept: application/vnd.github.sha' "$API" 2>/dev/null) | head -c 40)"
+    case "$SHA" in
+        *[!0-9a-f]* | "") REF="refs/heads/$AVM_BRANCH" ;;
+        *) [ ${#SHA} = 40 ] && REF="$SHA" || REF="refs/heads/$AVM_BRANCH" ;;
+    esac
+    URL="${AVM_URL:-https://github.com/$AVM_REPO/archive/$REF.tar.gz}"
     TMP="$(mktemp -d)"
     echo "downloading $URL"
     if command -v wget >/dev/null; then
