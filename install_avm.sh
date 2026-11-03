@@ -147,7 +147,16 @@ elif [ $CHECK_ONLY = 1 ]; then
     echo "would download github.com/$AVM_REPO ($AVM_BRANCH) into $AVM_DIR"
     plan "AVM program files (from GitHub)" "$AVM_DIR" 3
 else
-    URL="${AVM_URL:-https://github.com/$AVM_REPO/archive/refs/heads/$AVM_BRANCH.tar.gz}"
+    # the branch's latest commit, downloaded by its id: GitHub's branch archive
+    # (refs/heads/...) can lag a push by many minutes; a commit's can't (else the branch's)
+    API="https://api.github.com/repos/$AVM_REPO/commits/$AVM_BRANCH"
+    SHA="$( (wget -q -O - --header='Accept: application/vnd.github.sha' "$API" 2>/dev/null ||
+             curl -fsSL -H 'Accept: application/vnd.github.sha' "$API" 2>/dev/null) | head -c 40)"
+    case "$SHA" in
+        *[!0-9a-f]* | "") REF="refs/heads/$AVM_BRANCH" ;;
+        *) [ ${#SHA} = 40 ] && REF="$SHA" || REF="refs/heads/$AVM_BRANCH" ;;
+    esac
+    URL="${AVM_URL:-https://github.com/$AVM_REPO/archive/$REF.tar.gz}"
     TMP="$(mktemp -d)"
     echo "downloading $URL"
     if command -v wget >/dev/null; then
