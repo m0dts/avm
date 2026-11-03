@@ -1555,13 +1555,22 @@ void TxPage::refreshInfo() {
     linkInfo_->setStyleSheet(c);
 }
 
+// audio only: Opus whenever the whole link carries it (SH 10 QPSK's 4.7 kbps does),
+// not the shared link's Codec2-below-16-kbps
+QString TxPage::suggestedCodec(const QString& shared) const {
+    if (settings().value("tx/content", "auto").toString() != "audio") return shared;
+    double khz = bw_->value().toDouble();
+    LinkPlan o = planLinkFor(linkBps(), fragmentSize(khz), khz, !callsign().isEmpty(), "opus", 0, 0, 0, "audio");
+    return o.audio_codec == "opus" && o.opus_kbps > 0 ? "opus" : "codec2";
+}
+
 // a new link: the picture and audio it suits (touch_tx_page._changed)
 void TxPage::linkChanged() {
     LinkPlan p = plan();
     if (p.link_kbps > 0) {
         res_->setValue(QString("%1x%2").arg(p.width).arg(p.height));
         fps_->setValue(QString::number(p.fps));
-        audio_->setValue(p.audio_codec);
+        audio_->setValue(suggestedCodec(p.audio_codec));
         settings().setValue("tx/resolution", res_->value());
         settings().setValue("tx/fps", fps_->value());
         settings().setValue("tx/audio_codec", audio_->value());
@@ -1631,7 +1640,16 @@ void TxPage::applyModeType() {
     settings().setValue("tx/bw", bw_->value());
     settings().setValue("tx/mod", mod_->value());
     if (mode_->value() + bw_->value() + mod_->value() != before) linkChanged();
-    else showPlan();     // (Config's Content may have changed)
+    else {      // (Config's Content may have changed: the audio it suits)
+        const QString content = settings().value("tx/content", "auto").toString(), c = suggestedCodec(plan().audio_codec);
+        const bool changed = content != content_;
+        content_ = content;
+        if (changed && content == "audio" && plan().link_kbps > 0 && c != audio_->value()) {
+            audio_->setValue(c);
+            settings().setValue("tx/audio_codec", c);
+        }
+        showPlan();
+    }
 }
 
 QString TxPage::modeSummary() const {

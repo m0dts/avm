@@ -244,6 +244,8 @@ private:
     LinkPlan plan() const;        // what the link suggests (sets the pickers on a link change)
     LinkPlan planFor() const;     // the link with the pickers' choices
     void showPlan();
+    QString content_ = settings().value("tx/content", "auto").toString();   // (Config's Content, as last seen)
+    QString suggestedCodec(const QString& shared) const;   // audio only: Opus if the link carries it
     void linkChanged();           // mode / width / modulation changed: the pickers to the plan's
     Picker *res_, *fps_;
     // a Logitech C920's focus (touch_tx_page's Focus row): shown for that camera
