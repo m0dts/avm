@@ -722,9 +722,13 @@ AVM_TX_API void avm_tx_end_input(void* h) {
 
 AVM_TX_API void avm_tx_set_gain(void* h, double db) {
     txe::Engine* e = (txe::Engine*)h;
-    if (!e || !e->radio) return;
+    if (!e || (!e->radio && !e->hradio_)) return;
     txe::SinkScope scope(e->sink);
-    e->radio->set_gain(db);
+    if (e->radio) e->radio->set_gain(db);
+    else {      // an HPSDR radio (Radioberry, Hermes-Lite 2): its drive level, live
+        e->hradio_->set_gain(db);
+        avm_logf("HPSDR TX drive %d/255\n", e->hradio_->drive());
+    }
 }
 
 AVM_TX_API int avm_tx_running(void* h) { return h && ((txe::Engine*)h)->running ? 1 : 0; }

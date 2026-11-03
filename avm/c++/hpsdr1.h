@@ -550,6 +550,7 @@ public:
         return true;
     }
 
+    int drive() const { return drive_; }
     void set_gain(double db) {
         double a = std::pow(10.0, std::min(0.0, db) / 20.0);
         drive_ = (int)std::lround(std::max(0.0, std::min(255.0, 255.0 * a)));
