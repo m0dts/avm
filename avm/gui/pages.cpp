@@ -481,13 +481,14 @@ void enforceModeLimits(Segmented* mode, Segmented* bw, Segmented* mod) {
                                                 : QStringList{"10", "20", "40", "80", "160", "250"};
     QStringList mods = m == "S" ? QStringList{"qpsk", "8psk"} : m == "SH" ? QStringList{"qpsk", "8psk", "16psk"}
                                                                         : QStringList{"qpsk", "16qam", "32qam"};
+    // only what the mode has is shown (within the mode type's set: Config's HF / VU / Sat)
+    const TypeSet t = typeSet(settings().value("mode_type", "hf").toString());
     for (const QString& w : {"10", "20", "40", "80", "160", "250"})
-        if (auto* b = bw->button(w)) b->setEnabled(widths.contains(w));
+        if (auto* b = bw->button(w)) b->setVisible(widths.contains(w) && t.widths.contains(w));
     if (!widths.contains(bw->value())) {     // the nearest width the mode has
         QString best = widths[0];
         for (const QString& w : widths)
-            if (bw->button(w) && bw->button(w)->isVisibleTo(bw) &&
-                std::fabs(w.toDouble() - bw->value().toDouble()) < std::fabs(best.toDouble() - bw->value().toDouble()))
+            if (std::fabs(w.toDouble() - bw->value().toDouble()) < std::fabs(best.toDouble() - bw->value().toDouble()))
                 best = w;
         bw->setValue(best);
     }
@@ -495,7 +496,7 @@ void enforceModeLimits(Segmented* mode, Segmented* bw, Segmented* mod) {
     QSettings& s = settings();
     if (s.value("experimental", false).toBool() && s.value("duplex", "off").toString() != "off") mods = {"qpsk"};
     for (const QString& v : {"qpsk", "8psk", "16psk", "16qam", "32qam"})
-        if (auto* b = mod->button(v)) b->setEnabled(mods.contains(v));
+        if (auto* b = mod->button(v)) b->setVisible(mods.contains(v) && t.mods.contains(v));
     if (!mods.contains(mod->value())) mod->setValue(mods[0]);
 }
 
