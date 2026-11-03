@@ -319,7 +319,10 @@ private:
                 c[0] = 0x14;
                 c[4] = hl2() ? (unsigned char)(0x40 | (lna() + 12)) : (unsigned char)(0x20 | attenuation());
                 break;
-            default: c[0] = 0x12; c[1] = (unsigned char)drive_.load(); break;          // TX drive; PA off
+            default:                                                                  // TX drive; PA off
+                c[0] = 0x12; c[1] = (unsigned char)drive_.load();
+                if (hl2()) c[2] = 0x04;     // (as piHPSDR with its PA off: the T/R relay held at RX, the output on RF1)
+                break;
             }
             reg_ = (reg_ + 1) % 5;
             if (mox) c[0] |= 0x01;
@@ -534,7 +537,7 @@ public:
         set_gain(gain_db);
         radio_ = Radio::get(uri, &error);
         if (!radio_) return false;
-        radio_->set_drive(drive_);
+        set_gain(gain_db_);     // (again, now the board is known)
         radio_->attach_tx(freq_hz);
         attached_ = true;
         long long p0 = radio_->packets();
@@ -551,14 +554,31 @@ public:
     }
 
     int drive() const { return drive_; }
+    // the gain: a Hermes-Lite 2's (a Radioberry's too: it answers as one) drive register
+    // is only a 0 to -7.5 dB attenuator in 0.5 dB steps (its top 4 bits), so as piHPSDR
+    // the rest is the IQ scaled; other boards: the drive level, linear in amplitude
     void set_gain(double db) {
-        double a = std::pow(10.0, std::min(0.0, db) / 20.0);
-        drive_ = (int)std::lround(std::max(0.0, std::min(255.0, 255.0 * a)));
+        db = std::min(0.0, db);
+        gain_db_ = db;
+        if (radio_ && radio_->hl2()) {
+            double att = std::max(-7.5, std::ceil(db * 2 - 1e-9) / 2);
+            drive_ = (int)std::lround((15 + att * 2) * 16);
+            scale_ = (float)std::pow(10.0, (db - att) / 20.0);
+        } else {
+            drive_ = (int)std::lround(std::max(0.0, std::min(255.0, 255.0 * std::pow(10.0, db / 20.0))));
+            scale_ = 1.0f;
+        }
         if (radio_) radio_->set_drive(drive_);
     }
 
     // queued for the radio; blocks while more than TX_LEAD_S is waiting
     void write(const std::complex<float>* x, size_t n) {
+        const float g = scale_.load();
+        if (g != 1.0f) {
+            scaled_.resize(n);
+            for (size_t i = 0; i < n; ++i) scaled_[i] = x[i] * g;
+            x = scaled_.data();
+        }
         for (size_t i = 0; i < n && !closed_ && radio_->running();) {
             size_t k = radio_->tx_push(x + i, n - i);
             i += k;
@@ -590,6 +610,9 @@ public:
 private:
     std::shared_ptr<Radio> radio_;
     int drive_ = 0;
+    double gain_db_ = 0;
+    std::atomic<float> scale_{1.0f};      // (a Hermes-Lite 2 below -7.5 dB)
+    std::vector<std::complex<float>> scaled_;
     bool closed_ = false, attached_ = false;
     long long u0_ = 0;
     std::unique_ptr<sdr::FileWatcher> watch_;
