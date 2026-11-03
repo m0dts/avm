@@ -614,10 +614,25 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     offset_->sign = true;      // (then the saved value: drawn with its sign)
     offset_->setValue(s.value("rx/offset_khz", 0).toDouble());
     spectrum_->setScale(true, 0);    // the spectrum's scale: always Auto (fitted to noise and peak)
+    // Auto: the receiver finds the far end's modulation among the mode's (A-D, VU) when
+    // frames fail as a wrong one does; the Mod buttons follow it (takes effect at the next RX start)
+    auto* modRow = new QWidget;
+    modRow->setObjectName("seg");
+    auto* ml = new QHBoxLayout(modRow);
+    ml->setContentsMargins(0, 0, 0, 0);
+    ml->setSpacing(ui.px(4));
+    ml->addWidget(mod_, 1);
+    auto* modAuto = new QPushButton("Auto");
+    modAuto->setCheckable(true);
+    modAuto->setFocusPolicy(Qt::NoFocus);
+    modAuto->setChecked(s.value("rx/mod_auto", false).toBool());
+    modAuto->setToolTip("Find the far end's modulation (modes A-D and VU)");
+    ml->addWidget(modAuto);
+    connect(modAuto, &QPushButton::toggled, this, [](bool on) { settings().setValue("rx/mod_auto", on); });
     int r = 0;
     for (auto p : QList<QPair<QString, QWidget*>>{{"Freq", radioRow(freq_, radio_pick_, port_)}, {"Offset", offset_}, {"PPM", ppm_},
                                                    {"Gain", gain_},
-                                                   {"Mode", mode_}, {"kHz", bw_}, {"Mod", mod_}}) {
+                                                   {"Mode", mode_}, {"kHz", bw_}, {"Mod", modRow}}) {
         grid->addWidget(p.second == ppm_ ? ppmLabel_ : rowLabel(p.first), r, 0);
         grid->addWidget(p.second, r++, 1);
     }
@@ -863,7 +878,7 @@ QStringList RxPage::modemArgs() const {
         if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) f.write(settings().value("rx_gain", 30).toByteArray());
     }
     writeRxOffset(offset_->value());
-    return {"--rx-gain", settings().value("rx_gain", 30).toString(), "--gain-file", rxGainFile(),
+    QStringList a = {"--rx-gain", settings().value("rx_gain", 30).toString(), "--gain-file", rxGainFile(),
             "--freq-offset-file", rxOffsetFile(), "--mode", mode_->value(),
             "--occupancy", bw_->value(), "--modulation", mod_->value(), "--fec", "ldpc",
             "--fragment-size", QString::number(fragmentSize(bw_->value().toDouble())), "--spectrum-stderr",
@@ -871,6 +886,8 @@ QStringList RxPage::modemArgs() const {
             "--no-output-pacing",
             // the spectrum 1.5x the signal's width, from the raw samples (noise either side)
             "--spectrum-span-hz", QString::number(1.5 * bw_->value().toDouble() * 1000, 'f', 0)};
+    if (settings().value("rx/mod_auto", false).toBool()) a << "--auto-modulation";
+    return a;
 }
 
 // The receiver on the page's radio, opened by the receiver itself (SoapySDR,
@@ -1117,6 +1134,13 @@ void RxPage::onLine(const QString& t) {
         return;
     }
     guiLog("RX", t);
+    // the receiver found another modulation (Auto): the Mod buttons follow it
+    static const QRegularExpression autoMod(R"(^Auto modulation: now (\S+))");
+    if (auto am = autoMod.match(t); am.hasMatch()) {
+        mod_->setValue(am.captured(1));
+        settings().setValue("rx/mod", am.captured(1));
+        status_->setText("Modulation found: " + am.captured(1).toUpper());
+    }
     static const QRegularExpression frag(R"(^Fragment seq=(\d+): (OK|CRC MISMATCH)\s+CFO=(\S+)\s+BER=(\S+)\s+EVM=(\S+))");
     static const QRegularExpression station(R"(callsign[:=]\s*(\S+))", QRegularExpression::CaseInsensitiveOption);
     qint64 now = clock_.elapsed();

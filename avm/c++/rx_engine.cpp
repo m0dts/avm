@@ -544,6 +544,7 @@ struct Args {
     std::string gain_file, freq_offset_file, ppm_file;
     long long test_step = 0;
     bool assume_prior = true;
+    bool auto_modulation = false;   // --auto-modulation: an OFDM mode's other modulations tried when frames fail as a wrong one does
     int sync_fast_symbols = 6;
     bool wait_eof = false;
     // --tdd-cycle-s: same-channel duplex (hf_ofdm_rx.py _tdd_*)
@@ -579,10 +580,14 @@ struct SyncCache {
     Opt prior_k;
 };
 
+const double WRONG_MOD_BER = 0.2;     // a wrong modulation decodes at ~0.3 (one bit in three)
+const int WRONG_MOD_FRAMES = 3;
+
 struct State {
     long long nss = 0;               // native_search_start (the mode's rate)
     Opt last_cfo;
     int consecutive_failures = 0;
+    int wrong_mod = 0;               // frames in a row: header good, payload hopeless (a wrong modulation's mark)
     bool sc_expect_next = false;
     double last_ok_time = -1;
     // AFC
@@ -828,6 +833,37 @@ struct Receiver {
                 decode_frame(c, after.data() + off, (long long)after.size() - off, max_wait, probe);
                 if (probe.has_payload && (probe.crc_ok || std::isnan(res.ber) || (!std::isnan(probe.ber) && probe.ber < res.ber)))
                     res = probe;
+            }
+        }
+        // auto modulation: the header (always QPSK) decoded but the payload is hopeless --
+        // the far end sending another of the mode's modulations. After a few such frames in a
+        // row, each other one tried on this frame; the first with a good CRC is kept
+        if (a.auto_modulation && !tdd_) {
+            if (res.crc_ok) st.wrong_mod = 0;
+            else if (!std::isnan(res.ber) && res.ber > WRONG_MOD_BER) ++st.wrong_mod;
+            if (!res.crc_ok && st.wrong_mod >= WRONG_MOD_FRAMES) {
+                const int was = md.c->bpc;
+                for (int b : {2, 4, 5}) {
+                    if (b == was) continue;
+                    md.c->bpc = b;
+                    Result t;
+                    long long s2;
+                    decode_with(extra_k, s2, t);
+                    if (t.has_payload && t.crc_ok) {
+                        res = t;
+                        start_index = s2;
+                        break;
+                    }
+                }
+                if (res.crc_ok) {
+                    const char* name = md.c->bpc == 2 ? "qpsk" : md.c->bpc == 4 ? "16qam" : "32qam";
+                    avm_logf("Auto modulation: now %s (was %s)\n", name, md.m.modulation.c_str());
+                    md.m.bpc = md.c->bpc;
+                    md.m.modulation = name;
+                    st.wrong_mod = 0;
+                } else {
+                    md.c->bpc = was;
+                }
             }
         }
         long long n_symbols = md.frame_symbol_count((long long)res.payload.size());
@@ -1653,6 +1689,7 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         if (k == "--mode") a.mode = val();
         else if (k == "--occupancy") a.occupancy = std::atof(val().c_str());
         else if (k == "--modulation") a.modulation = val();
+        else if (k == "--auto-modulation") a.auto_modulation = true;
         else if (k == "--fec") a.fec = val();
         else if (k == "--sample-rate") a.sample_rate = std::atof(val().c_str());
         else if (k == "--fragment-size") a.fragment_size = std::atoi(val().c_str());
