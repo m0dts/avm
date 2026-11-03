@@ -44,6 +44,9 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <cerrno>
 #endif
 
 namespace sdr {
@@ -229,117 +232,152 @@ inline void close_device(void* dev) {
     if (A.unmake) A.unmake(dev);     // (not from the pool)
 }
 
-// ---- LimeRFE: the LimeSDR's RF front end, on its expansion header. Driven as
-// LimeSuite's limeRFE_cmd.cpp does "via SDR": I2C to the board's controller
-// (address 0x51), bit-banged on the LimeSDR's GPIO 6 (SCL) and 7 (SDA) -- here
-// through SoapySDR's GPIO calls on the radio already open (LimeSuite's own handle
-// would open it a second time). The band from the frequency; its mode following
-// this process's receiver and transmitter on that radio.
+// ---- LimeRFE: Lime's RF front end. Driven as LimeSuite's limeRFE_cmd.cpp does,
+// over one of its two links:
+//   USB: its own micro-USB socket, a 9600 baud serial port (8N1) -- with any
+//        radio (a Pluto too). Opening it resets the board's controller, so the
+//        port is opened once and kept, a one-byte hello (0x00 echoed) first.
+//   I2C: the LimeSDR's expansion header (address 0x51), bit-banged on its GPIO 6
+//        (SCL) and 7 (SDA) through SoapySDR's GPIO calls on the radio already
+//        open (LimeSuite's own handle would open it a second time).
+// Either way the same commands: CONFIG (16 bytes: channels, ports, mode, notch,
+// attenuation), MODE (2 bytes), each answered with the same length.
+// The band from the frequency; ports per the LimeRFE 1v31 quick start (Table 3):
+//   TX: HF (to 30 MHz) and 50-70 MHz only from J5; others J3 (TX/RX) or J4 (TX)
+//   RX: J3, or J5 for HF, 50-70, 144, 220, 430 MHz and wideband to 1 GHz
+//   RX and TX at once only with them on different ports.
 struct RfeConfig {
     bool on = false;
-    int tx_port = 1;        // 1: J3 (TX/RX), 2: J4 (TX only: RX and TX at once possible)
-    bool notch = false;     // the HAM 144/430 MHz FM broadcast notch
+    int tx_port = 1;        // 1: J3 (TX/RX), 2: J4 (TX only) -- HF and 50-70 MHz: J5 always
+    int rx_port = 1;        // 1: J3, 3: J5 (where the band allows it)
+    bool notch = false;     // the AM/FM broadcast notch
     int atten_db = 0;       // RX attenuation, 0..14 dB in 2 dB steps
+    std::string serial;     // the USB serial port (/dev/ttyUSB0, COM5); empty: the LimeSDR's I2C
 };
 
-// "PORT,NOTCH,ATTEN" (--lime-rfe 2,0,6)
+// "TXPORT,NOTCH,ATTEN[,RXPORT[,SERIAL]]" (--lime-rfe 2,0,6,3,/dev/ttyUSB0)
 inline RfeConfig parse_rfe(const std::string& s) {
     RfeConfig c;
-    int p = 1, n = 0, a = 0;
-    if (std::sscanf(s.c_str(), "%d,%d,%d", &p, &n, &a) >= 1) {
+    int p = 1, n = 0, a = 0, r = 1;
+    if (std::sscanf(s.c_str(), "%d,%d,%d,%d", &p, &n, &a, &r) >= 1) {
         c.on = true;
         c.tx_port = p == 2 ? 2 : 1;
         c.notch = n != 0;
         c.atten_db = std::max(0, std::min(14, a));
+        c.rx_port = r == 3 ? 3 : 1;
+        size_t k = std::string::npos;
+        for (int i = 0, from = 0; i < 4; ++i) {      // the serial port: after the fourth comma
+            k = s.find(',', from);
+            if (k == std::string::npos) break;
+            from = (int)k + 1;
+        }
+        if (k != std::string::npos) c.serial = s.substr(k + 1);
     }
     return c;
 }
 
 class LimeRfe {
 public:
-    // a receiver (tx false) or transmitter on dev starting at rf_hz / stopping
+    // a receiver (tx false) or transmitter on dev starting at rf_hz / stopping.
+    // Over USB the board is the serial port's, whichever radio; over I2C the LimeSDR's
     static void attach(void* dev, bool tx, double rf_hz, const RfeConfig& c) {
-        if (!c.on || !dev) return;
+        if (!c.on || (!dev && c.serial.empty())) return;
         std::lock_guard<std::mutex> g(mu());
-        State& s = states()[dev];
+        State& s = states()[key(dev, c)];
         s.cfg = c;
+        s.dev = dev;
         (tx ? s.tx : s.rx) = true;
         (tx ? s.cid_tx : s.cid_rx) = channel(rf_hz);
-        update(dev, s);
+        update(s);
     }
-    static void detach(void* dev, bool tx) {
-        if (!dev) return;
+    static void detach(void* dev, bool tx, const RfeConfig& c) {
+        if (!c.on) return;
         std::lock_guard<std::mutex> g(mu());
-        auto it = states().find(dev);
+        auto it = states().find(key(dev, c));
         if (it == states().end()) return;
         (tx ? it->second.tx : it->second.rx) = false;
-        update(dev, it->second);
-        if (!it->second.rx && !it->second.tx) states().erase(it);
+        update(it->second);
+        // (a USB board's state kept: its port stays open, an unchanged config isn't re-sent)
+        if (!it->second.rx && !it->second.tx && it->second.cfg.serial.empty()) states().erase(it);
     }
 
 private:
     enum { MODE_RX = 0, MODE_TX = 1, MODE_NONE = 2, MODE_TXRX = 3 };
-    static const int SCL = 6, SDA = 7, ADDR = 0x51, CMD_MODE = 0xd1, CMD_CONFIG = 0xd2;
+    enum { CID_WB_1000 = 1, CID_WB_4000 = 2, CID_HAM_0030 = 3, CID_HAM_0070 = 4, CID_HAM_0145 = 5, CID_HAM_0220 = 6,
+           CID_HAM_0435 = 7 };
+    static const int SCL = 6, SDA = 7, ADDR = 0x51, CMD_HELLO = 0x00, CMD_MODE = 0xd1, CMD_CONFIG = 0xd2;
     struct State {
         RfeConfig cfg;
+        void* dev = nullptr;
         bool rx = false, tx = false;
         int cid_rx = 0, cid_tx = 0;
-        int sent_rx = -1, sent_tx = -1, sent_mode = -1;
+        int sent_rx = -1, sent_tx = -1, sent_prx = -1, sent_ptx = -1, sent_mode = -1;
+        std::string sent_cfg;
         bool failed = false;
     };
     static std::mutex& mu() { static std::mutex m; return m; }
-    static std::map<void*, State>& states() { static std::map<void*, State> m; return m; }
+    static std::map<std::string, State>& states() { static std::map<std::string, State> m; return m; }
+    static std::string key(void* dev, const RfeConfig& c) {
+        if (!c.serial.empty()) return "usb:" + c.serial;
+        char b[32];
+        std::snprintf(b, sizeof b, "i2c:%p", dev);
+        return b;
+    }
 
     // RFE_CID_*: the HAM bands' filters and amplifiers, else the wideband paths
     static int channel(double hz) {
         const double m = hz / 1e6;
-        if (m <= 30) return 3;                  // HAM_0030 (its own port, J5)
-        if (m >= 50 && m <= 72) return 4;       // HAM_0070
-        if (m >= 144 && m <= 148) return 5;     // HAM_0145
-        if (m >= 219 && m <= 225) return 6;     // HAM_0220
-        if (m >= 420 && m <= 450) return 7;     // HAM_0435
+        if (m <= 30) return CID_HAM_0030;
+        if (m >= 50 && m <= 72) return CID_HAM_0070;
+        if (m >= 144 && m <= 148) return CID_HAM_0145;
+        if (m >= 219 && m <= 225) return CID_HAM_0220;
+        if (m >= 420 && m <= 450) return CID_HAM_0435;
         if (m >= 902 && m <= 928) return 8;     // HAM_0920
         if (m >= 1240 && m <= 1325) return 9;   // HAM_1280
         if (m >= 2300 && m <= 2450) return 10;  // HAM_2400
         if (m >= 3300 && m <= 3500) return 11;  // HAM_3500
-        return m < 1000 ? 1 : 2;                // WB_1000, WB_4000
+        return m < 1000 ? CID_WB_1000 : CID_WB_4000;
     }
+    static bool j5_tx(int cid) { return cid == CID_HAM_0030 || cid == CID_HAM_0070; }
+    static bool j5_rx_ok(int cid) { return cid >= CID_WB_1000 && cid <= CID_HAM_0435 && cid != CID_WB_4000; }
+    static int jack(int port) { return port == 1 ? 3 : port == 2 ? 4 : 5; }
 
-    static void update(void* dev, State& s) {
+    static void update(State& s) {
         if (s.failed) return;
         const int cid_rx = s.rx ? s.cid_rx : s.cid_tx, cid_tx = s.tx ? s.cid_tx : s.cid_rx;
-        const bool hf = cid_rx == 3 || cid_tx == 3;
-        const int port_rx = hf ? 3 : 1, port_tx = hf ? 3 : s.cfg.tx_port;
-        // both at once: TX+RX only with TX on its own port (J4); on one port, TX wins
+        const int port_tx = j5_tx(cid_tx) ? 3 : s.cfg.tx_port;
+        const int port_rx = s.cfg.rx_port == 3 && j5_rx_ok(cid_rx) ? 3 : 1;
+        // both at once: only with RX and TX on different ports; on one port, TX wins
         const int mode = s.rx && s.tx ? (port_tx != port_rx ? MODE_TXRX : MODE_TX)
                          : s.tx ? MODE_TX : s.rx ? MODE_RX : MODE_NONE;
-        Bus b(dev);
-        if (!b.ok) {
-            avm_logf("LimeRFE: this radio has no GPIO control through SoapySDR -- LimeRFE not set\n");
+        std::unique_ptr<Link> L(s.cfg.serial.empty() ? (Link*)new I2c(s.dev) : (Link*)new Usb(s.cfg.serial));
+        if (!L->ok()) {
+            avm_logf("LimeRFE: %s -- LimeRFE not set\n", L->error().c_str());
             s.failed = true;
             return;
         }
         uint8_t r[16] = {0};
-        if (cid_rx != s.sent_rx || cid_tx != s.sent_tx) {
+        char cfg[64];
+        std::snprintf(cfg, sizeof cfg, "%d,%d,%d,%d,%d,%d", cid_rx, cid_tx, port_rx, port_tx, s.cfg.notch, s.cfg.atten_db);
+        if (cfg != s.sent_cfg) {
             uint8_t c[16] = {(uint8_t)CMD_CONFIG, (uint8_t)cid_rx, (uint8_t)cid_tx, (uint8_t)port_rx, (uint8_t)port_tx,
                              (uint8_t)mode, (uint8_t)(s.cfg.notch ? 1 : 0), (uint8_t)(s.cfg.atten_db / 2), 0, 0};
-            if (!b.command(c, 16, r)) {
-                avm_logf("LimeRFE: no answer on the LimeSDR's I2C (GPIO 6/7) -- is it fitted? Not set\n");
+            if (!L->command(c, 16, r)) {
+                avm_logf("LimeRFE: no answer (%s) -- not set\n", L->name().c_str());
                 s.failed = true;
                 return;
             }
-            s.sent_rx = cid_rx;
-            s.sent_tx = cid_tx;
+            s.sent_cfg = cfg;
             s.sent_mode = mode;
-            avm_logf("LimeRFE: band RX %d / TX %d, ports J%d / J%d, mode %s, notch %s, RX atten %d dB (status %d)\n",
-                     cid_rx, cid_tx, port_rx == 1 ? 3 : port_rx == 2 ? 4 : 5, port_tx == 1 ? 3 : port_tx == 2 ? 4 : 5,
-                     mode_name(mode), s.cfg.notch ? "on" : "off", s.cfg.atten_db, r[1]);
+            avm_logf("LimeRFE (%s): band RX %d / TX %d, ports RX J%d / TX J%d, mode %s, notch %s, RX atten %d dB (status %d)\n",
+                     L->name().c_str(), cid_rx, cid_tx, jack(port_rx), jack(port_tx), mode_name(mode),
+                     s.cfg.notch ? "on" : "off", s.cfg.atten_db, r[1]);
             return;
         }
         if (mode == s.sent_mode) return;
         uint8_t c[2] = {(uint8_t)CMD_MODE, (uint8_t)mode};
-        if (!b.command(c, 2, r)) {
-            avm_logf("LimeRFE: no answer setting the mode\n");
+        if (!L->command(c, 2, r)) {
+            avm_logf("LimeRFE: no answer setting the mode (%s)\n", L->name().c_str());
             return;
         }
         s.sent_mode = mode;
@@ -349,18 +387,158 @@ private:
         return m == MODE_RX ? "RX" : m == MODE_TX ? "TX" : m == MODE_TXRX ? "TX+RX" : "off";
     }
 
-    // I2C on two GPIO lines, open-drain style: a 1 released (an input, pulled up), a 0 driven low
-    struct Bus {
+    // the link to the board: a command written, its reply (the same length) read back
+    struct Link {
+        virtual ~Link() {}
+        virtual bool ok() const = 0;
+        virtual std::string error() const = 0;
+        virtual std::string name() const = 0;
+        virtual bool command(const uint8_t* c, int n, uint8_t* r) = 0;
+    };
+
+    // USB: the serial port, opened once for the process (an open resets the board)
+    struct Usb : Link {
+        struct Port {
+#if defined(_WIN32)
+            HANDLE h = INVALID_HANDLE_VALUE;
+#else
+            int fd = -1;
+#endif
+            bool ok = false;
+            std::string error;
+        };
+        std::string path;
+        Port* p = nullptr;
+        explicit Usb(const std::string& path_) : path(path_) {
+            static std::map<std::string, Port> ports;
+            Port& q = ports[path];
+            if (!q.ok) {
+                close(q);
+                q = Port();
+                open(q);
+            }
+            p = &q;
+        }
+        bool ok() const override { return p->ok; }
+        std::string error() const override { return p->error; }
+        std::string name() const override { return "USB " + path; }
+
+        void open(Port& q) {
+#if defined(_WIN32)
+            std::string dev = path.rfind("\\\\.\\", 0) == 0 ? path : "\\\\.\\" + path;
+            q.h = CreateFileA(dev.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (q.h == INVALID_HANDLE_VALUE) { q.error = "can't open " + path; return; }
+            DCB d = {};
+            d.DCBlength = sizeof d;
+            GetCommState(q.h, &d);
+            d.BaudRate = CBR_9600;
+            d.ByteSize = 8;
+            d.Parity = NOPARITY;
+            d.StopBits = ONESTOPBIT;
+            d.fBinary = TRUE;
+            d.fDtrControl = DTR_CONTROL_ENABLE;
+            d.fRtsControl = RTS_CONTROL_ENABLE;
+            d.fOutX = d.fInX = FALSE;
+            d.fOutxCtsFlow = d.fOutxDsrFlow = FALSE;
+            SetCommState(q.h, &d);
+            COMMTIMEOUTS t = {};
+            t.ReadIntervalTimeout = 50;
+            t.ReadTotalTimeoutConstant = 200;
+            t.WriteTotalTimeoutConstant = 1000;
+            SetCommTimeouts(q.h, &t);
+#else
+            q.fd = ::open(path.c_str(), O_RDWR | O_NOCTTY);
+            if (q.fd < 0) { q.error = "can't open " + path + " (" + std::strerror(errno) + ")"; return; }
+            termios t = {};
+            tcgetattr(q.fd, &t);
+            cfmakeraw(&t);
+            cfsetispeed(&t, B9600);
+            cfsetospeed(&t, B9600);
+            t.c_cflag &= ~(PARENB | CSTOPB | CSIZE | CRTSCTS);
+            t.c_cflag |= CS8 | CREAD | CLOCAL;
+            t.c_iflag &= ~(IXON | IXOFF | IXANY);
+            t.c_cc[VMIN] = 0;
+            t.c_cc[VTIME] = 2;      // reads return within 0.2 s
+            tcsetattr(q.fd, TCSANOW, &t);
+#endif
+            // the hello: the board's controller restarts on the open, so tried for a few seconds
+            for (int i = 0; i < 15 && !q.ok; ++i) {
+                uint8_t b = CMD_HELLO;
+                purge(q);
+                if (write(q, &b, 1) == 1) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    b = 0xFF;
+                    if (read(q, &b, 1, 400) == 1 && b == CMD_HELLO) q.ok = true;
+                }
+            }
+            if (!q.ok) {
+                q.error = "no answer from a LimeRFE on " + path;
+                close(q);
+            }
+        }
+        static void close(Port& q) {
+#if defined(_WIN32)
+            if (q.h != INVALID_HANDLE_VALUE) CloseHandle(q.h);
+            q.h = INVALID_HANDLE_VALUE;
+#else
+            if (q.fd >= 0) ::close(q.fd);
+            q.fd = -1;
+#endif
+        }
+        static void purge(Port& q) {
+#if defined(_WIN32)
+            PurgeComm(q.h, PURGE_RXCLEAR | PURGE_TXCLEAR);
+#else
+            tcflush(q.fd, TCIOFLUSH);
+#endif
+        }
+        static int write(Port& q, const uint8_t* b, int n) {
+#if defined(_WIN32)
+            DWORD w = 0;
+            return WriteFile(q.h, b, (DWORD)n, &w, nullptr) ? (int)w : -1;
+#else
+            return (int)::write(q.fd, b, (size_t)n);
+#endif
+        }
+        // up to n bytes within timeout_ms
+        static int read(Port& q, uint8_t* b, int n, int timeout_ms) {
+            int got = 0;
+            auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+            while (got < n && std::chrono::steady_clock::now() < end) {
+#if defined(_WIN32)
+                DWORD r = 0;
+                if (!ReadFile(q.h, b + got, (DWORD)(n - got), &r, nullptr)) return got;
+                got += (int)r;
+#else
+                ssize_t r = ::read(q.fd, b + got, (size_t)(n - got));
+                if (r < 0) return got;
+                got += (int)r;
+#endif
+            }
+            return got;
+        }
+        bool command(const uint8_t* c, int n, uint8_t* r) override {
+            purge(*p);
+            if (write(*p, c, n) != n) return false;
+            return read(*p, r, n, 1000) == n;
+        }
+    };
+
+    // I2C on the LimeSDR's GPIO 6/7, open-drain style: a 1 released (an input, pulled up), a 0 driven low
+    struct I2c : Link {
         void* dev;
         unsigned dir = 0, out = 0;
-        bool ok = false;
-        explicit Bus(void* d) : dev(d) {
+        bool ok_ = false;
+        explicit I2c(void* d) : dev(d) {
             Api& A = api();
-            if (!A.writeGPIO || !A.writeGPIODir || !A.readGPIO || !A.readGPIODir) return;
+            if (!d || !A.writeGPIO || !A.writeGPIODir || !A.readGPIO || !A.readGPIODir) return;
             dir = A.readGPIODir(dev, "MAIN");
             out = A.readGPIO(dev, "MAIN");
-            ok = true;
+            ok_ = true;
         }
+        bool ok() const override { return ok_; }
+        std::string error() const override { return "this radio has no GPIO control through SoapySDR (use the LimeRFE's USB)"; }
+        std::string name() const override { return "LimeSDR I2C, GPIO 6/7"; }
         void set(int bit, int v) {
             Api& A = api();
             if (v) dir &= ~(1u << bit); else dir |= 1u << bit;
@@ -396,13 +574,12 @@ private:
             set(SDA, 1);
             return true;
         }
-        // a command written, its reply (the same length) read back
-        bool command(const uint8_t* c, int n, uint8_t* r) {
+        bool command(const uint8_t* c, int n, uint8_t* r) override {
             start();
-            bool ok_ = tx((uint8_t)(ADDR << 1));
-            for (int i = 0; ok_ && i < n; ++i) tx(c[i]);
+            bool ok_w = tx((uint8_t)(ADDR << 1));
+            for (int i = 0; ok_w && i < n; ++i) tx(c[i]);
             stop();
-            if (!ok_) return false;
+            if (!ok_w) return false;
             start();
             if (!tx((uint8_t)(ADDR << 1 | 1))) { stop(); return false; }
             for (int i = 0; i < n; ++i)
@@ -570,7 +747,9 @@ public:
             if (!dev_) dev_ = open_device("driver=plutosdr");
         }
         if (!dev_) { error = std::string("could not open the radio: ") + (A.lastError ? A.lastError() : "?"); return false; }
-        if (c.driver == "lime" && !c.lime_rfe.empty()) LimeRfe::attach(dev_, false, c.rf_hz, parse_rfe(c.lime_rfe));
+        // a LimeRFE: on a LimeSDR's header, or over its own USB with any radio
+        if (!c.lime_rfe.empty() && (c.driver == "lime" || !parse_rfe(c.lime_rfe).serial.empty()))
+            LimeRfe::attach(dev_, false, c.rf_hz, parse_rfe(c.lime_rfe));
         double want = c.rate;
         if (fixed && A.listSampleRates) {
             size_t n = 0;
@@ -734,7 +913,7 @@ public:
             if (A.deactivateStream) A.deactivateStream(dev_, stream_, 0, 0);
             if (A.closeStream) A.closeStream(dev_, stream_);
         }
-        if (cfg_.driver == "lime") LimeRfe::detach(dev_, false);
+        if (!cfg_.lime_rfe.empty()) LimeRfe::detach(dev_, false, parse_rfe(cfg_.lime_rfe));
         close_device(dev_);     // (the shared radio: closed once its last user is done)
     }
 
@@ -939,7 +1118,8 @@ public:
         dev_ = open_device(args);
         if (!dev_ && c.driver == "pluto" && !c.uri.empty()) dev_ = open_device("driver=plutosdr");
         if (!dev_) { error = std::string("could not open the radio: ") + (A.lastError ? A.lastError() : "?"); return false; }
-        if (c.driver == "lime" && !c.lime_rfe.empty()) LimeRfe::attach(dev_, true, c.rf_hz, parse_rfe(c.lime_rfe));
+        if (!c.lime_rfe.empty() && (c.driver == "lime" || !parse_rfe(c.lime_rfe).serial.empty()))
+            LimeRfe::attach(dev_, true, c.rf_hz, parse_rfe(c.lime_rfe));
         // (a HackRF: 2 MS/s at least; the transmitter builds its waveform at the rate it really runs at)
         set_rate_if_changed(dev_, TX, c.driver == "hackrf" ? std::max(c.rate, 2000000.0) : c.rate);
         rate = A.getSampleRate ? A.getSampleRate(dev_, TX, 0) : c.rate;
@@ -1024,7 +1204,7 @@ public:
             if (A.deactivateStream) A.deactivateStream(dev_, stream_, 0, 0);
             if (A.closeStream) A.closeStream(dev_, stream_);
         }
-        if (cfg_.driver == "lime") LimeRfe::detach(dev_, true);
+        if (!cfg_.lime_rfe.empty()) LimeRfe::detach(dev_, true, parse_rfe(cfg_.lime_rfe));
         close_device(dev_);     // (the shared radio: closed once its last user is done)
         // PTT dropped once RF has stopped: the stream shut down, the radio's own buffer
         // given time to empty (a relay or amplifier never switched under RF)

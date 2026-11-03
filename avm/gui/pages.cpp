@@ -450,11 +450,18 @@ static QStringList radioArgs(const QString& dir, double khz, double hz, bool loO
     if ((sdr == "pluto" || sdr == "hpsdr") && !uri.isEmpty()) a << "--pluto-uri" << uri;
     QString port = s.value(dir + "/port", "Auto").toString();
     if (sdr == "lime" && port != "Auto") a << "--sdr-antenna" << port;
-    // a LimeRFE on the LimeSDR (Config, RFE): its band, ports and mode set by the modems
-    if (sdr == "lime" && s.value("rfe/on", false).toBool())
-        a << "--lime-rfe" << QString("%1,%2,%3").arg(s.value("rfe/tx_port", "1").toString(),
-                                                     s.value("rfe/notch", false).toBool() ? "1" : "0",
-                                                     s.value("rfe/atten_db", "0").toString());
+    // a LimeRFE (Config, Lime RFE): its band, ports and mode set by the modems -- on a
+    // LimeSDR's header, or over its own USB with any SoapySDR radio (a Pluto too)
+    const bool rfeUsb = s.value("rfe/link", "i2c").toString() == "usb";
+    if (s.value("rfe/on", false).toBool() &&
+        (sdr == "lime" || (rfeUsb && sdr != "virtual" && sdr != "hpsdr" && sdr != "kiwi"))) {
+        QString r = QString("%1,%2,%3,%4").arg(s.value("rfe/tx_port", "1").toString(),
+                                               s.value("rfe/notch", false).toBool() ? "1" : "0",
+                                               s.value("rfe/atten_db", "0").toString(),
+                                               s.value("rfe/rx_port", "1").toString());
+        if (rfeUsb) r += "," + s.value("rfe/serial").toString();
+        a << "--lime-rfe" << r;
+    }
     // KiwiSDR: the server set in Config (Receiver), always the current one
     if (sdr == "kiwi") a << "--pluto-uri" << s.value("kiwi_server").toString().trimmed();
     // RTL-SDR: its crystal's correction (RX page, shown with an RTL-SDR)
@@ -2018,14 +2025,40 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         emit rxSettingChanged();
     });
 
-    // RFE: a LimeRFE front end fitted to the LimeSDR (driven over its GPIO/I2C, through the radio)
+    // RFE: a LimeRFE front end -- over its own USB (any SoapySDR radio), or a LimeSDR's header (I2C)
     auto* rfe = new QWidget;
     auto* ff = new QFormLayout(rfe);
     ff->setVerticalSpacing(ui.px(6));
     auto* rfeOn = new Segmented({{"off", "Off"}, {"on", "On"}}, s.value("rfe/on", false).toBool() ? "on" : "off");
     ff->addRow(rowLabel("LimeRFE"), rfeOn);
-    auto* rfePort = new Segmented({{"1", "TX on J3 (TX/RX)"}, {"2", "TX on J4"}}, s.value("rfe/tx_port", "1").toString());
+    auto* rfeLink = new Segmented({{"usb", "USB"}, {"i2c", "LimeSDR header"}}, s.value("rfe/link", "i2c").toString());
+    ff->addRow(rowLabel("Connected by"), rfeLink);
+    // its USB serial port: Linux's stable /dev/serial/by-id names first; Windows' COM ports
+    auto serialPorts = [] {
+        QStringList l;
+#ifdef Q_OS_WIN
+        QSettings reg("HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM", QSettings::NativeFormat);
+        for (const QString& k : reg.allKeys()) l << reg.value(k).toString();
+        l.sort();
+#else
+        for (const QFileInfo& f : QDir("/dev/serial/by-id").entryInfoList(QDir::System | QDir::Files)) l << f.absoluteFilePath();
+        for (const QFileInfo& f : QDir("/dev").entryInfoList({"ttyUSB*", "ttyACM*"}, QDir::System)) l << f.absoluteFilePath();
+#endif
+        if (l.isEmpty()) l << "(none found)";
+        return l;
+    };
+    auto* rfeSerial = new Picker("LimeRFE USB port", serialPorts, s.value("rfe/serial").toString());
+    auto* rfeSerialLabel = rowLabel("USB port");
+    ff->addRow(rfeSerialLabel, rfeSerial);
+    auto showLink = [rfeLink, rfeSerial, rfeSerialLabel] {
+        rfeSerial->setVisible(rfeLink->value() == "usb");
+        rfeSerialLabel->setVisible(rfeLink->value() == "usb");
+    };
+    showLink();
+    auto* rfePort = new Segmented({{"1", "J3 (TX/RX)"}, {"2", "J4 (TX)"}}, s.value("rfe/tx_port", "1").toString());
     ff->addRow(rowLabel("TX port"), rfePort);
+    auto* rfeRxPort = new Segmented({{"1", "J3 (TX/RX)"}, {"3", "J5"}}, s.value("rfe/rx_port", "1").toString());
+    ff->addRow(rowLabel("RX port"), rfeRxPort);
     auto* rfeNotch = new Segmented({{"off", "Off"}, {"on", "On"}}, s.value("rfe/notch", false).toBool() ? "on" : "off");
     ff->addRow(rowLabel("FM notch"), rfeNotch);
     auto* rfeAtt = new Segmented({{"0", "0"}, {"2", "2"}, {"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}, {"14", "14"}},
@@ -2037,8 +2070,8 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     ff->addRow(rowLabel("Band"), rfeBand);
     auto bandName = [](double hz) -> QString {
         const double m = hz / 1e6;
-        if (m <= 30) return "HAM 30 MHz (J5)";
-        if (m >= 50 && m <= 72) return "HAM 70 MHz";
+        if (m <= 30) return "HAM 30 MHz";
+        if (m >= 50 && m <= 72) return "HAM 50-70 MHz";
         if (m >= 144 && m <= 148) return "HAM 145 MHz";
         if (m >= 219 && m <= 225) return "HAM 220 MHz";
         if (m >= 420 && m <= 450) return "HAM 435 MHz";
@@ -2048,20 +2081,33 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         if (m >= 3300 && m <= 3500) return "HAM 3500 MHz";
         return m < 1000 ? "Wideband 1-1000 MHz" : "Wideband 1000-4000 MHz";
     };
-    auto showBand = [rfeBand, bandName] {
+    // the ports as sdr.h's LimeRfe sets them: TX on J5 for HF and 50-70 MHz; RX on J5 where allowed
+    auto ports = [](double rx_hz, double tx_hz) -> QString {
         QSettings& st = settings();
-        // only the sides with the LimeSDR as their radio drive the LimeRFE
-        const bool rl = st.value("rx/radio").toString() == "lime", tl = st.value("tx/radio").toString() == "lime";
-        QString r = bandName(st.value("rx/freq_hz", DEFAULT_FREQ_HZ).toDouble());
-        QString t = bandName(st.value("tx/freq_hz", DEFAULT_FREQ_HZ).toDouble());
+        const double rm = rx_hz / 1e6, tm = tx_hz / 1e6;
+        const bool txJ5 = tm <= 30 || (tm >= 50 && tm <= 72);
+        const bool rxJ5ok = rm < 1000 && !(rm >= 902 && rm <= 928);    // (not 33 cm, nor above 1 GHz)
+        const QString tx = txJ5 ? "J5" : st.value("rfe/tx_port", "1").toString() == "2" ? "J4" : "J3";
+        const QString rx = st.value("rfe/rx_port", "1").toString() == "3" && rxJ5ok ? "J5" : "J3";
+        return "RX " + rx + ", TX " + tx + (rx == tx ? " (one port: TX takes it while sending)" : "");
+    };
+    auto showBand = [rfeBand, bandName, ports] {
+        QSettings& st = settings();
+        // the sides that drive the LimeRFE: over USB any SoapySDR radio, on the header the LimeSDR
+        const bool usb = st.value("rfe/link", "i2c").toString() == "usb";
+        auto drives = [usb](const QString& r) { return r == "lime" || (usb && r != "virtual" && r != "hpsdr" && r != "kiwi"); };
+        const bool rl = drives(st.value("rx/radio").toString()), tl = drives(st.value("tx/radio").toString());
+        const double rh = st.value("rx/freq_hz", DEFAULT_FREQ_HZ).toDouble(), th = st.value("tx/freq_hz", DEFAULT_FREQ_HZ).toDouble();
+        QString r = bandName(rh), t = bandName(th);
         if (!rl && !tl) {
-            rfeBand->setText("(no LimeSDR selected for RX or TX)");
+            rfeBand->setText(usb ? "(no SoapySDR radio selected for RX or TX)" : "(no LimeSDR selected for RX or TX)");
             rfeBand->setStyleSheet("");
         } else if (!rl || !tl || r == t) {
-            rfeBand->setText(rl && tl ? r : rl ? "RX " + r + " (TX on another radio)" : "TX " + t + " (RX on another radio)");
+            rfeBand->setText((rl && tl ? r : rl ? "RX " + r + " (TX on another radio)" : "TX " + t + " (RX on another radio)") +
+                             "\n" + ports(rl ? rh : th, tl ? th : rh));
             rfeBand->setStyleSheet("");
         } else {
-            rfeBand->setText("RX " + r + ", TX " + t + " -- different bands: RX and TX at once may not work");
+            rfeBand->setText("RX " + r + ", TX " + t + " -- different bands: RX and TX at once may not work\n" + ports(rh, th));
             rfeBand->setStyleSheet(QString("color: %1").arg(WARN));
         }
     };
@@ -2069,14 +2115,23 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     auto* bandTimer = new QTimer(rfe);
     connect(bandTimer, &QTimer::timeout, rfe, showBand);
     bandTimer->start(1000);
-    auto* rnote = new QLabel("With a LimeSDR as the radio: the LimeRFE on its expansion header follows AVM -- its band "
-                             "from the frequency, TX while transmitting, RX while receiving, off when stopped. "
-                             "TX on J4 lets RX (J3) and TX run at once; on J3, TX takes the port. "
-                             "Applies at the next start of TX or RX.");
+    auto* rnote = new QLabel("The LimeRFE follows AVM: its band from the frequency, TX while transmitting, RX while "
+                             "receiving. Over its USB it works with any SoapySDR radio (Pluto, LimeSDR, HackRF...); "
+                             "on the LimeSDR header, with a LimeSDR only. "
+                             "HF and 50-70 MHz always transmit from J5. RX on J5 suits HF to 70 cm (else J3 is used). "
+                             "RX and TX run at once only on different ports. Applies at the next start of TX or RX.");
     rnote->setObjectName("dim");
     rnote->setWordWrap(true);
     ff->addRow(rnote);
     connect(rfeOn, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/on", v == "on"); });
+    connect(rfeLink, &Segmented::changed, this, [showLink](const QString& v) {
+        settings().setValue("rfe/link", v);
+        showLink();
+    });
+    connect(rfeSerial, &Picker::changed, this, [](const QString& v) {
+        if (!v.startsWith("(")) settings().setValue("rfe/serial", v);
+    });
+    connect(rfeRxPort, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/rx_port", v); });
     connect(rfePort, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/tx_port", v); });
     connect(rfeNotch, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/notch", v == "on"); });
     connect(rfeAtt, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/atten_db", v); });
