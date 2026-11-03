@@ -36,6 +36,7 @@ struct MediaTxConfig {
     std::string audio = "test", audio_device;
     std::string audio_codec = "codec2";   // "codec2" (3200) or "opus" (48 kHz mono)
     double opus_kbps = 10;
+    bool opus_speech = true;   // Opus tuned for speech (VOIP, voice signal); off: general audio / music
 };
 
 class MediaTx {

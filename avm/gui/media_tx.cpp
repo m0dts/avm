@@ -181,19 +181,23 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
     if (c.audio != "off") {
         bool opus = c.audio_codec == "opus";
         if (opus) {
-            // as media_source_audio.py's libopus: CBR, complexity 5, 20 ms frames. The
-            // test tone from 10 kbit/s in the low-delay mode (the music coder alone: the
-            // default's switching between coders around 12-16 kbit/s broke up a steady
-            // tone); a microphone in the default, whose speech coder speech needs
+            // CBR, complexity 10, 20 ms frames. The test tone from 10 kbit/s in the
+            // low-delay mode (the music coder alone: the default's switching between
+            // coders around 12-16 kbit/s broke up a steady tone).
+            // Speech (Config, TX media): the VoIP tuning and the signal flagged as voice --
+            // what holds speech together at the slow links' 4-6 kbit/s
             bool lowdelay = c.audio == "test" && c.opus_kbps >= 10;
+            bool speech = c.opus_speech && c.audio != "test";
             int err = 0;
-            opus_ = opus_encoder_create(48000, 1, lowdelay ? OPUS_APPLICATION_RESTRICTED_LOWDELAY : OPUS_APPLICATION_AUDIO, &err);
+            opus_ = opus_encoder_create(48000, 1, lowdelay ? OPUS_APPLICATION_RESTRICTED_LOWDELAY
+                                                  : speech ? OPUS_APPLICATION_VOIP : OPUS_APPLICATION_AUDIO, &err);
             if (err != OPUS_OK || !opus_) { log_("ERROR: Opus encoder: " + std::string(opus_strerror(err))); stop(); return false; }
             opus_encoder_ctl((OpusEncoder*)opus_, OPUS_SET_BITRATE((opus_int32)std::lround(c.opus_kbps * 1000)));
             opus_encoder_ctl((OpusEncoder*)opus_, OPUS_SET_VBR(0));
-            opus_encoder_ctl((OpusEncoder*)opus_, OPUS_SET_COMPLEXITY(5));
+            opus_encoder_ctl((OpusEncoder*)opus_, OPUS_SET_COMPLEXITY(10));     // (one mono voice: cheap even on a Pi)
+            if (speech) opus_encoder_ctl((OpusEncoder*)opus_, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
             frSetAudioProfile_(fr_, AUDIO_PROFILE_OPUS_48K);
-            log_("[audio] Opus " + std::to_string(c.opus_kbps).substr(0, 4) + " kbps, 20 ms frames");
+            log_("[audio] Opus " + std::to_string(c.opus_kbps).substr(0, 4) + " kbps, 20 ms frames" + (speech ? ", speech" : ""));
         } else {
             c2_ = codec2_create(CODEC2_MODE_3200);
             frSetAudioProfile_(fr_, AUDIO_PROFILE_CODEC2_3200);
