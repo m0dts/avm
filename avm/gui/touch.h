@@ -75,6 +75,8 @@ public:
     void setValue(double v, bool emitChange = false);
     bool sign = false;        // "+3" for positive values
     void setStep(double s) { step_ = s; }
+    // a new range: the value held inside it (changed() if it had to move)
+    void setLimits(double lo, double hi) { lo_ = lo; hi_ = hi; setValue(value_, true); }
     void setArrowWidth(int px);   // the - / + buttons' minimum width (default: wide, 72 px at scale 1)
 signals:
     void changed(double value);

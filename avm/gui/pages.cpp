@@ -630,6 +630,9 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
         double lo, hi;
         radioRange(radio_pick_->driver(), &lo, &hi);
         freq_->setRange(lo, hi, radioName(radio_pick_->driver()));
+        // an HPSDR radio's gain: a Hermes-Lite 2's / Radioberry's LNA, -12..+48 dB
+        if (radio_pick_->driver() == "hpsdr") gain_->setLimits(-12, 48);
+        else gain_->setLimits(0, 70);
     };
     showRadio();
     connect(radio_pick_, &RadioPicker::radioChanged, this, [this, showRadio](const QString& d, const QString& uri) {
