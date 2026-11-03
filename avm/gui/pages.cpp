@@ -2115,14 +2115,26 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     auto* bandTimer = new QTimer(rfe);
     connect(bandTimer, &QTimer::timeout, rfe, showBand);
     bandTimer->start(1000);
-    auto* rnote = new QLabel("The LimeRFE follows AVM: its band from the frequency, TX while transmitting, RX while "
-                             "receiving. Over its USB it works with any SoapySDR radio (Pluto, LimeSDR, HackRF...); "
-                             "on the LimeSDR header, with a LimeSDR only. "
-                             "HF and 50-70 MHz always transmit from J5. RX on J5 suits HF to 70 cm (else J3 is used). "
-                             "RX and TX run at once only on different ports. Applies at the next start of TX or RX.");
-    rnote->setObjectName("dim");
-    rnote->setWordWrap(true);
-    ff->addRow(rnote);
+    // the notes in a pop-up (as a label they ran off the bottom of the tab)
+    auto* rfeHelp = new QPushButton("LimeRFE help");
+    ff->addRow(rowLabel(""), rfeHelp);
+    connect(rfeHelp, &QPushButton::clicked, this, [this] {
+        QMessageBox box(QMessageBox::Information, "LimeRFE",
+                        "<p>The LimeRFE follows AVM: its band is set from the frequency, TX while transmitting, "
+                        "RX while receiving, off when stopped.</p>"
+                        "<p><b>Connected by</b><br>USB: the LimeRFE's own micro-USB socket. Works with any SoapySDR "
+                        "radio (Pluto, LimeSDR, HackRF...). Pick its serial port.<br>"
+                        "LimeSDR header: the 10-pin GPIO cable to a LimeSDR. Works with a LimeSDR only.</p>"
+                        "<p><b>Ports</b><br>J1 to the radio's RX, J2 from the radio's TX.<br>"
+                        "TX: J3 (TX/RX) or J4 (TX only). HF and 50-70 MHz always transmit from J5.<br>"
+                        "RX: J3, or J5 for HF, 50-70, 144, 220, 430 MHz and wideband up to 1 GHz "
+                        "(other bands use J3).<br>"
+                        "RX and TX run at once only on different ports; on one port TX takes it while sending.</p>"
+                        "<p>Terminate unused RF ports with 50 ohms. Transmitters need the 12 V supply.</p>"
+                        "<p>Changes apply at the next start of TX or RX.</p>",
+                        QMessageBox::Ok, this);
+        box.exec();
+    });
     connect(rfeOn, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/on", v == "on"); });
     connect(rfeLink, &Segmented::changed, this, [showLink](const QString& v) {
         settings().setValue("rfe/link", v);
