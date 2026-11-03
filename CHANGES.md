@@ -3,6 +3,14 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.1.3
+- Audio only: Opus whenever the link can carry it (SH 10 kHz QPSK now gets Opus at about 4.4 kbps, not Codec2)
+- Opus tuned for voice at full encoder quality: clearer speech on the slow links
+- Stream TX source: the picture no longer falls behind the sound at low frame rates
+- Radioberry / Hermes-Lite 2: TX power control works over the whole TX gain range and changes live while transmitting; the RX gain range is -12 to +48 dB
+- Modulation choices limited to those each mode supports
+- The window title shows AVM's version
+
 ## 1.1.2
 - Linux / Raspberry Pi: updates without your password. When sudo needs one, the installer asks once whether AVM may update without it, and adds an admin rule (/etc/sudoers.d/avm) so later updates need no password. Remove it with: sudo rm /etc/sudoers.d/avm
 - PTT outputs: Raspberry Pi pin 40 (BCM 21, as Portsdown 4) and, with a Pluto, its GPO0 (as F5OEO's firmware; a G0MJW PTT board). PTT goes high only once RF is out -- after a LimeSDR's calibration tones and start-up spike -- and drops only after RF has stopped
