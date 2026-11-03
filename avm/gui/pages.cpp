@@ -491,6 +491,9 @@ void enforceModeLimits(Segmented* mode, Segmented* bw, Segmented* mod) {
                 best = w;
         bw->setValue(best);
     }
+    // duplex (Config, Experimental) works with QPSK only
+    QSettings& s = settings();
+    if (s.value("experimental", false).toBool() && s.value("duplex", "off").toString() != "off") mods = {"qpsk"};
     for (const QString& v : {"qpsk", "8psk", "16psk", "16qam", "32qam"})
         if (auto* b = mod->button(v)) b->setEnabled(mods.contains(v));
     if (!mods.contains(mod->value())) mod->setValue(mods[0]);
@@ -1080,21 +1083,17 @@ void RxPage::showKiwiInfo() {
 
 void RxPage::setSpectrumAverages(int n) { spectrum_->setAverages(n); }
 
-// Duplex works with QPSK only: while it's chosen (Config, Experimental), the
-// page's other modulations are greyed out, and QPSK picked if one of them was
-static void limitDuplexModulations(Segmented* mod) {
-    QSettings& s = settings();
-    const bool duplex = s.value("experimental", false).toBool() && s.value("duplex", "off").toString() != "off";
-    for (const char* k : {"8psk", "16psk", "16qam", "32qam"})
-        if (QPushButton* b = mod->button(k)) b->setEnabled(!duplex);
-    if (duplex && mod->value() != "qpsk" && mod->button("qpsk")) {
-        mod->setValue("qpsk");
-        emit mod->changed("qpsk");      // (saved, and the link re-planned, as a tap)
-    }
+// duplex turned on or off (Config, Experimental): the modulations the mode has
+// greyed out again -- duplex QPSK only -- and QPSK picked if the one chosen went
+// (before, turning duplex off enabled all of them, whatever the mode had)
+static void limitDuplexModulations(Segmented* mode, Segmented* bw, Segmented* mod) {
+    const QString was = mod->value();
+    enforceModeLimits(mode, bw, mod);
+    if (mod->value() != was) emit mod->changed(mod->value());    // (saved, and the link re-planned, as a tap)
 }
 
 void RxPage::refreshDuplex() {
-    limitDuplexModulations(mod_);
+    limitDuplexModulations(mode_, bw_, mod_);
     if (!running() && !pending_ && run_->text() != runLabel() &&
         (run_->text() == "RX" || run_->text() == "TX+RX"))
         run_->setText(runLabel());
@@ -1510,7 +1509,7 @@ double TxPage::linkBps() const {
 }
 
 void TxPage::refreshDuplex() {
-    limitDuplexModulations(mod_);
+    limitDuplexModulations(mode_, bw_, mod_);
     const bool duplex = !duplexRole().isEmpty();
     run_->setVisible(!duplex || running());
     if (duplex && !running()) status_->setText("Duplex: start and stop on the RX page (TX+RX)");

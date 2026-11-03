@@ -30,7 +30,10 @@
 namespace avm {
 
 MainWindow::MainWindow(bool demo, QWidget* parent) : QWidget(parent) {
-    setWindowTitle("AVM");
+    {   // its version in the title bar ("AVM 1.1.2")
+        const QString v = Updater::localVersion();
+        setWindowTitle(v.isEmpty() ? QString("AVM") : "AVM " + v);
+    }
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
