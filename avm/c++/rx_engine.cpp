@@ -588,6 +588,7 @@ struct State {
     Opt last_cfo;
     int consecutive_failures = 0;
     int wrong_mod = 0;               // frames in a row: header good, payload hopeless (a wrong modulation's mark)
+    std::string auto_from;           // auto modulation: moved to another to try it; the one before
     bool sc_expect_next = false;
     double last_ok_time = -1;
     // AFC
@@ -837,10 +838,23 @@ struct Receiver {
         }
         // auto modulation: the header (always QPSK) decoded but the payload is hopeless --
         // the far end sending another of the mode's modulations. After a few such frames in a
-        // row, each other one tried on this frame; the first with a good CRC is kept
+        // row, each other one tried on this frame; the first with a good CRC is kept. Live, a
+        // lower-order guess often can't be tried at once (its longer frame hasn't all arrived
+        // yet): then the receiver moves to that one for the frames after, kept if they decode
+        int try_next = 0;
         if (a.auto_modulation && !tdd_) {
-            if (res.crc_ok) st.wrong_mod = 0;
-            else if (!std::isnan(res.ber) && res.ber > WRONG_MOD_BER) ++st.wrong_mod;
+            auto name_of = [](int b) { return b == 2 ? "qpsk" : b == 4 ? "16qam" : "32qam"; };
+            if (res.crc_ok) {
+                st.wrong_mod = 0;
+                if (!st.auto_from.empty()) {      // a modulation moved to (below) has decoded
+                    avm_logf("Auto modulation: now %s (was %s)\n", name_of(md.c->bpc), st.auto_from.c_str());
+                    md.m.bpc = md.c->bpc;
+                    md.m.modulation = name_of(md.c->bpc);
+                    st.auto_from.clear();
+                }
+            } else if (!std::isnan(res.ber) && res.ber > WRONG_MOD_BER) {
+                ++st.wrong_mod;
+            }
             if (!res.crc_ok && st.wrong_mod >= WRONG_MOD_FRAMES) {
                 const int was = md.c->bpc;
                 for (int b : {2, 4, 5}) {
@@ -854,19 +868,30 @@ struct Receiver {
                         start_index = s2;
                         break;
                     }
+                    if (t.incomplete && !try_next) try_next = b;    // (not all here yet)
                 }
                 if (res.crc_ok) {
-                    const char* name = md.c->bpc == 2 ? "qpsk" : md.c->bpc == 4 ? "16qam" : "32qam";
-                    avm_logf("Auto modulation: now %s (was %s)\n", name, md.m.modulation.c_str());
+                    avm_logf("Auto modulation: now %s (was %s)\n", name_of(md.c->bpc),
+                             st.auto_from.empty() ? md.m.modulation.c_str() : st.auto_from.c_str());
                     md.m.bpc = md.c->bpc;
-                    md.m.modulation = name;
+                    md.m.modulation = name_of(md.c->bpc);
                     st.wrong_mod = 0;
+                    st.auto_from.clear();
+                    try_next = 0;
                 } else {
                     md.c->bpc = was;
+                    // nothing could be tried: the next of the mode's modulations, in turn
+                    if (!try_next) try_next = was == 2 ? 4 : was == 4 ? 5 : 2;
+                    st.wrong_mod = 0;
                 }
             }
         }
         long long n_symbols = md.frame_symbol_count((long long)res.payload.size());
+        if (try_next) {     // (after this frame's length, which was in the old modulation)
+            if (st.auto_from.empty()) st.auto_from = md.m.modulation;
+            md.c->bpc = try_next;
+            avm_logf("Auto modulation: trying %s\n", try_next == 2 ? "qpsk" : try_next == 4 ? "16qam" : "32qam");
+        }
         R.status = "ok";
         R.payload = res.payload;
         R.crc_ok = res.crc_ok;
