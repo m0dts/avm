@@ -53,7 +53,7 @@ static void usage() {
                  "avm_rx: AVM receiver (hf_ofdm_rx.py's decode loop in C++)\n"
                  "  --mode A|B|C|D|VU|S|SH  --occupancy KHZ  --modulation M  --fec auto|viterbi|ldpc\n"
                  "  --sample-rate HZ (input rate; must differ from the mode's)  --fragment-size N\n"
-                 "  --fragment-gap-ms MS  --no-output-pacing  --invert-spectrum  --rx-queue-depth N  --drop-if-slow\n"
+                 "  --fragment-gap-ms MS  --no-output-pacing  --invert-spectrum  --auto-invert  --rx-queue-depth N  --drop-if-slow\n"
                  "  --lo-offset-hz HZ (the radio tuned this far from the signal: c++/radio_iq.py prints it)\n"
                  "  --input pluto --sdr DRIVER --rf-freq HZ --rx-gain DB [--rx-agc] --gain-file F --freq-offset-file F\n"
                  "  --spectrum-stderr  --test-step BYTES (repeatable input steps, for testing)\n");

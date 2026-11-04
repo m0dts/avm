@@ -522,6 +522,7 @@ const double SYNC_MIN = 0.3;      // SYNC_METRIC_MIN
 const double CFO_EMA_ALPHA = 0.3, CFO_JUMP_LIMIT_HZ = 100.0;
 const int FRAG_HEADER_SIZE = 8;   // >HHI
 const int REACQUISITION_TROUBLE_LIMIT = 5;
+const double AUTO_INVERT_S = 8.0;     // --auto-invert: this long without a header, the spectrum flipped
 const double DROP_IF_SLOW_LAG_S = 1.0, SKIP_KEEP_FRAGMENTS = 1.5, SKIP_EXTRA_LAG_S = 0.6;
 const double SEQ_MIN_FRAGMENT_S = 0.03;
 const int SEQ_GAP_SLACK = 20, MAX_MISMATCH_RETRIES = 8;
@@ -535,6 +536,7 @@ struct Args {
     double occupancy = 20, sample_rate = 0, fragment_gap_ms = 0, lo_offset_hz = 0;
     int fragment_size = 0, rx_queue_depth = 2;
     bool no_output_pacing = false, drop_if_slow = false, invert_spectrum = false;
+    bool auto_invert = false;       // --auto-invert: the spectrum flipped after a while without a header
     // --input pluto: a radio through SoapySDR (sdr.h), hf_ofdm_rx.py's radio options
     std::string input = "pipe", sdr = "pluto", uri, antenna, lime_rfe;
     double rf_freq = 0, rx_gain = 30, bandwidth = 0, ppm = 0, warmup_s = 0.75;
@@ -938,7 +940,7 @@ struct Receiver {
             long long snapshot = -1;
             while (locked) {
                 snapshot = reader.total();
-                buf.update(reader, search_start);
+                if (pull(search_start)) { cache = SyncCache(); memo.clear(); last_cfo = Opt(); }   // (flipped)
                 double t0 = now_s();
                 FragResult r = try_decode(search_start, cache, memo, last_cfo);
                 compute += now_s() - t0;
@@ -1015,7 +1017,33 @@ struct Receiver {
 
     // ---- hf_sc.receive_one_fragment (S)
     void wait_more() { reader.wait_for_more(reader.total()); }
-    void get_samples() { buf.update(reader, st.nss); }
+    // --auto-invert: the search AUTO_INVERT_S past the last decoded header -- the spectrum
+    // flipped, the samples already here too (after the front end: the conjugate of its
+    // output is its output for the conjugated input with the LO offset mirrored, just as
+    // --invert-spectrum's)
+    bool flip_ = false;
+    long long good_pos_ = 0;
+    void get_samples() { pull(st.nss); }
+    // the new samples (the buffer trimmed short of pos, the search's place); true: flipped
+    bool pull(long long pos) {
+        long long from = buf.len();
+        buf.update(reader, pos);
+        if (flip_) for (long long i = std::max(from, buf.origin); i < buf.len(); ++i) buf.buf[i - buf.origin] = std::conj(buf.buf[i - buf.origin]);
+        if (!a.auto_invert || pos - good_pos_ < (long long)(AUTO_INVERT_S * m().fs)) return false;
+        good_pos_ = pos;
+        flip_ = !flip_;
+        for (cd& v : buf.buf) v = std::conj(v);
+        if (st.afc_init && reader.fe) {      // (the AFC's correction: for the other way up)
+            std::lock_guard<std::mutex> g(reader.fe_mu);
+            reader.fe->set_lo_offset(st.afc_base);
+        }
+        st.afc_init = false;
+        st.afc_hist.clear();
+        st.afc_n = 0;
+        st.last_cfo.has = false;
+        avm_logf("Auto invert: no header decoded -- spectrum now %s\n", a.invert_spectrum != flip_ ? "inverted" : "normal");
+        return true;
+    }
 
     std::vector<cd> slice(long long lo, long long hi) {
         lo = std::max(lo, buf.origin);
@@ -1197,6 +1225,7 @@ struct Receiver {
             r1 = sh_grid(s, g, dseg.data(), (long long)dseg.size(), t0, cfo, n_sym);
             SHHeader hd = sh_header(s, g, r1, uw);
             sh_decode(s, g, r1, n_bytes, hd, uw, md.hres);
+            if (a.auto_modulation && !tdd_) sh_auto(lo, t0, cfo, frame_start, n_bytes, uw, margin, fs_);
             FragResult r;
             r.status = "ok";
             r.payload = md.hres.payload;
@@ -1211,6 +1240,65 @@ struct Receiver {
             r.next = (long long)(frame_start + fs_) - 2 * SC_SPS;
             return r;
         }
+    }
+
+    // auto modulation for SH, as receive_ofdm's: the header (the same for every modulation)
+    // decoded but the payload hopeless, a few frames in a row -- the others tried on this
+    // frame (one not all here yet, live: moved to for the frames after, kept if they decode)
+    std::map<int, SC*> sh_scs;
+    SC* sh_sc(int bps) {
+        SC*& p = sh_scs[bps];
+        if (!p) p = bps == md.m.bpc ? md.sc : new SC(true, md.m.k10, bps);
+        return p;
+    }
+    void sh_use(int bps) { md.sc = sh_sc(bps); md.m.bpc = bps; }
+    static const char* sh_name(int b) { return b == 2 ? "qpsk" : b == 3 ? "8psk" : "16psk"; }
+    // fs_cur: this frame's length, the next search starts after it (changed if decoded as another)
+    void sh_auto(long long lo, double t0, double cfo, double frame_start, int n_bytes, const std::vector<cd>& uw,
+                 long long margin, long long& fs_cur) {
+        const SHGeo& g = md.g;
+        sh_sc(md.m.bpc);
+        if (md.hres.crc_ok) {
+            st.wrong_mod = 0;
+            if (!st.auto_from.empty()) {      // a modulation moved to (below) has decoded
+                avm_logf("Auto modulation: now %s (was %s)\n", sh_name(md.m.bpc), st.auto_from.c_str());
+                md.m.modulation = sh_name(md.m.bpc);
+                st.auto_from.clear();
+            }
+            return;
+        }
+        if (md.hres.ber > WRONG_MOD_BER) ++st.wrong_mod;
+        if (st.wrong_mod < WRONG_MOD_FRAMES) return;
+        st.wrong_mod = 0;
+        const int was = md.m.bpc;
+        int try_next = 0;
+        for (int b : {2, 3, 4}) {
+            if (b == was) continue;
+            sh_use(b);
+            long long fsb = md.sh_frame_samples(n_bytes);
+            long long end = (long long)(frame_start + fsb + (double)g.L * SC_SPS + margin);
+            if (buf.len() < end - margin) { if (!try_next) try_next = b; continue; }   // (not all here yet)
+            std::vector<cd> dseg = c64(slice(lo, std::min(end, buf.len())));
+            if ((long long)dseg.size() < end - lo) dseg.resize(end - lo, cd(0, 0));
+            long long n_sym = g.PRE_HF + (long long)g.N * (1 + md.sh_n_blocks(n_bytes));
+            std::vector<cd> r1 = sh_grid(*md.sc, g, dseg.data(), (long long)dseg.size(), t0, cfo, n_sym);
+            SHDecoded t;
+            sh_decode(*md.sc, g, r1, n_bytes, sh_header(*md.sc, g, r1, uw), uw, t);
+            if (t.crc_ok) {
+                avm_logf("Auto modulation: now %s (was %s)\n", sh_name(b),
+                         st.auto_from.empty() ? md.m.modulation.c_str() : st.auto_from.c_str());
+                md.hres = t;
+                md.m.modulation = sh_name(b);
+                st.auto_from.clear();
+                fs_cur = fsb;
+                return;
+            }
+        }
+        // nothing decoded: the one not yet all here, else the next in turn, for the frames after
+        if (!try_next) try_next = was == 2 ? 3 : was == 3 ? 4 : 2;
+        if (st.auto_from.empty()) st.auto_from = md.m.modulation;
+        sh_use(try_next);
+        avm_logf("Auto modulation: trying %s\n", sh_name(try_next));
     }
 
     FragResult receive_one() {
@@ -1601,6 +1689,7 @@ struct Receiver {
             double t0 = now_s();
             FragResult r = receive_one();
             double elapsed = now_s() - t0;
+            if (r.status == "ok") good_pos_ = st.nss;    // (a header decoded: --auto-invert)
             if (r.has_next) st.nss = r.next;
             if (r.status == "eof") break;
             bool own = tdd_ ? tdd_track(r) : false;
@@ -1721,6 +1810,7 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         else if (k == "--fragment-gap-ms") a.fragment_gap_ms = std::atof(val().c_str());
         else if (k == "--no-output-pacing") a.no_output_pacing = true;
         else if (k == "--invert-spectrum") a.invert_spectrum = true;
+        else if (k == "--auto-invert") a.auto_invert = true;
         else if (k == "--rx-queue-depth") a.rx_queue_depth = std::atoi(val().c_str());
         else if (k == "--drop-if-slow") a.drop_if_slow = true;
         else if (k == "--test-step") a.test_step = std::atoll(val().c_str());

@@ -614,7 +614,7 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     offset_->sign = true;      // (then the saved value: drawn with its sign)
     offset_->setValue(s.value("rx/offset_khz", 0).toDouble());
     spectrum_->setScale(true, 0);    // the spectrum's scale: always Auto (fitted to noise and peak)
-    // Auto: the receiver finds the far end's modulation among the mode's (A-D, VU) when
+    // Auto: the receiver finds the far end's modulation among the mode's (A-D, SH, VU) when
     // frames fail as a wrong one does; the Mod buttons follow it (takes effect at the next RX start)
     auto* modRow = new QWidget;
     modRow->setObjectName("seg");
@@ -626,7 +626,7 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     modAuto->setCheckable(true);
     modAuto->setFocusPolicy(Qt::NoFocus);
     modAuto->setChecked(s.value("rx/mod_auto", false).toBool());
-    modAuto->setToolTip("Find the far end's modulation (modes A-D and VU)");
+    modAuto->setToolTip("Find the far end's modulation (modes A-D, SH and VU)");
     ml->addWidget(modAuto);
     connect(modAuto, &QPushButton::toggled, this, [](bool on) { settings().setValue("rx/mod_auto", on); });
     int r = 0;
@@ -966,6 +966,7 @@ void RxPage::doToggleRun() {
     args << "--input" << "pluto" << "--sample-rate" << rate;
     args += radio;
     if (s.value("rx/invert", false).toBool()) args << "--invert-spectrum";
+    if (s.value("rx/invert_auto", false).toBool()) args << "--auto-invert";
     // duplex: this receiver's radio also transmits (the TX page's samples, tdd.h)
     duplexRun_ = !duplexRole().isEmpty();
     if (duplexRun_) {
@@ -1140,6 +1141,12 @@ void RxPage::onLine(const QString& t) {
         mod_->setValue(am.captured(1));
         settings().setValue("rx/mod", am.captured(1));
         status_->setText("Modulation found: " + am.captured(1).toUpper());
+    }
+    // Auto invert flipped the spectrum: the next start begins from it
+    static const QRegularExpression autoInv(R"(^Auto invert: .* spectrum now (\S+))");
+    if (auto ai = autoInv.match(t); ai.hasMatch()) {
+        settings().setValue("rx/invert", ai.captured(1) == "inverted");
+        status_->setText("Spectrum: trying " + ai.captured(1));
     }
     static const QRegularExpression frag(R"(^Fragment seq=(\d+): (OK|CRC MISMATCH)\s+CFO=(\S+)\s+BER=(\S+)\s+EVM=(\S+))");
     static const QRegularExpression station(R"(callsign[:=]\s*(\S+))", QRegularExpression::CaseInsensitiveOption);
@@ -1590,7 +1597,7 @@ void TxPage::refreshInfo() {
     linkInfo_->setStyleSheet(c);
 }
 
-// audio only: Opus whenever the whole link carries it (SH 10 QPSK's 4.7 kbps does),
+// audio only: Opus whenever the link gives it 6 kbps or more (else Codec2),
 // not the shared link's Codec2-below-16-kbps
 QString TxPage::suggestedCodec(const QString& shared) const {
     if (settings().value("tx/content", "auto").toString() != "audio") return shared;
@@ -2008,17 +2015,21 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         emit spectrumAveragesChanged(v.toInt());
     });
     // the receive path mirrors the spectrum (a high-side-LO converter, some radios):
-    // the receiver un-mirrors it (--invert-spectrum)
-    auto* inv = new Segmented({{"normal", "Normal"}, {"inverted", "Inverted"}},
-                              s.value("rx/invert", false).toBool() ? "inverted" : "normal");
+    // the receiver un-mirrors it (--invert-spectrum); Auto: it flips between the two
+    // while no header decodes (--auto-invert, starting from the last one found)
+    auto* inv = new Segmented({{"normal", "Normal"}, {"inverted", "Inverted"}, {"auto", "Auto"}},
+                              s.value("rx/invert_auto", false).toBool() ? "auto"
+                              : s.value("rx/invert", false).toBool() ? "inverted" : "normal");
     rf->addRow(rowLabel("RX spectrum"), inv);
     auto* inote = new QLabel("Inverted: for a receive path that mirrors the signal (a converter with its LO "
-                             "above it). Sync is found but every header fails when this is wrong.");
+                             "above it). Sync is found but every header fails when this is wrong. Auto: tries the other after "
+                             "8 s without a header.");
     inote->setObjectName("dim");
     inote->setWordWrap(true);
     rf->addRow(inote);
     connect(inv, &Segmented::changed, this, [this](const QString& v) {
-        settings().setValue("rx/invert", v == "inverted");
+        settings().setValue("rx/invert_auto", v == "auto");
+        if (v != "auto") settings().setValue("rx/invert", v == "inverted");
         emit rxSettingChanged();
     });
     // the sound output
