@@ -3,6 +3,14 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.1.4
+- RX modulation Auto: the receiver finds the far end's modulation by itself (modes A-D, SH and VU); the Mod buttons follow it
+- RX spectrum Auto (Config, Receiver): flips between normal and inverted when no header decodes for 8 s
+- LimeRFE on its own USB port, so it works with any radio (Pluto, HackRF and others), not only a LimeSDR. Choose TX and RX ports, including J5 for HF and 50-70 MHz; a help button explains the settings
+- Codec2 again whenever Opus would get under 6 kbps (audio only or alongside video): it sounds better at those rates
+- RX audio: a steady tone no longer wanders in pitch, especially with video on
+- Linux: fixes 'sound disconnected' on PulseAudio systems, and on systems where PipeWire runs but doesn't handle sound
+
 ## 1.1.3
 - Audio only: Opus whenever the link can carry it (SH 10 kHz QPSK now gets Opus at about 4.4 kbps, not Codec2)
 - Opus tuned for voice at full encoder quality: clearer speech on the slow links
