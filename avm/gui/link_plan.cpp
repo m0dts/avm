@@ -14,7 +14,7 @@ static const double VIDEO_CONFIG_REPEAT_S = 2.0;
 static const int WAVELET_CONFIG_BYTES = RECORD_HEADER_LEN + 6 + 4;
 static const int CODEC2_FRAME_BYTES = 8;
 static const double LOW_LINK_KBPS = 16;              // touch_tx_page.py: Codec2 below, Opus from here
-static const double AUDIO_ONLY_MIN_KBPS = 4;          // audio only: Opus from here (else Codec2)
+static const double AUDIO_ONLY_MIN_KBPS = 6;          // audio only: Opus from here (else Codec2)
 static const double AUDIO_SHARE = 0.30, AUDIO_MIN_KBPS = 5, AUDIO_MAX_KBPS = 16;
 
 // touch_widgets.VIDEO_PRESETS / VIDEO_PRESETS_10FPS: (from kbps, size, fps)
@@ -90,6 +90,10 @@ LinkPlan planLink(double link_bps, int frag_bytes, double width_khz, bool statio
             a = best;
         }
         p.opus_kbps = std::floor(a * 10) / 10;
+        if (p.opus_kbps < AUDIO_ONLY_MIN_KBPS) {    // (Opus under 6 kbps: Codec2 sounds better)
+            p.audio_codec = "codec2";
+            p.opus_kbps = 0;
+        }
     }
     // video: the exact rate at a first frame rate, its preset, then the rate at the preset's
     int fb = 0;
@@ -125,7 +129,7 @@ LinkPlan planLinkFor(double link_bps, int frag_bytes, double width_khz, bool sta
             // transmitter dropped them (gaps in the sound)
             const double budget = frag_bytes - 2 - AUDIO_PROFILE_CONFIG_BYTES - (station_id ? RECORD_HEADER_LEN + 2 : 0);
             const double need = std::ceil(p.fragment_s / AUDIO_PACKET_INTERVAL_S * 1.03);
-            // (from 4 kbps: the slow links' Opus, still well above Codec2's 3.2; 0 when even that won't fit)
+            // (from 6 kbps: below it Codec2 sounds better than Opus; 0 when even that won't fit)
             double best = 0;
             for (double c = AUDIO_ONLY_MIN_KBPS; c <= std::min(p.usable_kbps, 48.0) + 1e-9; c += 0.1) {
                 double pkt = std::ceil(c * 1000 * AUDIO_PACKET_INTERVAL_S / 8 - 1e-9) + 1;

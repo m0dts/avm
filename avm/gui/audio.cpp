@@ -28,7 +28,11 @@
 namespace avm {
 
 const double MAX_BUFFER_S = 4.0;  // more than this: drop the oldest (a backlog is only delay)
-const double SYNC_TAU_S = 2.0, SYNC_GAIN = 0.1, SYNC_MAX_ADJ = 0.005;   // media_rx_player's
+// the playback rate steered by the buffer's level over half a minute, within +-300 ppm:
+// enough for two sound cards' clocks (~50-100 ppm apart), and a tone's pitch steady
+// (+-0.03%, 0.1 Hz at 400 Hz). The fragments' bursts (bigger with video) are absorbed
+// by the buffer, not followed (+-0.5% over 2 s: a tone wandered)
+const double SYNC_TAU_S = 30.0, SYNC_GAIN = 0.002, SYNC_MAX_ADJ = 0.0003;
 // a drop (backlog trimmed): a 20 ms equal-power crossfade across the cut; an
 // underrun: 10 ms faded out where the sound ran out and in where it resumes
 const size_t XFADE = 960, EDGE_FADE = 480;
