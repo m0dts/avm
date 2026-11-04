@@ -53,7 +53,7 @@ struct AudioOut::Impl {
     // underruns and no xruns reported; a native PipeWire client stayed clean.
     FILE* pw = nullptr;
     std::thread pwThread;
-    std::atomic<bool> pwStop{false};
+    std::atomic<bool> pwStop{false}, pwDied{false};
     // an output PipeWire doesn't offer, played straight to ALSA ("... (ALSA)")
     ma_context alsa;
     bool alsa_init = false;
@@ -108,8 +108,13 @@ static bool alsaContext(ma_context* ctx) {
     return ma_context_init(&b, 1, nullptr, ctx) == MA_SUCCESS;
 }
 
+// pw-cat once died at its start here: PipeWire running without handling sound (e.g.
+// Ubuntu 22.04's, there for screen sharing beside PulseAudio) -- miniaudio from then on
+static std::atomic<bool> pwCatFailed{false};
+
 // pw-cat there and PipeWire running (AVM_AUDIO_PWCAT=0: miniaudio instead)
 static bool usePwCat() {
+    if (pwCatFailed) return false;
     const char* off = std::getenv("AVM_AUDIO_PWCAT");
     if (off && std::string(off) == "0") return false;
     const char* rt = std::getenv("XDG_RUNTIME_DIR");
@@ -181,6 +186,15 @@ std::vector<std::string> AudioOut::outputs() {
 bool AudioOut::lost() {
     if (!ok_) return false;      // (no output at all: nothing to lose)
     auto now = std::chrono::steady_clock::now();
+#ifndef _WIN32
+    // pw-cat gone within moments of starting: it can't play here (not an unplugged
+    // output) -- the same output again through miniaudio (PulseAudio / ALSA)
+    if (impl_->pw && impl_->pwDied && now - openedT_ < std::chrono::seconds(10)) {
+        pwCatFailed = true;
+        std::fprintf(stderr, "audio: pw-cat stopped at once -- PipeWire not playing sound here; using PulseAudio/ALSA\n");
+        return !open(device_);
+    }
+#endif
     {
         std::lock_guard<std::mutex> g(mu_);
         auto since = lastCb_.time_since_epoch().count() ? lastCb_ : openedT_;
@@ -220,6 +234,7 @@ bool AudioOut::open(const std::string& device) {
         if (impl_->pw) {
             fcntl(fileno(impl_->pw), 1031 /* F_SETPIPE_SZ */, 16384);
             impl_->pwStop = false;
+            impl_->pwDied = false;
             impl_->pwThread = std::thread([this] {
                 const size_t N = RATE / 50;
                 std::vector<float> f(N);
@@ -228,7 +243,10 @@ bool AudioOut::open(const std::string& device) {
                     pull(f.data(), N);
                     for (size_t i = 0; i < N; ++i)
                         s[i] = (short)std::lround(std::max(-1.0f, std::min(1.0f, f[i])) * 32767.0f);
-                    if (fwrite(s.data(), sizeof(short), N, impl_->pw) != N || fflush(impl_->pw) != 0) break;
+                    if (fwrite(s.data(), sizeof(short), N, impl_->pw) != N || fflush(impl_->pw) != 0) {
+                        impl_->pwDied = true;     // (pw-cat exited)
+                        break;
+                    }
                 }
             });
             ok_ = true;
