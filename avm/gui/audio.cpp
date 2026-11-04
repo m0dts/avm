@@ -197,8 +197,10 @@ bool AudioOut::lost() {
 #endif
     {
         std::lock_guard<std::mutex> g(mu_);
-        auto since = lastCb_.time_since_epoch().count() ? lastCb_ : openedT_;
-        if (now - since > std::chrono::seconds(3)) return true;
+        // playing, then stopped (3 s): unplugged. Never started: a slower start
+        // allowed (PulseAudio can take a while to run a new stream)
+        bool started = lastCb_.time_since_epoch().count() != 0;
+        if (now - (started ? lastCb_ : openedT_) > std::chrono::seconds(started ? 3 : 10)) return true;
     }
 #ifndef _WIN32
     if (namedPw_ && now - lostCheckT_ > std::chrono::seconds(5)) {
