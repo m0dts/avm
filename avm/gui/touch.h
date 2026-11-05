@@ -90,7 +90,8 @@ private:
 class KeypadDialog : public QDialog {
     Q_OBJECT
 public:
-    KeypadDialog(const QString& title, const QString& text, QWidget* parent);
+    // recent: quick-set buttons along the top (the last frequencies used, MHz)
+    KeypadDialog(const QString& title, const QString& text, QWidget* parent, const QStringList& recent = {});
     bool value(double* v) const;
 protected:
     void keyPressEvent(QKeyEvent* e) override;   // a USB keyboard too: digits, '.', Backspace, Enter, Esc
@@ -117,6 +118,7 @@ signals:
     void changed(double hz);
 private:
     void edit();
+    QString recentKey() const;
     QString title_, radio_ = "radio";
     double hz_ = 0, lo_ = 0.001, hi_ = 6000;
 };

@@ -63,6 +63,7 @@ struct Args {
     int fragment_size = 0, max_input_backlog = 0;
     // --output pluto: a radio through SoapySDR (sdr.h), hf_ofdm_tx.py's radio options
     std::string output = "pipe", sdr = "pluto", uri, antenna, lime_rfe;
+    std::string band_gpio;   // --band-gpio: Portsdown 4's band lines (sdr::pigpio::set_band)
     double rf_freq = 0, tx_gain = -10, bandwidth = 0, lo_offset_hz = 0;
     int tx_queue_depth = 8;
     std::string gain_file;
@@ -80,10 +81,17 @@ struct ByteInput {
     std::condition_variable cv;
     std::deque<char> q;
     bool end = false;
+    // [latency]: when each push arrived (its end offset), so a read knows how long
+    // its first byte waited here (last_wait)
+    long long pushed = 0, taken = 0;
+    std::deque<std::pair<long long, double>> stamps;
+    double last_wait = -1;
     void push(const void* p, size_t n) {
         std::lock_guard<std::mutex> g(mu);
         if (end) return;
         q.insert(q.end(), (const char*)p, (const char*)p + n);
+        pushed += (long long)n;
+        stamps.push_back({pushed, mono()});
         cv.notify_all();
     }
     void close() {
@@ -97,6 +105,9 @@ struct ByteInput {
         size_t k = std::min(n, q.size());
         std::copy(q.begin(), q.begin() + k, out);
         q.erase(q.begin(), q.begin() + k);
+        while (!stamps.empty() && stamps.front().first <= taken) stamps.pop_front();
+        last_wait = stamps.empty() ? -1 : mono() - stamps.front().second;
+        taken += (long long)k;
         return k;
     }
 };
@@ -106,6 +117,8 @@ struct ByteInput {
 struct LiveInput {
     size_t frag, cap;
     std::deque<std::string> buf;
+    std::deque<double> bt;       // when each arrived ([latency])
+    double last_t = -1;          // the last taken's
     std::mutex mu;
     std::condition_variable cv;
     bool eof = false;
@@ -124,8 +137,9 @@ struct LiveInput {
             std::lock_guard<std::mutex> g(mu);
             if (!got) { eof = true; cv.notify_all(); return; }
             buf.push_back(std::move(d));
+            bt.push_back(mono());
             while (buf.size() > cap) {
-                buf.pop_front();
+                { buf.pop_front(); bt.pop_front(); }
                 ++dropped;
                 if (dropped == 1 || dropped % 20 == 0)
                     avm_logf("[latency cap] dropped a stale input fragment (%lld so far)\n", dropped);
@@ -136,7 +150,7 @@ struct LiveInput {
     void end_warmup(size_t c, size_t keep = 0) {
         {
             std::lock_guard<std::mutex> g(mu);
-            while (buf.size() > keep) { buf.pop_front(); ++dropped; }
+            while (buf.size() > keep) { { buf.pop_front(); bt.pop_front(); } ++dropped; }
             cap = c;
         }
         avm_logf("[latency cap] discarded the warmup backlog; %lld stale fragment(s) dropped so far\n", dropped);
@@ -147,7 +161,8 @@ struct LiveInput {
         std::lock_guard<std::mutex> g(mu);
         if (buf.empty()) return false;
         out = std::move(buf.front());
-        buf.pop_front();
+        last_t = bt.front();
+        { buf.pop_front(); bt.pop_front(); }
         return true;
     }
     bool ended() {
@@ -169,7 +184,7 @@ struct LiveInput {
         if (waiting >= STANDING_MIN) {
             if (standing_since < 0) standing_since = now;
             else if (now - standing_since >= STANDING_S) {
-                while (buf.size() > STANDING_MIN - 1) { buf.pop_front(); ++dropped; }
+                while (buf.size() > STANDING_MIN - 1) { { buf.pop_front(); bt.pop_front(); } ++dropped; }
                 standing_since = -1;
                 avm_logf("[latency cap] %zu fragments had been waiting %g+ s: dropped %zu (%lld dropped so far)\n",
                              waiting, STANDING_S, waiting - buf.size(), dropped);
@@ -183,7 +198,8 @@ struct LiveInput {
             peak = 0;
         }
         out = std::move(buf.front());
-        buf.pop_front();
+        last_t = bt.front();
+        { buf.pop_front(); bt.pop_front(); }
         return true;
     }
 };
@@ -502,6 +518,20 @@ struct Transmitter {
         }
     }
 
+    // [latency] every 5 s: how long the fragments waited in the input before modulation
+    double lat_t = -1, lat_sum = 0, lat_max = 0;
+    int lat_n = 0;
+    void note_input_wait(double w) {
+        if (w < 0) return;
+        lat_sum += w; lat_max = std::max(lat_max, w); ++lat_n;
+        double now = mono();
+        if (lat_t < 0) lat_t = now;
+        if (now - lat_t < 5) return;
+        avm_logf("[latency] TX input: fragments handed to the radio %.0f ms on average (max %.0f) after arriving\n",
+                 lat_sum / lat_n * 1e3, lat_max * 1e3);
+        lat_t = now; lat_sum = lat_max = 0; lat_n = 0;
+    }
+
     void run_stream() {
         std::unique_ptr<LiveInput> backlog;
         if (a.max_input_backlog) backlog.reset(new LiveInput(a.fragment_size, 1, in));
@@ -525,11 +555,17 @@ struct Transmitter {
                 size_t got = in.read(&data[0], a.fragment_size);
                 if (!got) break;
                 data.resize(got);
+                note_input_wait(in.last_wait);
                 transmit(data, "");
             }
         } else {
             backlog->end_warmup(a.max_input_backlog);
-            while (!stopping && backlog->next(data)) transmit(data, "");
+            while (!stopping && backlog->next(data)) {
+                transmit(data, "");
+                // (from its arrival: the backlog's wait, the modulation, and the wait for the
+                // radio's queue to take it -- the waveform before it still being written)
+                note_input_wait(mono() - backlog->last_t);
+            }
             if (backlog->dropped)
                 avm_logf("Dropped %lld stale input fragment(s) in total (--max-input-backlog).\n", backlog->dropped);
         }
@@ -572,6 +608,7 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         else if (k == "--pluto-bandwidth") a.bandwidth = std::atof(val().c_str());
         else if (k == "--sdr-antenna") a.antenna = val();
         else if (k == "--lime-rfe") a.lime_rfe = val();
+        else if (k == "--band-gpio") a.band_gpio = val();
         else if (k == "--tx-queue-depth") a.tx_queue_depth = std::atoi(val().c_str());
         else if (k == "--gain-file") a.gain_file = val();
         else if (k == "--lo-offset-hz") a.lo_offset_hz = std::atof(val().c_str());
@@ -611,6 +648,7 @@ struct Engine {
 
     bool open(int argc, const char* const* argv) {
         if (!parse_args(argc, argv, a)) return false;
+        if (a.rf_freq > 0) sdr::pigpio::set_band(a.band_gpio, a.rf_freq);
         std::string err;
         if (!build_mode(a.mode, a.occupancy, a.modulation, a.fec, m, err)) {
             avm_logf("ERROR: %s\n", err.c_str());

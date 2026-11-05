@@ -248,12 +248,24 @@ void Stepper::setValue(double v, bool emitChange) {
 }
 
 // ---------------------------------------------------------------- KeypadDialog
-KeypadDialog::KeypadDialog(const QString& title, const QString& text, QWidget* parent) : QDialog(parent) {
+KeypadDialog::KeypadDialog(const QString& title, const QString& text, QWidget* parent, const QStringList& recent)
+    : QDialog(parent) {
     frameless(this);
     auto* lay = new QVBoxLayout(this);
     auto* t = new QLabel(title);
     t->setObjectName("big");
     lay->addWidget(t);
+    if (!recent.isEmpty()) {     // the last frequencies used: a tap sets one
+        auto* rr = new QHBoxLayout;
+        for (const QString& f : recent) {
+            auto* b = new QPushButton(f);
+            b->setFocusPolicy(Qt::NoFocus);
+            connect(b, &QPushButton::clicked, this, [this, f] { display_->setText(f); accept(); });
+            rr->addWidget(b, 1);
+        }
+        for (int i = recent.size(); i < 5; ++i) rr->addStretch(1);
+        lay->addLayout(rr);
+    }
     display_ = new QLabel(text);
     display_->setObjectName("big");
     display_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -321,20 +333,34 @@ void FreqButton::setHz(double hz) {
 void FreqButton::edit() {
     QString cur = QString::number(hz_ / 1e6, 'f', 4);
     while (cur.contains('.') && (cur.endsWith('0') || cur.endsWith('.'))) cur.chop(1);
-    KeypadDialog d(title_, cur, this);
+    QStringList recent = settings().value(recentKey()).toStringList();
+    KeypadDialog d(title_, cur, this, recent);
     double mhz;
     if (!d.exec() || !d.value(&mhz)) return;
     if (mhz < lo_ || mhz > hi_) {
-        QMessageBox::information(this, "Frequency", QString("%1 MHz is outside the %2's range (%3-%4 MHz).")
-                                                        .arg(mhz).arg(radio_).arg(lo_).arg(hi_));
+        QMessageBox box(QMessageBox::Information, "Frequency", QString("%1 MHz is outside the %2's range (%3-%4 MHz).")
+                                                                   .arg(mhz).arg(radio_).arg(lo_).arg(hi_),
+                        QMessageBox::Ok, this);
+        embedDialog(&box, this);
+        box.exec();
         return;
     }
     double hz = std::round(mhz * 1e6);
+    // the last 5 used, newest first
+    QString f = QString::number(hz / 1e6, 'f', 6);
+    while (f.contains('.') && (f.endsWith('0') || f.endsWith('.'))) f.chop(1);
+    recent.removeAll(f);
+    recent.prepend(f);
+    while (recent.size() > 5) recent.removeLast();
+    settings().setValue(recentKey(), recent);
     if (hz != hz_) {
         setHz(hz);
         emit changed(hz);
     }
 }
+
+// the recent list's setting: TX and RX each their own ("TX frequency" -> recent_freqs/tx)
+QString FreqButton::recentKey() const { return "recent_freqs/" + title_.section(' ', 0, 0).toLower(); }
 
 // ---------------------------------------------------------------- KeyboardDialog
 const QStringList KeyboardDialog::ROWS = {"1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM-.:"};   // (host:port too; space: its own bar)

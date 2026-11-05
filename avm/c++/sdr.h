@@ -224,6 +224,14 @@ inline void close_device(void* dev) {
     for (size_t i = 0; i < P.open.size(); ++i)
         if (P.open[i].dev == dev) {
             if (--P.open[i].users == 0) {
+#ifdef _WIN32
+                // an Airspy (not the HF+): closing it crashes in its Windows driver
+                // (airspy_close -> libusb_free_transfer), stream or not -- left open for
+                // the next start instead, which reuses it (closed when AVM exits)
+                const std::string& k = P.open[i].args;
+                if (k.find("driver=airspy") != std::string::npos && k.find("driver=airspyhf") == std::string::npos)
+                    return;
+#endif
                 if (A.unmake) A.unmake(dev);
                 P.open.erase(P.open.begin() + (long)i);
             }
@@ -696,6 +704,55 @@ private:
     std::thread th_;
 };
 
+// ---- a Raspberry Pi's GPIO, through Raspberry Pi OS's pinctrl (Pi 4 and Pi 5 alike)
+namespace pigpio {
+inline bool available() {
+#ifdef __linux__
+    static int ok = -1;
+    if (ok < 0) {
+        ok = 0;
+        if (FILE* f = std::fopen("/proc/device-tree/model", "r")) {
+            char m[128] = {0};
+            size_t n = std::fread(m, 1, sizeof m - 1, f);
+            std::fclose(f);
+            m[n] = 0;
+            ok = std::strstr(m, "Raspberry Pi") && access("/usr/bin/pinctrl", X_OK) == 0;
+        }
+    }
+    return ok == 1;
+#else
+    return false;
+#endif
+}
+
+// Portsdown 4's band lines, so its band-switched filters, amplifiers and relays work
+// as they are: D0 (LSB) pin 32, D1 pin 35, D2 pin 7, D3 pin 22 (BCM 12, 19, 4, 25).
+// --band-gpio: the 4-bit codes of its seven direct bands, 50, 71, 146, 437, 1255 MHz,
+// 13 and 9 cm (Portsdown's defaults "8,0,1,2,3,11,13"), the band picked by frequency
+// as Portsdown does
+inline void set_band(const std::string& codes, double hz) {
+    if (codes.empty() || !available()) return;
+    std::vector<int> c;
+    for (size_t i = 0; i <= codes.size();) {
+        size_t j = codes.find(',', i);
+        if (j == std::string::npos) j = codes.size();
+        c.push_back(std::atoi(codes.substr(i, j - i).c_str()) & 15);
+        i = j + 1;
+    }
+    static const double EDGE_MHZ[] = {60, 100, 250, 950, 2000, 3000};   // (between the bands)
+    static const char* NAME[] = {"50 MHz", "71 MHz", "146 MHz", "70 cm", "23 cm", "13 cm", "9 cm"};
+    int b = 0;
+    while (b < 6 && hz / 1e6 >= EDGE_MHZ[b]) ++b;
+    if (b >= (int)c.size()) return;
+    static const int PIN[4] = {12, 19, 4, 25};
+    for (int k = 0; k < 4; ++k) {
+        std::string cmd = "/usr/bin/pinctrl set " + std::to_string(PIN[k]) + ((c[b] >> k & 1) ? " op dh" : " op dl");
+        if (std::system(cmd.c_str()) != 0) { avm_logf("Band: pinctrl failed (GPIO %d)\n", PIN[k]); return; }
+    }
+    avm_logf("Band %s: GPIO band code %d (pins 32, 35, 7, 22)\n", NAME[b], c[b]);
+}
+}  // namespace pigpio
+
 struct RxConfig {
     std::string driver = "pluto", uri, antenna;
     std::string lime_rfe;      // --lime-rfe: a LimeRFE on the LimeSDR (parse_rfe)
@@ -1012,24 +1069,7 @@ struct TxConfig {
 // Portsdown 4's "TX LED / PTT drive", so its PTT wiring works as it is. Through
 // Raspberry Pi OS's pinctrl (Pi 4 and Pi 5 alike); elsewhere nothing.
 namespace ptt {
-inline bool available() {
-#ifdef __linux__
-    static int ok = -1;
-    if (ok < 0) {
-        ok = 0;
-        if (FILE* f = std::fopen("/proc/device-tree/model", "r")) {
-            char m[128] = {0};
-            size_t n = std::fread(m, 1, sizeof m - 1, f);
-            std::fclose(f);
-            m[n] = 0;
-            ok = std::strstr(m, "Raspberry Pi") && access("/usr/bin/pinctrl", X_OK) == 0;
-        }
-    }
-    return ok == 1;
-#else
-    return false;
-#endif
-}
+inline bool available() { return pigpio::available(); }
 inline void set(bool on) {
     if (!available()) return;
     if (std::system(on ? "/usr/bin/pinctrl set 21 op dh" : "/usr/bin/pinctrl set 21 op dl") != 0)
@@ -1253,6 +1293,7 @@ private:
         Api& A = api();
         if (failed_) return;      // (the radio gone: the queue drains, ok() says so)
         if (cfg_.driver == "lime") pace(s.size());
+        if (rt_t0_ < 0) rt_t0_ = mono_s();   // (before the first write: what the buffers take at once counts)
         size_t pos = 0;
         while (pos < s.size() && !abort_) {      // (closing: given up at once)
             size_t n = std::min<size_t>(1 << 16, s.size() - pos);
@@ -1289,6 +1330,17 @@ private:
             const double now = mono_s();
             if (rt_t0_ < 0) rt_t0_ = now;
             rt_sent_ += (double)r;
+            // [latency] every 5 s: how far the samples written run ahead of the air -- what
+            // the driver and the radio hold (the least over the 5 s: between bursts)
+            const double ahead = rt_sent_ / rate - (now - rt_t0_);
+            lat_min_ = std::min(lat_min_, ahead);
+            if (lat_t_ < 0) lat_t_ = now;
+            if (now - lat_t_ >= 5) {
+                avm_logf("[latency] TX radio: %.0f ms of samples buffered ahead of the air (driver and radio)\n",
+                         lat_min_ * 1e3);
+                lat_t_ = now;
+                lat_min_ = 1e9;
+            }
             if ((now - rt_t0_) - rt_sent_ / rate > RADIO_GONE_S) {
                 avm_logf("ERROR: %s TX: %.0f s behind real time -- the radio has gone (unplugged?)\n",
                          cfg_.driver.c_str(), RADIO_GONE_S);
@@ -1314,7 +1366,7 @@ private:
     std::deque<std::vector<std::complex<float>>> q_;
     bool stop_ = false, busy_ = false;
     std::atomic<bool> failed_{false}, abort_{false};
-    double fail_since_ = -1, rt_t0_ = -1, rt_sent_ = 0;
+    double fail_since_ = -1, rt_t0_ = -1, rt_sent_ = 0, lat_t_ = -1, lat_min_ = 1e9;
     double pace_t0_ = -1, pace_sent_ = 0;
     std::unique_ptr<FileWatcher> gain_watch_;
 };

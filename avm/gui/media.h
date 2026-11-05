@@ -47,7 +47,11 @@ private:
     // pictures spread at the frame rate; a backlog beyond a burst shown at once;
     // 3% fast while any wait, so a faster TX clock can't build up delay
     void showNext();
+    void noteShown(double now);
     std::deque<QImage> frames_;
+    std::deque<double> frameT_;          // when each was decoded ([latency])
+    double latT_ = -1, latSum_ = 0, latMax_ = 0;
+    int latN_ = 0;
     QTimer showTimer_;
     double frameInterval_ = 0, nextShow_ = -1;
     double burst_ = 0, burstT_ = -1;

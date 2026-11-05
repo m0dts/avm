@@ -111,6 +111,7 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
     {
         std::lock_guard<std::mutex> g(mu_);
         video_q_.clear();
+        video_t_.clear();
         audio_q_.clear();
         pcm_.clear();
     }
@@ -328,6 +329,7 @@ void MediaTx::encodePicture() {
              std::to_string(enc_s_ / frames_ * 1000).substr(0, 4) + " ms");
     std::lock_guard<std::mutex> g(mu_);
     video_q_.emplace_back(pkt_.begin(), pkt_.begin() + n);
+    video_t_.push_back(t0);
 }
 
 // every 500 audio packets, their rate (each 20 ms: 50 a second when real time)
@@ -430,6 +432,18 @@ void MediaTx::assemble() {
             std::lock_guard<std::mutex> g(mu_);
             for (auto& a : audio_q_) frAddAudio_(fr_, a.data(), (int)a.size());
             for (auto& v : video_q_) frAddVideo_(fr_, v.data(), (int)v.size(), 0);
+            // [latency] every 5 s: a picture's time from the camera's callback (encoding
+            // included) to the framer, which sends it at once as fragments
+            const double now = mono();
+            for (double t : video_t_) { lat_sum_ += now - t; lat_max_ = std::max(lat_max_, now - t); ++lat_n_; }
+            if (lat_t_ < 0) lat_t_ = now;
+            if (now - lat_t_ >= 5 && lat_n_) {
+                log_("[latency] TX video: pictures reached the framer " + std::to_string((int)std::lround(lat_sum_ / lat_n_ * 1e3)) +
+                     " ms on average (max " + std::to_string((int)std::lround(lat_max_ * 1e3)) + ") after capture, " +
+                     std::to_string(cfg_.frame_bytes) + " bytes each");
+                lat_t_ = now; lat_sum_ = lat_max_ = 0; lat_n_ = 0;
+            }
+            video_t_.clear();
             audio_q_.clear();
             video_q_.clear();
         }

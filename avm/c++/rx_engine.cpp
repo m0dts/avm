@@ -194,6 +194,7 @@ struct Reader {
     bool eof = false;
     std::atomic<bool> stopping{false};
     FrontEnd* fe = nullptr;
+    std::atomic<long> last_read_n{0};   // samples per radio read, the last ([latency])
     // --invert-spectrum: I/Q conjugated as it arrives (an inverting receive path:
     // a high-side-LO converter, some radios' IQ order), as hf_ofdm_rx.py's
     bool invert = false;
@@ -292,7 +293,7 @@ struct Reader {
                     if (!stopping) avm_logf("ERROR: the radio stopped sending -- RX stopped\n");
                     break;
                 }
-                if (n > 0) process_samples(buf.data(), n);
+                if (n > 0) { last_read_n = n; process_samples(buf.data(), n); }
             }
             mark_eof();
         });
@@ -539,6 +540,7 @@ struct Args {
     bool auto_invert = false;       // --auto-invert: the spectrum flipped after a while without a header
     // --input pluto: a radio through SoapySDR (sdr.h), hf_ofdm_rx.py's radio options
     std::string input = "pipe", sdr = "pluto", uri, antenna, lime_rfe;
+    std::string band_gpio;   // --band-gpio: Portsdown 4's band lines (sdr::pigpio::set_band)
     double rf_freq = 0, rx_gain = 30, bandwidth = 0, ppm = 0, warmup_s = 0.75;
     bool agc = false;
     bool spectrum = false;
@@ -664,6 +666,8 @@ struct Receiver {
     // duplex
     std::unique_ptr<Tdd> tdd_;
     sdr::RadioIn* radio_src = nullptr;
+    double lat_t = -1, lat_sum = 0, lat_max = 0;   // [latency]: the decode's, over 5 s
+    int lat_n = 0;
     TddView* tdd_view = nullptr;
 
     std::function<void(const char*, size_t)> out;
@@ -1423,7 +1427,13 @@ struct Receiver {
         if (now - const_t > 1.0) {
             const_t = now;
             struct stat sb;
-            const_on = ::stat("/dev/shm/avm_constellation", &sb) == 0;
+            // the GUI's flag file: /dev/shm, or on Windows its temp folder (QDir::tempPath)
+#ifdef _WIN32
+            static const std::string flag = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "/avm_constellation";
+#else
+            static const std::string flag = "/dev/shm/avm_constellation";
+#endif
+            const_on = ::stat(flag.c_str(), &sb) == 0;
         }
         if (!const_on || pts.empty()) return;
         const size_t MAXP = 3000;
@@ -1770,6 +1780,16 @@ struct Receiver {
             expected_next.v = (frag_idx + 1) % 65536;
             st.last_ok_time = now_ok;
             double lag = reader.total() / 8.0 / M.fs - st.nss / M.fs;
+            // [latency] every 5 s: the input already past each fragment's end when it was
+            // decoded -- the time from its last sample arriving to its data going out
+            lat_sum += lag; lat_max = std::max(lat_max, lag); ++lat_n;
+            if (lat_t < 0) lat_t = now_ok;
+            if (now_ok - lat_t >= 5) {
+                avm_logf("[latency] RX decode: fragments out %.0f ms on average (max %.0f) after their last sample "
+                         "arrived; radio reads of %.0f ms\n", lat_sum / lat_n * 1e3, lat_max * 1e3,
+                         radio_src && radio_src->rate > 0 ? reader.last_read_n / radio_src->rate * 1e3 : 0.0);
+                lat_t = now_ok; lat_sum = lat_max = 0; lat_n = 0;
+            }
             if (slow && a.drop_if_slow && lag > DROP_IF_SLOW_LAG_S) {
                 ++fragments_dropped;
                 avm_logf("  -> DROPPED (slower than realtime, %.2fs behind live, seq=%u, %lld dropped so far)\n",
@@ -1824,6 +1844,7 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         else if (k == "--pluto-bandwidth") a.bandwidth = std::atof(val().c_str());
         else if (k == "--sdr-antenna") a.antenna = val();
         else if (k == "--lime-rfe") a.lime_rfe = val();
+        else if (k == "--band-gpio") a.band_gpio = val();
         else if (k == "--sdr-ppm") a.ppm = std::atof(val().c_str());
         else if (k == "--rx-warmup-s") a.warmup_s = std::atof(val().c_str());
         else if (k == "--verbose") {}
@@ -1868,6 +1889,7 @@ struct Engine {
     // set up (options, mode, radio); false: the reason has been logged
     bool open(int argc, const char* const* argv) {
         if (!parse_args(argc, argv, a)) return false;
+        if (a.rf_freq > 0) sdr::pigpio::set_band(a.band_gpio, a.rf_freq);
         if (a.tdd_cycle_s && !a.tdd_slot_s) a.tdd_slot_s = a.tdd_cycle_s / 2;
         if (a.tdd_tx && (!a.tdd_cycle_s || a.input == "pipe" || a.sdr != "pluto")) {
             avm_logf("ERROR: --tdd-tx needs --tdd-cycle-s and a PlutoSDR (--input pluto --sdr pluto)\n");

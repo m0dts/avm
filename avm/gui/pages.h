@@ -85,7 +85,7 @@ int fragmentSize(double khz);
 void applyModeType(Segmented* mode, Segmented* bw, Segmented* mod);
 void enforceModeLimits(Segmented* mode, Segmented* bw, Segmented* mod);
 // a radio row: frequency, radio and (with a LimeSDR) its port, side by side
-QWidget* radioRow(FreqButton* freq, RadioPicker* radio, Picker* port);
+QWidget* radioRow(RadioPicker* radio, Picker* port);
 
 // Shared settings (QSettings: the registry on Windows, ~/.config on Linux;
 // an INI file instead after setSettingsFile, before the first use)

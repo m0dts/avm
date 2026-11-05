@@ -36,7 +36,7 @@ QString stylesheet(const char* accent) {
                "QPushButton#run { font-size: %9px; font-weight: bold; min-height: %10px; }"
                "QPushButton#msg { font-size: %11px; min-height: %10px; }"
                "QPushButton#toggle { font-size: %12px; font-weight: bold; min-width: %13px; }")
-               .arg(BUTTON, TEXT, f(6), f(37), f(8), f(15), BUTTON_PRESSED, accent, f(20))
+               .arg(BUTTON, TEXT, f(6), f(37), f(5), f(17), BUTTON_PRESSED, accent, f(20))   // (17 px text, 5 px sides: was 15 / 8)
                .arg(f(56), f(32), f(18), f(90)) +
            QString(
                "QLineEdit, QComboBox { background: %1; border: none; border-radius: %2px;"

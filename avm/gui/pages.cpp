@@ -419,16 +419,21 @@ static bool captureBand(const QString& mode, double khz, const QString& mod, dou
     return fn && fn(mode.toUtf8().constData(), khz, mod.toUtf8().constData(), lo, hi);
 }
 
-int fragmentSize(double khz) { return khz > 200 ? 2048 : 1024; }
+// VU 250 kHz: 2048 bytes, or with Low latency (Experimental) 1024 -- half the air time
+// a fragment takes (108 -> 61 ms at QPSK), ~12% less throughput; both ends must agree
+int fragmentSize(double khz) {
+    const bool low = settings().value("experimental", false).toBool() && settings().value("low_latency", false).toBool();
+    return khz > 200 && !low ? 2048 : 1024;
+}
 
-QWidget* radioRow(FreqButton* freq, RadioPicker* radio, Picker* port) {
+// the radio and (a LimeSDR's) its port, a row above the frequency's
+QWidget* radioRow(RadioPicker* radio, Picker* port) {
     auto* w = new QWidget;
     w->setObjectName("seg");
     auto* lay = new QHBoxLayout(w);
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(ui.px(4));
-    lay->addWidget(freq, 3);
-    lay->addWidget(radio, 2);
+    lay->addWidget(radio, 3);
     lay->addWidget(port, 2);
     return w;
 }
@@ -437,6 +442,8 @@ QWidget* radioRow(FreqButton* freq, RadioPicker* radio, Picker* port) {
 static const QStringList LIME_TX_PORTS = {"Auto", "BAND1", "BAND2"};
 static const QStringList LIME_RX_PORTS = {"Auto", "LNAL", "LNAW", "LNAH"};
 static const double DEFAULT_FREQ_HZ = 146.5e6;
+// Portsdown 4's band codes for its direct bands (50, 71, 146 MHz, 70, 23, 13, 9 cm)
+#define BAND_GPIO_DEFAULT "8,0,1,2,3,11,13"
 
 // the radio arguments both modems take (hf_ofdm_rx/tx's): radio, tuning, LO offset, route, port
 // loOffset: tune the LO off the signal (RX only: TX tunes straight to the frequency)
@@ -462,6 +469,7 @@ static QStringList radioArgs(const QString& dir, double khz, double hz, bool loO
         if (rfeUsb) r += "," + s.value("rfe/serial").toString();
         a << "--lime-rfe" << r;
     }
+    if (s.value("band_gpio/on", false).toBool()) a << "--band-gpio" << s.value("band_gpio/codes", BAND_GPIO_DEFAULT).toString();
     // KiwiSDR: the server set in Config (Receiver), always the current one
     if (sdr == "kiwi") a << "--pluto-uri" << s.value("kiwi_server").toString().trimmed();
     // RTL-SDR: its crystal's correction (RX page, shown with an RTL-SDR)
@@ -630,7 +638,7 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     ml->addWidget(modAuto);
     connect(modAuto, &QPushButton::toggled, this, [](bool on) { settings().setValue("rx/mod_auto", on); });
     int r = 0;
-    for (auto p : QList<QPair<QString, QWidget*>>{{"Freq", radioRow(freq_, radio_pick_, port_)}, {"Offset", offset_}, {"PPM", ppm_},
+    for (auto p : QList<QPair<QString, QWidget*>>{{"Radio", radioRow(radio_pick_, port_)}, {"Freq", freq_}, {"Offset", offset_}, {"PPM", ppm_},
                                                    {"Gain", gain_},
                                                    {"Mode", mode_}, {"kHz", bw_}, {"Mod", modRow}}) {
         grid->addWidget(p.second == ppm_ ? ppmLabel_ : rowLabel(p.first), r, 0);
@@ -989,8 +997,7 @@ void RxPage::doToggleRun() {
 // The received signal's equalised data points (touch_widgets.ConstellationDialog):
 // the last two fragments as a density picture, a fixed scale per modulation.
 // While open, the receiver sends them ("[constellation] <base64 complex64>"
-// lines): its flag file is created here and removed on close.
-static const char* CONST_FLAG = "/dev/shm/avm_constellation";
+// lines): its flag file (/dev/shm, or the temp folder) is created here and removed on close.
 
 class ConstellationDialog : public QDialog {
 public:
@@ -1013,12 +1020,13 @@ public:
         lay->addWidget(view_, 1);
         connect(clear, &QPushButton::clicked, this, [this] { frags_.clear(); view_->clear(); });
         connect(close, &QPushButton::clicked, this, &QDialog::accept);
-        QFile f(CONST_FLAG);
-        if (!f.open(QIODevice::WriteOnly)) title_->setText("Constellation -- can't switch the receiver's output on (/dev/shm)");
+        QFile f(tddFile("avm_constellation"));
+        if (!f.open(QIODevice::WriteOnly)) title_->setText("Constellation -- can't switch the receiver's output on");
         QWidget* w = parent->window();
         setGeometry(QRect(w->mapToGlobal(QPoint(0, 0)), w->size()).adjusted(ui.px(40), ui.px(20), -ui.px(40), -ui.px(20)));
+        embedDialog(this, parent);   // the touchscreen: inside the main window, so taps land where shown
     }
-    ~ConstellationDialog() override { QFile::remove(CONST_FLAG); }
+    ~ConstellationDialog() override { QFile::remove(tddFile("avm_constellation")); }
     void add(const QByteArray& b64) {
         QByteArray raw = QByteArray::fromBase64(b64);
         std::vector<std::complex<float>> pts(raw.size() / sizeof(std::complex<float>));
@@ -1424,7 +1432,7 @@ TxPage::TxPage(QWidget* parent) : QWidget(parent) {
     port_ = new Picker("LimeSDR TX port", LIME_TX_PORTS, s.value("tx/port", "Auto").toString());
     gain_ = new Stepper(-89, 0, 1, s.value("tx_gain", -10).toDouble(), " dB");
     int r = 0;
-    for (auto p : QList<QPair<QString, QWidget*>>{{"Freq", radioRow(freq_, radio_pick_, port_)}, {"TX gain", gain_},
+    for (auto p : QList<QPair<QString, QWidget*>>{{"Radio", radioRow(radio_pick_, port_)}, {"Freq", freq_}, {"TX gain", gain_},
                                                    {"Audio", audio_}, {"Mode", mode_}, {"kHz", bw_}, {"Mod", mod_}}) {
         grid->addWidget(rowLabel(p.first), r, 0);
         grid->addWidget(p.second, r++, 1);
@@ -1873,6 +1881,58 @@ void TxPage::callsignChanged() {
 }
 
 // ---------------------------------------------------------------- Config page
+// a config page's notes: an "Info" button opening them on a scrollable page (as labels they
+// crowded the settings and ran off the bottom of the tab)
+// kept at its page's bottom-right corner as the page resizes
+class CornerKeeper : public QObject {
+public:
+    CornerKeeper(QWidget* page, QWidget* w) : QObject(page), w_(w) { page->installEventFilter(this); }
+    bool eventFilter(QObject* o, QEvent* e) override {
+        if (e->type() == QEvent::Resize || e->type() == QEvent::Show) {
+            auto* page = static_cast<QWidget*>(o);
+            int m = ui.px(8);
+            w_->move(page->width() - w_->width() - m, page->height() - w_->height() - m);
+            w_->raise();
+        }
+        return false;
+    }
+private:
+    QWidget* w_;
+};
+
+static void addInfo(QFormLayout* f, QWidget* owner, const QString& title, const QString& html) {
+    QWidget* page = f->parentWidget();
+    auto* b = new QPushButton("?", page);
+    b->setToolTip(title + " help");
+    int s = ui.px(44);
+    b->setFixedSize(s, s);
+    b->setStyleSheet(QString("QPushButton { border-radius: %1px; font-weight: bold; font-size: %2px; }")
+                         .arg(s / 2).arg(ui.px(20)));
+    new CornerKeeper(page, b);
+    QObject::connect(b, &QPushButton::clicked, owner, [owner, title, html] {
+        QDialog d(owner);
+        d.setWindowTitle(title);
+        auto* l = new QVBoxLayout(&d);
+        auto* t = new QLabel(html);
+        t->setWordWrap(true);
+        t->setTextFormat(Qt::RichText);
+        t->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+        t->setContentsMargins(ui.px(8), ui.px(8), ui.px(8), ui.px(8));
+        auto* scroll = new QScrollArea;
+        scroll->setWidget(t);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);   // dragged by a finger
+        l->addWidget(scroll, 1);
+        auto* close = new QPushButton("Close");
+        QObject::connect(close, &QPushButton::clicked, &d, &QDialog::accept);
+        l->addWidget(close, 0, Qt::AlignRight);
+        d.resize(ui.px(560), ui.px(400));
+        embedDialog(&d, owner);   // the touchscreen: inside the main window, so taps land where shown
+        d.exec();
+    });
+}
+
 ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     auto* root = new QHBoxLayout(this);
     root->setContentsMargins(ui.px(8), ui.px(4), ui.px(8), ui.px(8));
@@ -1889,10 +1949,18 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     auto* mtype = new Segmented({{"hf", "HF"}, {"vu", "VHF / UHF"}, {"sat", "Satellite"}},
                                 s.value("mode_type", "hf").toString());
     mof->addRow(rowLabel("Mode type"), mtype);
-    auto* mnote = new QLabel("HF: modes A-D and SH.  VHF / UHF: mode VU, 80-250 kHz.  Satellite: mode S.");
-    mnote->setObjectName("dim");
-    mnote->setWordWrap(true);
-    mof->addRow(mnote);
+    addInfo(mof, this, "Modes", "<p><b>HF:</b> modes A-D and SH.<br><b>VHF / UHF:</b> mode VU, 80-250 kHz.<br>"
+                                "<b>Satellite:</b> mode S.</p>"
+                                "<p><b>Which mode when</b></p>"
+                                "<ul>"
+                                "<li><b>A</b> -- HF ground wave, short steady paths.</li>"
+                                "<li><b>B</b> -- HF sky wave: the general-purpose HF mode.</li>"
+                                "<li><b>C</b> -- HF long distance, more fading and Doppler.</li>"
+                                "<li><b>D</b> -- HF with severe echoes and Doppler (NVIS, poor conditions).</li>"
+                                "<li><b>SH</b> -- HF single carrier, 10-40 kHz: about 8-10 kbit/s in 10 kHz.</li>"
+                                "<li><b>VU</b> -- VHF / UHF (144 / 432 MHz), 80-250 kHz: line of sight, mobile and troposcatter.</li>"
+                                "<li><b>S</b> -- single carrier for fixed and satellite paths, 10-40 kHz.</li>"
+                                "</ul>");
     connect(mtype, &Segmented::changed, this, [this](const QString& v) {
         settings().setValue("mode_type", v);
         emit modeTypeChanged();
@@ -1903,13 +1971,34 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     auto* sf = new QFormLayout(station);
     auto* call = new TextButton("Callsign", s.value("callsign").toString(), 16, "(callsign)");
     sf->addRow(rowLabel("Callsign"), call);
-    auto* snote = new QLabel("Sent with each transmission; the receiving station shows it above the picture.");
-    snote->setObjectName("dim");
-    snote->setWordWrap(true);
-    sf->addRow(snote);
+    addInfo(sf, this, "Station", "<p><b>Callsign:</b> sent with each transmission; the receiving station shows it "
+                                 "above the picture.</p>");
     connect(call, &TextButton::changed, this, [this](const QString& t) {
         settings().setValue("callsign", t);
         emit callsignChanged();
+    });
+    // Band Switch: Portsdown 4's band lines (--band-gpio): its band-switched hardware works with AVM
+    auto* bandsw = new QWidget;
+    auto* bf = new QFormLayout(bandsw);
+    bf->setVerticalSpacing(ui.px(6));
+    auto* band = new Segmented({{"off", "Off"}, {"on", "On"}}, s.value("band_gpio/on", false).toBool() ? "on" : "off");
+    bf->addRow(rowLabel("Band GPIO"), band);
+    auto* codes = new TextButton("Band codes", s.value("band_gpio/codes", BAND_GPIO_DEFAULT).toString(), 40);
+    bf->addRow(rowLabel("Band codes"), codes);
+    addInfo(bf, this, "Band Switch",
+            "<p><b>Raspberry Pi:</b> Portsdown 4's band outputs, D0-D3 on pins 32, 35, 7 and 22, set from the "
+            "frequency at each TX and RX start.</p>"
+            "<p><b>Band codes</b> (0-15) for 50, 71, 146 MHz, 70 cm, 23 cm, 13 cm and 9 cm, as Portsdown's "
+            "defaults: " BAND_GPIO_DEFAULT "</p>");
+    connect(band, &Segmented::changed, this, [](const QString& v) { settings().setValue("band_gpio/on", v == "on"); });
+    connect(codes, &TextButton::changed, this, [codes](const QString& t) {
+        // seven codes, 0-15, else back to the defaults
+        QStringList l = t.split(',', Qt::SkipEmptyParts);
+        bool ok = l.size() == 7;
+        for (const QString& c : l) { bool n; int v = c.trimmed().toInt(&n); ok = ok && n && v >= 0 && v <= 15; }
+        const QString use = ok ? QString(t).remove(' ') : QString(BAND_GPIO_DEFAULT);
+        if (use != t) codes->setValue(use);
+        settings().setValue("band_gpio/codes", use);
     });
 
     // TX media (the sources)
@@ -1980,12 +2069,6 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
                                    s.value("tx/stream_lost_s", 30).toString());
         mf->addRow(rowLabel("Stream lost"), lost);
         connect(lost, &Segmented::changed, this, [](const QString& v) { settings().setValue("tx/stream_lost_s", v.toInt()); });
-        auto* note = new QLabel("Stream: AVM listens for SRT. In OBS: Settings, Stream, Custom, server "
-                                "srt://<this computer>:9000?mode=caller&latency=200000. A break holds the picture "
-                                "and sends silence; after \"Stream lost\" TX stops.");
-        note->setObjectName("dim");
-        note->setWordWrap(true);
-        mf->addRow(note);
     }
     {   // the picture for the Image source
         auto* img = new ElideLabel(s.value("tx/image").toString().isEmpty() ? QString("(none)") : s.value("tx/image").toString());
@@ -1996,13 +2079,24 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         row->addWidget(browse);
         mf->addRow(rowLabel("Image"), row);
         connect(browse, &QPushButton::clicked, this, [this, img] {
-            QString f = QFileDialog::getOpenFileName(this, "Picture to send", settings().value("tx/image").toString(),
-                                                     "Pictures (*.png *.jpg *.jpeg *.bmp *.webp)");
-            if (f.isEmpty()) return;
+            QFileDialog fd(this, "Picture to send", settings().value("tx/image").toString(),
+                           "Pictures (*.png *.jpg *.jpeg *.bmp *.webp)");
+            fd.setFileMode(QFileDialog::ExistingFile);
+            if (ui.touch) {      // Qt's own, drawn inside the main window, so taps land where shown
+                fd.setOption(QFileDialog::DontUseNativeDialog);
+                fd.resize(window()->size() * 0.9);
+                embedDialog(&fd, this);
+            }
+            if (!fd.exec() || fd.selectedFiles().isEmpty()) return;
+            QString f = fd.selectedFiles().first();
             img->setText(f);
             settings().setValue("tx/image", f);
         });
     }
+    addInfo(mf, this, "TX media",
+            "<p><b>Stream:</b> AVM listens for SRT. In OBS: Settings, Stream, Custom, server "
+            "srt://&lt;this computer&gt;:9000?mode=caller&amp;latency=200000.</p>"
+            "<p>A break holds the picture and sends silence; after \"Stream lost\" TX stops.</p>");
     // Receiver: the spectrum's averaging, its inversion, the sound output, the KiwiSDR to receive from
     auto* receiver = new QWidget;
     auto* rf = new QFormLayout(receiver);
@@ -2021,12 +2115,6 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
                               s.value("rx/invert_auto", false).toBool() ? "auto"
                               : s.value("rx/invert", false).toBool() ? "inverted" : "normal");
     rf->addRow(rowLabel("RX spectrum"), inv);
-    auto* inote = new QLabel("Inverted: for a receive path that mirrors the signal (a converter with its LO "
-                             "above it). Sync is found but every header fails when this is wrong. Auto: tries the other after "
-                             "8 s without a header.");
-    inote->setObjectName("dim");
-    inote->setWordWrap(true);
-    rf->addRow(inote);
     connect(inv, &Segmented::changed, this, [this](const QString& v) {
         settings().setValue("rx/invert_auto", v == "auto");
         if (v != "auto") settings().setValue("rx/invert", v == "inverted");
@@ -2041,9 +2129,6 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     QString cur = s.value("audio_device").toString();
     auto* outs = new Picker("Audio output", outputs, cur.isEmpty() ? QString("Default") : cur);
     rf->addRow(rowLabel("Audio out"), outs);
-    auto* note = new QLabel("Audio out: takes effect at the next start of the GUI");
-    note->setObjectName("dim");
-    rf->addRow(note);
     connect(outs, &Picker::changed, this, [](const QString& t) {
         settings().setValue("audio_device", t == "Default" ? QString() : t);
     });
@@ -2051,10 +2136,12 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
                                 "(none -- e.g. KIWI.EXAMPLE.ORG:8073)");
     rf->addRow(rowLabel("KiwiSDR"), kiwi);
     kiwi_ = kiwi;
-    auto* knote = new QLabel("Then pick \"KiwiSDR\" as the RX radio. A KiwiSDR carries the 10 kHz modes only.");
-    knote->setObjectName("dim");
-    knote->setWordWrap(true);
-    rf->addRow(knote);
+    addInfo(rf, this, "Receiver",
+            "<p><b>RX spectrum</b><br>Inverted: for a receive path that mirrors the signal (a converter with its LO "
+            "above it). Sync is found but every header fails when this is wrong.<br>"
+            "Auto: tries the other after 8 s without a header.</p>"
+            "<p><b>Audio out:</b> takes effect at the next start of the GUI.</p>"
+            "<p><b>KiwiSDR:</b> then pick \"KiwiSDR\" as the RX radio. A KiwiSDR carries the 10 kHz modes only.</p>");
     connect(kiwi, &TextButton::changed, this, [this](const QString& t) {
         settings().setValue("kiwi_server", t.trimmed());
         emit rxSettingChanged();
@@ -2150,11 +2237,7 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     auto* bandTimer = new QTimer(rfe);
     connect(bandTimer, &QTimer::timeout, rfe, showBand);
     bandTimer->start(1000);
-    // the notes in a pop-up (as a label they ran off the bottom of the tab)
-    auto* rfeHelp = new QPushButton("LimeRFE help");
-    ff->addRow(rowLabel(""), rfeHelp);
-    connect(rfeHelp, &QPushButton::clicked, this, [this] {
-        QMessageBox box(QMessageBox::Information, "LimeRFE",
+    addInfo(ff, this, "LimeRFE",
                         "<p>The LimeRFE follows AVM: its band is set from the frequency, TX while transmitting, "
                         "RX while receiving, off when stopped.</p>"
                         "<p><b>Connected by</b><br>USB: the LimeRFE's own micro-USB socket. Works with any SoapySDR "
@@ -2166,10 +2249,7 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
                         "(other bands use J3).<br>"
                         "RX and TX run at once only on different ports; on one port TX takes it while sending.</p>"
                         "<p>Terminate unused RF ports with 50 ohms. Transmitters need the 12 V supply.</p>"
-                        "<p>Changes apply at the next start of TX or RX.</p>",
-                        QMessageBox::Ok, this);
-        box.exec();
-    });
+                        "<p>Changes apply at the next start of TX or RX.</p>");
     connect(rfeOn, &Segmented::changed, this, [](const QString& v) { settings().setValue("rfe/on", v == "on"); });
     connect(rfeLink, &Segmented::changed, this, [showLink](const QString& v) {
         settings().setValue("rfe/link", v);
@@ -2193,20 +2273,26 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     auto* papr = new Segmented({{"0", "Off"}, {"7", "On"}}, expOn ? s.value("tx/papr_db", "0").toString() : QString("0"));
     papr->setEnabled(expOn);
     ef->addRow(rowLabel("TX peak reduce"), papr);
-    auto* enote = new QLabel("TX peak reduction: clip and filter (7 dB), invisible to the receiver -- "
-                             "measured 2-4 dB less signal needed in mode A 10 kHz. About 15% of a core at VU 160.");
-    enote->setObjectName("dim");
-    enote->setWordWrap(true);
-    ef->addRow(enote);
     auto* dup = new Segmented({{"off", "Off"}, {"master", "Master"}, {"slave", "Slave"}},
                               expOn ? s.value("duplex", "off").toString() : QString("off"));
     dup->setEnabled(expOn);
     ef->addRow(rowLabel("Duplex"), dup);
-    auto* dnote = new QLabel("Duplex: TX and RX on one channel in turns, one PlutoSDR doing both (VU modes, TX and RX "
-                             "set alike). One station Master, the other Slave; start with TX+RX on the RX page.");
-    dnote->setObjectName("dim");
-    dnote->setWordWrap(true);
-    ef->addRow(dnote);
+    auto* lowlat = new Segmented({{"off", "Off"}, {"on", "On"}},
+                                 expOn && s.value("low_latency", false).toBool() ? "on" : "off");
+    lowlat->setEnabled(expOn);
+    ef->addRow(rowLabel("Low latency"), lowlat);
+    addInfo(ef, this, "Experimental",
+            "<p><b>TX peak reduce:</b> clip and filter (7 dB), invisible to the receiver -- measured 2-4 dB less "
+            "signal needed in mode A 10 kHz. About 15% of a core at VU 160.</p>"
+            "<p><b>Duplex:</b> TX and RX on one channel in turns, one PlutoSDR doing both (VU modes, TX and RX set "
+            "alike). One station Master, the other Slave; start with TX+RX on the RX page.</p>"
+            "<p><b>Low latency:</b> VU 250 kHz in 1024-byte fragments, not 2048 -- about 0.15-0.2 s less delay, "
+            "about 12-17% less throughput. Both stations must set it alike, or nothing decodes.</p>");
+    connect(lowlat, &Segmented::changed, this, [this](const QString& v) {
+        settings().setValue("low_latency", v == "on");
+        emit txSettingChanged();
+        emit rxSettingChanged();
+    });
     connect(dup, &Segmented::changed, this, [this](const QString& v) {
         settings().setValue("duplex", v);
         if (v != "off" && !duplexWhyNot().isEmpty())
@@ -2217,7 +2303,7 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         }
         emit duplexChanged();
     });
-    connect(expSw, &Segmented::changed, this, [this, expSw, papr, dup](const QString& v) {
+    connect(expSw, &Segmented::changed, this, [this, expSw, papr, dup, lowlat](const QString& v) {
         if (v == "on" && !settings().value("experimental", false).toBool()) {
             QMessageBox box(QMessageBox::Warning, "Enable experimental features?",
                             "These settings can severely distort transmissions if used incorrectly.\n\n"
@@ -2233,6 +2319,8 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         settings().setValue("experimental", on);
         papr->setEnabled(on);
         dup->setEnabled(on);
+        lowlat->setEnabled(on);
+        if (!on) { lowlat->setValue("off"); settings().setValue("low_latency", false); }
         if (!on) { papr->setValue("0"); settings().setValue("tx/papr_db", 0); }   // switched on again by hand
         if (!on) { dup->setValue("off"); settings().setValue("duplex", "off"); emit duplexChanged(); }
         emit txSettingChanged();
@@ -2256,16 +2344,6 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         "link: a camera and microphone at one end, the picture and sound at the other, through an SDR "
         "(PlutoSDR, LimeSDR, HPSDR / Radioberry; KiwiSDR to receive). Wider channels and denser modulation "
         "(QPSK, then 16QAM, 32QAM) carry more, but need a stronger signal.</p>"
-        "<p><b>Which mode when</b> (Config, Modes):</p>"
-        "<ul>"
-        "<li><b>A</b> -- HF ground wave, short steady paths.</li>"
-        "<li><b>B</b> -- HF sky wave: the general-purpose HF mode.</li>"
-        "<li><b>C</b> -- HF long distance, more fading and Doppler.</li>"
-        "<li><b>D</b> -- HF with severe echoes and Doppler (NVIS, poor conditions).</li>"
-        "<li><b>SH</b> -- HF single carrier, 10-40 kHz: about 8-10 kbit/s in 10 kHz.</li>"
-        "<li><b>VU</b> -- VHF / UHF (144 / 432 MHz), 80-250 kHz: line of sight, mobile and troposcatter.</li>"
-        "<li><b>S</b> -- single carrier for fixed and satellite paths, 10-40 kHz.</li>"
-        "</ul>"
         "<p>AVM was created mainly by Claude, Anthropic's AI, working with Rob M0DTS.</p>");
     ab->setWordWrap(true);
     ab->setTextFormat(Qt::RichText);
@@ -2277,7 +2355,7 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);   // dragged by a finger
     al->addWidget(scroll, 1);
 
-    for (auto p : QList<QPair<QString, QWidget*>>{{"Station", station}, {"Modes", modes}, {"TX media", media}, {"Receiver", receiver}, {"Lime RFE", rfe}, {"Experimental", exp}, {"About", about}}) {
+    for (auto p : QList<QPair<QString, QWidget*>>{{"Station", station}, {"Modes", modes}, {"TX media", media}, {"Receiver", receiver}, {"Lime RFE", rfe}, {"Band Switch", bandsw}, {"Experimental", exp}, {"About", about}}) {
         list_->addItem(p.first);
         stack_->addWidget(p.second);
     }

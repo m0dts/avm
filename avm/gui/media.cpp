@@ -51,11 +51,25 @@ void MediaDecoder::stop() {
     pending_.clear();
     w_ = h_ = 0;
     frames_.clear();
+    frameT_.clear();
     nextShow_ = -1;
     burst_ = 0;
     burstN_ = 0;
     audioDec_.reset();
     audioOut_.clear();
+}
+
+// [latency] every 5 s: how long the decoded pictures waited before being shown
+void MediaDecoder::noteShown(double now) {
+    if (frameT_.empty()) return;
+    double w = now - frameT_.front();
+    frameT_.pop_front();
+    latSum_ += w; latMax_ = std::max(latMax_, w); ++latN_;
+    if (latT_ < 0) latT_ = now;
+    if (now - latT_ < 5) return;
+    guiLog("RX", QString("[latency] RX video: pictures shown %1 ms on average (max %2) after decoding")
+                     .arg(latSum_ / latN_ * 1e3, 0, 'f', 0).arg(latMax_ * 1e3, 0, 'f', 0));
+    latT_ = now; latSum_ = latMax_ = 0; latN_ = 0;
 }
 
 void MediaDecoder::showNext() {
@@ -64,18 +78,23 @@ void MediaDecoder::showNext() {
     if (frameInterval_ <= 0) {            // no frame rate known: as they come
         emit frame(frames_.front());
         frames_.pop_front();
+        noteShown(now);
         return;
     }
     // late for its slot (the gap before the next burst): the schedule restarts from now
     if (nextShow_ < 0 || now > nextShow_ + frameInterval_) nextShow_ = now;
     size_t queued = frames_.size() - 1;
     double burst = std::min(burst_, 1.0 / frameInterval_);
-    bool backlog = queued > (size_t)(1 + std::lround(burst));   // VIDEO_CATCHUP_FRAMES = 1
+    // more than a burst waiting: shown at once (was a burst + 1: up to 2-3 frames, 0.1-0.25 s,
+    // held back at 10 fps); while any wait, 15% fast (was 3%), so the queue drains
+    // smoothly between bursts rather than standing
+    bool backlog = queued > (size_t)std::max(1L, std::lround(burst));
     if (!backlog && now < nextShow_) return;
     double target = backlog ? now : nextShow_;
     emit frame(frames_.front());
     frames_.pop_front();
-    nextShow_ = target + frameInterval_ * (frames_.empty() ? 1.0 : 0.97);
+    noteShown(now);
+    nextShow_ = target + frameInterval_ * (frames_.empty() ? 1.0 : 0.85);
 }
 
 // each fragment's data (fragment_size bytes, as the modem writes them) -> the deframer
@@ -137,7 +156,8 @@ void MediaDecoder::handleEvent(int type, const std::vector<uint8_t>& d) {
         burstT_ = now;
         if (wvt_ && wvtDecode_(wvt_, d.data(), (long long)d.size(), y_.data(), u_.data(), v_.data()) == 0) {
             frames_.push_back(toRgb(w_, h_));
-            if (frames_.size() > 90) frames_.pop_front();   // VIDEO_QUEUE_DEPTH
+            frameT_.push_back(now);
+            if (frames_.size() > 90) { frames_.pop_front(); frameT_.pop_front(); }   // VIDEO_QUEUE_DEPTH
         }
     }
         break;

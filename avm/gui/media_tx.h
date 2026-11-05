@@ -94,6 +94,9 @@ private:
     void* opus_ = nullptr;
     std::mutex mu_;                                  // the queues below
     std::deque<std::vector<uint8_t>> video_q_, audio_q_;
+    std::deque<double> video_t_;                     // when each picture arrived ([latency])
+    double lat_t_ = -1, lat_sum_ = 0, lat_max_ = 0, enc_last_ = 0;
+    int lat_n_ = 0;
     std::vector<short> pcm_;                         // Codec2: samples waiting for a whole frame
     std::vector<uint8_t> y_, u_, v_, pkt_;
     std::vector<uint8_t> message_;

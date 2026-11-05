@@ -1,6 +1,8 @@
 #include "capture.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <vector>
 
 extern "C" {
@@ -186,6 +188,15 @@ bool Capture::session(const CaptureInput& in, const FrameFn& frame, const LogFn&
         else if (!open_decoder(P.extra, P.fmt, err)) { log("Stream audio: " + err); P.extra.si = -1; }
     }
     log(std::string("Capturing ") + (in.video ? "video" : "audio") + (P.extra.si >= 0 ? " and audio" : "") + " from " + name);
+    // [latency] a camera: its frame rate, and (below) every 5 s how old its frames are when
+    // read -- their V4L2 timestamps (taken as each frame was captured) against the clock
+    const bool camAge = in.video && in.format == "v4l2";
+    if (camAge) {
+        AVRational fr = P.fmt->streams[P.main.si]->avg_frame_rate;
+        log("[latency] camera: " + std::to_string(fr.den ? av_q2d(fr) : 0.0).substr(0, 5) + " fps");
+    }
+    double ageT = -1, ageSum = 0, ageMax = 0;
+    int ageN = 0;
 
     bool got = false;
     double t0_wall = -1, t0_pts = 0;
@@ -198,6 +209,22 @@ bool Capture::session(const CaptureInput& in, const FrameFn& frame, const LogFn&
         }
         Decode* D = P.pkt->stream_index == P.main.si ? &P.main : P.pkt->stream_index == P.extra.si ? &P.extra : nullptr;
         if (!D) { av_packet_unref(P.pkt); continue; }
+        if (camAge && D == &P.main && P.pkt->pts != AV_NOPTS_VALUE) {
+            // (FFmpeg's V4L2 timestamps: wall-clock, or the monotonic clock as the driver gave them)
+            double t = P.pkt->pts * av_q2d(D->st->time_base);
+            double age = av_gettime() / 1e6 - t;
+            if (age < 0 || age > 60) age = av_gettime_relative() / 1e6 - t;
+            if (age >= 0 && age < 60) {
+                double now = av_gettime_relative() / 1e6;
+                ageSum += age; ageMax = std::max(ageMax, age); ++ageN;
+                if (ageT < 0) ageT = now;
+                if (now - ageT >= 5) {
+                    log("[latency] camera: frames " + std::to_string((int)std::lround(ageSum / ageN * 1e3)) +
+                        " ms old on average (max " + std::to_string((int)std::lround(ageMax * 1e3)) + ") when read");
+                    ageT = now; ageSum = ageMax = 0; ageN = 0;
+                }
+            }
+        }
         const FrameFn& out = D == &P.main ? frame : audio;
         // a stream's picture from its first keyframe (joined mid-stream: before it, only smears;
         // a test pattern's or camera's raw frames aren't flagged as keyframes)
