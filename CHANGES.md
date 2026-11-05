@@ -3,6 +3,17 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.1.5
+- Config pages: the notes are now behind a ? help button (bottom right), on a page that scrolls; the "which mode when" guide moved from About to Modes help
+- Frequency keypad: the last 5 frequencies used, one tap to set (TX and RX each their own)
+- Band Switch (Config): Portsdown 4's band GPIO lines set from the frequency
+- Radio picker on its own row above the frequency, on TX and RX
+- Lower video delay: smoother RX catch-up, and an Experimental Low latency switch (VU 250 kHz in 1024-byte fragments)
+- Constellation now works on Windows
+- Touchscreen: the constellation, the picture chooser and the out-of-range message take taps where they're shown
+- Windows: Airspy no longer crashes when stopped
+- Buttons: slightly larger text
+
 ## 1.1.4
 - RX modulation Auto: the receiver finds the far end's modulation by itself (modes A-D, SH and VU); the Mod buttons follow it
 - RX spectrum Auto (Config, Receiver): flips between normal and inverted when no header decodes for 8 s
