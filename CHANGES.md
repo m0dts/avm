@@ -3,6 +3,17 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.1.6
+- Waterfall: tap the RX spectrum to switch to a waterfall (and back); AVM remembers which
+- Waterfall ID (Config, Station): "AVM" and your callsign over the mode, painted on anyone's waterfall at TX start (and every 10 minutes if chosen)
+- Spectrum: "None" in Spectrum avg now really means no averaging (the receiver averaged over 2 s as well)
+- LimeSDR USB below 21 MHz: now works down to 160 m (it used to stop at about 21.5 MHz)
+- HPSDR (Hermes-Lite 2, Radioberry): the transmitted spectrum was mirrored -- receivers set to Inverted for it go back to Normal
+- TX message now gets through at low rates (SH 10 kHz): room is kept for it in every fragment while it's on
+- Callsign: held through signal drops and built up over repeats, until RX restarts or another is received
+- KiwiSDR: no peak on the spectrum at start; its info line no longer shifts the RX page's buttons
+- Builds on older Linux (FFmpeg 4: Ubuntu 20.04, DragonOS FocalX); the installer says so clearly if FFmpeg is too old
+
 ## 1.1.5
 - Config pages: the notes are now behind a ? help button (bottom right), on a page that scrolls; the "which mode when" guide moved from About to Modes help
 - Frequency keypad: the last 5 frequencies used, one tap to set (TX and RX each their own)
