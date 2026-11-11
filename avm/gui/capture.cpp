@@ -17,6 +17,11 @@ extern "C" {
 #include <libavutil/time.h>
 }
 
+// FFmpeg 4.x (Ubuntu 20.04, DragonOS FocalX) as well as 5.x+: the channel layout
+// API came in 5.1 (libavutil 57.24), devices' media types in 5.0 (libavdevice 59)
+#define AVM_FF_CH_LAYOUT (LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 24, 100))
+#define AVM_FF_MEDIA_TYPES (LIBAVDEVICE_VERSION_MAJOR >= 59)
+
 namespace avm {
 
 static std::string av_err(int e) {
@@ -93,7 +98,12 @@ static bool build_graph(Decode& D, const AVFrame* f, std::string& err) {
                  f->height, f->format, tb.num, tb.den, sar.num, sar.den);
     } else {
         char layout[128] = "mono";
+#if AVM_FF_CH_LAYOUT
         if (f->ch_layout.nb_channels) av_channel_layout_describe(&f->ch_layout, layout, sizeof layout);
+#else
+        if (f->channel_layout) av_get_channel_layout_string(layout, sizeof layout, f->channels, f->channel_layout);
+        else if (f->channels > 1) snprintf(layout, sizeof layout, "%dc", f->channels);
+#endif
         snprintf(args, sizeof args, "time_base=%d/%d:sample_rate=%d:sample_fmt=%s:channel_layout=%s", tb.num, tb.den,
                  f->sample_rate, av_get_sample_fmt_name((AVSampleFormat)f->format), layout);
     }
@@ -165,7 +175,7 @@ bool Capture::session(const CaptureInput& in, const FrameFn& frame, const LogFn&
     P.fmt = avformat_alloc_context();
     P.fmt->interrupt_callback.callback = interrupt_cb;
     P.fmt->interrupt_callback.opaque = &stop_;
-    int r = avformat_open_input(&P.fmt, in.url.c_str(), ifmt, &opts);
+    int r = avformat_open_input(&P.fmt, in.url.c_str(), const_cast<AVInputFormat*>(ifmt), &opts);   // (not const before FFmpeg 5)
     av_dict_free(&opts);
     std::string name = in.format.empty() ? in.url : in.format + " \"" + in.url + "\"";
     if (r < 0) {
@@ -265,15 +275,19 @@ std::vector<std::string> Capture::devices(const std::string& format, bool video)
     const AVInputFormat* ifmt = av_find_input_format(format.c_str());
     if (!ifmt) return names;
     AVDeviceInfoList* list = nullptr;
-    if (avdevice_list_input_sources(ifmt, nullptr, nullptr, &list) >= 0 && list) {
+    if (avdevice_list_input_sources(const_cast<AVInputFormat*>(ifmt), nullptr, nullptr, &list) >= 0 && list) {
         for (int i = 0; i < list->nb_devices; ++i) {
             AVDeviceInfo* d = list->devices[i];
+#if AVM_FF_MEDIA_TYPES
             bool has_video = false, has_audio = false;
             for (int k = 0; k < d->nb_media_types; ++k) {
                 if (d->media_types[k] == AVMEDIA_TYPE_VIDEO) has_video = true;
                 if (d->media_types[k] == AVMEDIA_TYPE_AUDIO) has_audio = true;
             }
             if (d->nb_media_types && (video ? !has_video : !has_audio)) continue;
+#else
+            (void)video;   // FFmpeg 4: no media types -- every device listed
+#endif
             // dshow: the friendly name (what "video=NAME" takes); others: the device itself
             names.push_back(format == "dshow" && d->device_description ? d->device_description : d->device_name);
         }

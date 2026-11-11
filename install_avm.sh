@@ -457,6 +457,12 @@ if [ $CHECK_ONLY = 1 ]; then
     if [ -x "$AVM_GUI" ]; then echo "built ($AVM_GUI)"; else echo "not built yet"; fi
     plan "AVM, built from source (~10 min on a Pi 4)" "$BUILD_DIR" 40
 else
+    # FFmpeg 4.0 or newer (libavcodec 58): older stops here with a clear reason,
+    # not halfway through the build (4.x: Ubuntu 20.04, DragonOS FocalX; 5+: newer)
+    AVC_VER="$(pkg-config --modversion libavcodec 2>/dev/null || true)"
+    if [ -n "$AVC_VER" ] && [ "${AVC_VER%%.*}" -lt 58 ] 2>/dev/null; then
+        die "this system's FFmpeg is too old (libavcodec $AVC_VER): AVM needs FFmpeg 4.0 or newer (Ubuntu 20.04 / Debian 11 or later)"
+    fi
     # a Pi with little memory: fewer compilers at once (each can take ~0.5 GB)
     JOBS="$(nproc)"
     MEM_MB="$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)"

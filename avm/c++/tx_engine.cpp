@@ -61,6 +61,10 @@ struct Args {
     std::string mode = "B", modulation = "qpsk", fec = "viterbi", normalize = "per-fragment";
     double occupancy = 20, sample_rate = 0, amplitude = 0.1, papr_db = 0, fragment_gap_ms = 300, warmup_s = 2.0;
     int fragment_size = 0, max_input_backlog = 0;
+    // --waterfall-id "LINE1|LINE2": the text painted on waterfalls, in tones across the
+    // signal's width, after the warmup and every --waterfall-id-every-s (0: at the start only)
+    std::string waterfall_id;
+    double waterfall_id_every_s = 0;
     // --output pluto: a radio through SoapySDR (sdr.h), hf_ofdm_tx.py's radio options
     std::string output = "pipe", sdr = "pluto", uri, antenna, lime_rfe;
     std::string band_gpio;   // --band-gpio: Portsdown 4's band lines (sdr::pigpio::set_band)
@@ -532,14 +536,144 @@ struct Transmitter {
         lat_t = now; lat_sum = lat_max = 0; lat_n = 0;
     }
 
+    // ---- the waterfall ID (--waterfall-id): a 5x7 pixel font, each pixel column a band of
+    // tones inside the signal's width, each pixel row WF_ROW_S of time. Sent bottom row
+    // first: a waterfall scrolls down (the newest at the top), so the text reads upright.
+    // A receiver just loses lock for it (~1.5 s) and finds the signal again after.
+    static const unsigned char* wf_glyph(char c) {
+        static const unsigned char digits[10][7] = {
+            {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E},
+            {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E},
+            {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E},
+            {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, {0x1F,0x01,0x02,0x04,0x08,0x08,0x08},
+            {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}};
+        static const unsigned char letters[26][7] = {
+            {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E},
+            {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, {0x1C,0x12,0x11,0x11,0x11,0x12,0x1C},
+            {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}, {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10},
+            {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F}, {0x11,0x11,0x11,0x1F,0x11,0x11,0x11},
+            {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E}, {0x07,0x02,0x02,0x02,0x02,0x12,0x0C},
+            {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, {0x10,0x10,0x10,0x10,0x10,0x10,0x1F},
+            {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}, {0x11,0x11,0x19,0x15,0x13,0x11,0x11},
+            {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10},
+            {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}, {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11},
+            {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, {0x1F,0x04,0x04,0x04,0x04,0x04,0x04},
+            {0x11,0x11,0x11,0x11,0x11,0x11,0x0E}, {0x11,0x11,0x11,0x11,0x11,0x0A,0x04},
+            {0x11,0x11,0x11,0x15,0x15,0x15,0x0A}, {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11},
+            {0x11,0x11,0x11,0x0A,0x04,0x04,0x04}, {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}};
+        static const unsigned char dash[7] = {0, 0, 0, 0x1F, 0, 0, 0}, slash[7] = {0, 0x01, 0x02, 0x04, 0x08, 0x10, 0},
+                                   dot[7] = {0, 0, 0, 0, 0, 0x0C, 0x0C}, blank[7] = {0};
+        if (c >= '0' && c <= '9') return digits[c - '0'];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        if (c >= 'A' && c <= 'Z') return letters[c - 'A'];
+        return c == '-' ? dash : c == '/' ? slash : c == '.' ? dot : blank;
+    }
+    void send_waterfall_id() {
+        const double WF_ROW_S = 0.25, WF_RAMP_S = 0.004, WF_WIDTH = 0.85;   // (of the signal's width)
+        const int TONES = 3;                                                // per pixel column
+        std::vector<std::string> lines;
+        {
+            std::string t = a.waterfall_id;
+            size_t p;
+            while ((p = t.find('|')) != std::string::npos) { lines.push_back(t.substr(0, p)); t = t.substr(p + 1); }
+            lines.push_back(t);
+        }
+        size_t chars = 0;
+        for (const auto& l : lines) chars = std::max(chars, l.size());
+        if (!chars) return;
+        const int cols = (int)chars * 6 - 1, rows = (int)lines.size() * 10 - 3;   // 7 rows a line, 3 between
+        std::vector<std::vector<char>> px(rows, std::vector<char>(cols, 0));
+        for (size_t li = 0; li < lines.size(); ++li) {
+            int x0 = (int)(chars - lines[li].size()) * 3;     // each line centred
+            for (size_t ci = 0; ci < lines[li].size(); ++ci) {
+                const unsigned char* g = wf_glyph(lines[li][ci]);
+                for (int r = 0; r < 7; ++r)
+                    for (int b = 0; b < 5; ++b)
+                        if (g[r] & (0x10 >> b)) px[li * 10 + r][x0 + ci * 6 + b] = 1;
+            }
+        }
+        const double fs = a.sample_rate ? a.sample_rate : m().fs;
+        const double width = WF_WIDTH * a.occupancy * 1e3, cw = width / cols;
+        const int nt = cols * TONES;
+        std::vector<cd> step(nt), ph(nt);
+        std::mt19937 rng(12345);
+        std::uniform_real_distribution<double> uni(0, 2 * fft::PI);
+        for (int c = 0; c < cols; ++c)
+            for (int t = 0; t < TONES; ++t) {
+                double f = -width / 2 + (c + (t + 0.5) / TONES) * cw;   // (low to high: upright, unless the TX path mirrors)
+                step[c * TONES + t] = std::polar(1.0, 2 * fft::PI * f / fs);
+                ph[c * TONES + t] = std::polar(1.0, uni(rng));   // spread phases: lower peaks
+            }
+        const long long n_row = std::llround(WF_ROW_S * fs), n_ramp = std::max(1LL, std::llround(WF_RAMP_S * fs));
+        std::vector<char> prev(cols, 0);
+        double prev_sc = 0;
+        avm_logf("Waterfall ID: \"%s\" (%d x %d pixels, %.0f Hz a column, %.1f s)\n", a.waterfall_id.c_str(), cols, rows,
+                 cw, (rows + 1) * WF_ROW_S);
+        for (int r = rows - 1; r >= -1 && !stopping; --r) {     // bottom row first; row -1: blank, the fade out
+            std::vector<char> cur(cols, 0);
+            int lit = 0;
+            if (r >= 0) for (int c = 0; c < cols; ++c) lit += (cur[c] = px[r][c]);
+            // RMS --amplitude while any are lit (as the modem's signal)
+            double sc = lit ? a.amplitude / std::sqrt((double)lit * TONES) : prev_sc;
+            std::vector<int> act;
+            for (int c = 0; c < cols; ++c) if (cur[c] || prev[c]) act.push_back(c);
+            std::vector<cf> o(n_row, cf(0, 0));
+            for (long long i = 0; i < n_row; ++i) {
+                double k = i < n_ramp ? 0.5 - 0.5 * std::cos(fft::PI * (i + 0.5) / n_ramp) : 1.0;
+                double s_i = prev_sc + (sc - prev_sc) * k;
+                cd acc(0, 0);
+                for (int c : act) {
+                    double g = prev[c] + (cur[c] - prev[c]) * k;
+                    cd sum(0, 0);
+                    for (int t = 0; t < TONES; ++t) sum += ph[c * TONES + t];
+                    acc += g * sum;
+                }
+                o[i] = cf((float)(acc.real() * s_i), (float)(acc.imag() * s_i));
+                for (int c : act) for (int t = 0; t < TONES; ++t) ph[c * TONES + t] *= step[c * TONES + t];
+            }
+            // the idle columns' phases move on too (so each starts where it would be)
+            for (int c = 0; c < cols; ++c)
+                if (!cur[c] && !prev[c])
+                    for (int t = 0; t < TONES; ++t) ph[c * TONES + t] *= std::pow(step[c * TONES + t], (double)n_row);
+            for (cd& v : ph) v /= std::abs(v);
+            if (has_carry) {     // the last fragment's faded tail (the joined crossfade)
+                for (size_t i = 0; i < carry.size() && i < o.size(); ++i) o[i] += carry[i];
+                has_carry = false;
+            }
+            emit(o);
+            prev = cur;
+            prev_sc = sc;
+        }
+    }
+    double wf_next = -1;     // when the waterfall ID is next due (mono()); <0: not
+    const double WF_GAP_S = 0.5;
+    void maybe_waterfall_id() {
+        if (wf_next < 0 || mono() < wf_next || stopping) return;
+        // silence each side: the ID apart from the data on the waterfall
+        const double fs = a.sample_rate ? a.sample_rate : m().fs;
+        std::vector<cf> gap((size_t)std::llround(WF_GAP_S * fs), cf(0, 0));
+        if (has_carry) {
+            for (size_t i = 0; i < carry.size() && i < gap.size(); ++i) gap[i] += carry[i];
+            has_carry = false;
+        }
+        emit(gap);
+        send_waterfall_id();
+        emit(std::vector<cf>(gap.size(), cf(0, 0)));
+        wf_next = a.waterfall_id_every_s > 0 ? mono() + a.waterfall_id_every_s : -1;
+    }
+
     void run_stream() {
         std::unique_ptr<LiveInput> backlog;
         if (a.max_input_backlog) backlog.reset(new LiveInput(a.fragment_size, 1, in));
         if (a.tdd_cycle_s) {     // (the warmup is slotted too, so the far end locks onto the slot timing)
+            if (!a.waterfall_id.empty()) avm_logf("Waterfall ID: not in duplex (it would break the slots)\n");
             run_tdd(backlog.get());
             return;
         }
-        if (a.warmup_s > 0) {
+        // the waterfall ID first: ahead of all the data (the warmup's filler looks like it)
+        if (!a.waterfall_id.empty()) { wf_next = 0; maybe_waterfall_id(); }
+        // (no filler after an ID: its ~5 s has settled the transmit chain already)
+        if (a.warmup_s > 0 && a.waterfall_id.empty()) {
             std::string filler(a.fragment_size, '\0');
             double deadline = mono() + a.warmup_s;
             long long n = 0;
@@ -556,11 +690,14 @@ struct Transmitter {
                 if (!got) break;
                 data.resize(got);
                 note_input_wait(in.last_wait);
+                maybe_waterfall_id();
                 transmit(data, "");
             }
         } else {
             backlog->end_warmup(a.max_input_backlog);
+            maybe_waterfall_id();
             while (!stopping && backlog->next(data)) {
+                maybe_waterfall_id();
                 transmit(data, "");
                 // (from its arrival: the backlog's wait, the modulation, and the wait for the
                 // radio's queue to take it -- the waveform before it still being written)
@@ -597,6 +734,8 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         else if (k == "--amplitude") a.amplitude = std::atof(val().c_str());
         else if (k == "--papr-db") a.papr_db = std::atof(val().c_str());
         else if (k == "--tx-warmup-s") a.warmup_s = std::atof(val().c_str());
+        else if (k == "--waterfall-id") a.waterfall_id = val();
+        else if (k == "--waterfall-id-every-s") a.waterfall_id_every_s = std::atof(val().c_str());
         else if (k == "--max-input-backlog") a.max_input_backlog = std::atoi(val().c_str());
         else if (k == "--tx-normalize") a.normalize = val();
         else if (k == "--stream") a.stream = true;

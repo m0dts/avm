@@ -523,6 +523,7 @@ const double SYNC_MIN = 0.3;      // SYNC_METRIC_MIN
 const double CFO_EMA_ALPHA = 0.3, CFO_JUMP_LIMIT_HZ = 100.0;
 const int FRAG_HEADER_SIZE = 8;   // >HHI
 const int REACQUISITION_TROUBLE_LIMIT = 5;
+const double KIWI_SPECTRUM_SKIP_S = 2.0;   // a KiwiSDR's first samples (a peak before it swaps filters): kept off the spectrum
 const double AUTO_INVERT_S = 8.0;     // --auto-invert: this long without a header, the spectrum flipped
 const double DROP_IF_SLOW_LAG_S = 1.0, SKIP_KEEP_FRAGMENTS = 1.5, SKIP_EXTRA_LAG_S = 0.6;
 const double SEQ_MIN_FRAGMENT_S = 0.03;
@@ -2006,8 +2007,8 @@ struct Engine {
     }
 
     // the spectrum (run_spectrum_stderr's lines): 4 a second, the newest
-    // 8 x 512 samples Hann-windowed, |FFT|^2 averaged over them and the last 8
-    // updates, as "[spectrum] <freq0_hz> <freq_step_hz> <n> <base64 float32 dB>"
+    // 8 x 512 samples Hann-windowed, |FFT|^2 averaged over them (not over pictures: the GUI does that)
+    // as "[spectrum] <freq0_hz> <freq_step_hz> <n> <base64 float32 dB>"
     void spectrum_loop() {
         // the raw samples when the span is wider than the modem's rate -- or when the
         // radio's rate is below it (a KiwiSDR's 12 kS/s under mode SH's 32k: the
@@ -2017,48 +2018,71 @@ struct Engine {
             raw_spectrum_loop();
             return;
         }
-        const int N = 512, SEGS = 8, AVG = 8;
+        // AVG 1: no averaging over pictures here -- the GUI does it (Config, Spectrum avg; "None": none)
+        const int N = 512, SEGS = 8, AVG = 1;
         std::vector<double> win(N);
         for (int i = 0; i < N; ++i) win[i] = 0.5 - 0.5 * std::cos(2 * fft::PI * i / (N - 1));
         std::deque<std::vector<double>> hist;
         std::vector<cf> latest(N * SEGS);
         std::vector<cd> in(N), out(N);
+        double last_spec = -1;
         while (!stop_spectrum) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            std::this_thread::sleep_for(std::chrono::milliseconds((int)(WF_TICK_S * 1000)));
             {
                 std::lock_guard<std::mutex> g(reader.mu);
-                if (reader.total_len < (long long)N * SEGS * 8) continue;
+                const long long skip = a.sdr == "kiwi" ? (long long)(KIWI_SPECTRUM_SKIP_S * m.fs) * 8 : 0;
+                if (reader.total_len < (long long)N * SEGS * 8 + skip) continue;
                 double end = reader.total_len / 8.0;
                 if (!tdd_view.far_slot(end - N * SEGS, end)) continue;   // duplex: the other station's slot only
                 size_t p = reader.recent_pos, R = reader.recent.size();
                 for (int i = 0; i < N * SEGS; ++i) latest[i] = reader.recent[(p + R - N * SEGS + i) % R];
             }
-            std::vector<double> pw(N, 0.0);
+            std::vector<std::vector<double>> seg(SEGS, std::vector<double>(N));
             for (int sgm = 0; sgm < SEGS; ++sgm) {
                 for (int i = 0; i < N; ++i) in[i] = cd(latest[sgm * N + i].real(), latest[sgm * N + i].imag()) * win[i];
                 fft::plan<double>(N).forward(in.data(), out.data());
-                for (int k = 0; k < N; ++k) pw[(k + N / 2) % N] += std::norm(out[k]) / SEGS;   // fftshift
-            }
-            hist.push_back(pw);
-            while ((int)hist.size() > AVG) hist.pop_front();
-            std::vector<float> db(N);
-            for (int k = 0; k < N; ++k) {
-                double s = 0;
-                for (const auto& h : hist) s += h[k];
-                db[k] = (float)(10 * std::log10(s / hist.size() + 1e-12));
+                for (int k = 0; k < N; ++k) seg[sgm][(k + N / 2) % N] = std::norm(out[k]);   // fftshift
             }
             // just the span asked for, when narrower than the modem's rate (VU runs at twice
             // its width: shown whole, its edges and the RX LO offset's DC point were in view)
             const double step = m.fs / N;
-            int k0 = 0;
+            int k0 = 0, k1 = N;
             if (a.spectrum_span > 0 && a.spectrum_span < m.fs) {
                 int half = (int)std::ceil(a.spectrum_span / 2 / step);
                 k0 = std::max(0, N / 2 - half);
-                db = std::vector<float>(db.begin() + k0, db.begin() + std::min(N, N / 2 + half + 1));
+                k1 = std::min(N, N / 2 + half + 1);
+            }
+            // the waterfall: the newest ~WF_TICK_S alone, unaveraged (a 2 s average smeared it)
+            {
+                const int wn = std::max(1, std::min(SEGS, (int)std::lround(WF_TICK_S * m.fs / N)));
+                std::vector<float> w;
+                for (int k = k0; k < k1; ++k) {
+                    double s = 0;
+                    for (int sgm = SEGS - wn; sgm < SEGS; ++sgm) s += seg[sgm][k];
+                    w.push_back((float)(10 * std::log10(s / wn + 1e-12)));
+                }
+                avm_logf("[waterfall] %.6f %.6f %d %s\n", (k0 - N / 2) * step, step, (int)w.size(), base64(w).c_str());
+            }
+            const double now = now_s();
+            if (last_spec >= 0 && now - last_spec < SPEC_EVERY_S) continue;
+            last_spec = now;
+            std::vector<double> pw(N, 0.0);
+            for (int sgm = 0; sgm < SEGS; ++sgm)
+                for (int k = 0; k < N; ++k) pw[k] += seg[sgm][k] / SEGS;
+            hist.push_back(pw);
+            while ((int)hist.size() > AVG) hist.pop_front();
+            std::vector<float> db;
+            for (int k = k0; k < k1; ++k) {
+                double s = 0;
+                for (const auto& h : hist) s += h[k];
+                db.push_back((float)(10 * std::log10(s / hist.size() + 1e-12)));
             }
             avm_logf("[spectrum] %.6f %.6f %d %s\n", (k0 - N / 2) * step, step, (int)db.size(), base64(db).c_str());
         }
     }
+    // the spectrum's pace: its averaged picture every SPEC_EVERY_S (as before), and an
+    // unaveraged line for the waterfall every WF_TICK_S ("[waterfall] ...", the same form)
+    static constexpr double WF_TICK_S = 0.1, SPEC_EVERY_S = 0.25;
 
     static std::string base64(const std::vector<float>& v) {
         static const char* B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2078,10 +2102,10 @@ struct Engine {
     // hf_ofdm_rx._build_spectrum_computer's wide view: the raw samples, the LO
     // offset shifted out (the signal centred), low-passed (windowed sinc, Blackman)
     // and decimated to about the span, 512-point Hann FFTs (up to 8 a picture,
-    // from at most 32768 raw samples) averaged over the last 8, the span kept
+    // from at most 32768 raw samples) (not averaged over pictures: the GUI does), the span kept
     double raw_span = 0;
     void raw_spectrum_loop() {
-        const int N = 512, AVG = 8;
+        const int N = 512, AVG = 1;     // (the GUI averages: Config, Spectrum avg)
         const double fs = fe->in_fs, span = raw_span;
         const int decim = std::max(1, (int)(fs / span));
         std::vector<double> h;
@@ -2111,11 +2135,13 @@ struct Engine {
         std::deque<std::vector<double>> hist;
         std::vector<cd> s(need), in(N), out(N);
         avm_logf("Spectrum: %.1f kHz around the signal from the raw %.1f kS/s (1/%d)\n", span / 1e3, fs / 1e3, decim);
+        double last_spec = -1;
         while (!stop_spectrum) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            std::this_thread::sleep_for(std::chrono::milliseconds((int)(WF_TICK_S * 1000)));
             {
                 std::lock_guard<std::mutex> g(reader.raw_mu);
-                if (reader.raw_total < need) continue;
+                const long long skip = a.sdr == "kiwi" ? (long long)(KIWI_SPECTRUM_SKIP_S * fs) : 0;
+                if (reader.raw_total < need + skip) continue;
                 double end = reader.raw_total * m.fs / fs;
                 if (!tdd_view.far_slot(end - need * m.fs / fs, end)) continue;   // duplex: the other station's slot only
                 size_t p = reader.raw_pos, R = reader.raw.size();
@@ -2146,13 +2172,29 @@ struct Engine {
             }
             int n = std::min(segs, (int)(d.size() / N));
             if (n < 1) continue;
-            std::vector<double> pw(N, 0.0);
+            std::vector<std::vector<double>> seg(n, std::vector<double>(N));
             size_t base = d.size() - (size_t)n * N;
             for (int b = 0; b < n; ++b) {
                 for (int i = 0; i < N; ++i) in[i] = d[base + (size_t)b * N + i] * win[i];
                 fft::plan<double>(N).forward(in.data(), out.data());
-                for (int k = 0; k < N; ++k) pw[(k + N / 2) % N] += std::norm(out[k]) / n;
+                for (int k = 0; k < N; ++k) seg[b][(k + N / 2) % N] = std::norm(out[k]);
             }
+            {   // the waterfall: the newest ~WF_TICK_S alone, unaveraged
+                const int wn = std::max(1, std::min(n, (int)std::lround(WF_TICK_S * dfs / N)));
+                std::vector<float> w;
+                for (int k = j0; k <= j1; ++k) {
+                    double t = 0;
+                    for (int b = n - wn; b < n; ++b) t += seg[b][k];
+                    w.push_back((float)(10 * std::log10(t / wn + 1e-12) + offset_db));
+                }
+                avm_logf("[waterfall] %.6f %.6f %d %s\n", (j0 - N / 2) * dfs / N, dfs / N, (int)w.size(), base64(w).c_str());
+            }
+            const double now = now_s();
+            if (last_spec >= 0 && now - last_spec < SPEC_EVERY_S) continue;
+            last_spec = now;
+            std::vector<double> pw(N, 0.0);
+            for (int b = 0; b < n; ++b)
+                for (int k = 0; k < N; ++k) pw[k] += seg[b][k] / n;
             hist.push_back(pw);
             while ((int)hist.size() > AVG) hist.pop_front();
             std::vector<float> db;

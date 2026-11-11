@@ -216,6 +216,14 @@ inline void set_bandwidth_if_changed(void* dev, int dir, double want) {
     A.setBandwidth(dev, dir, 0, want);
 }
 
+// a LimeSDR's analog filter: below 30 MHz its synthesizer stays at 30 MHz and the rest is a
+// digital shift, so the signal reaches the converter that far off centre -- the filter
+// widened to pass it (2 MHz spare), else the usual width
+inline double lime_bandwidth(double freq, double usual) {
+    const double shift = 30e6 - freq;
+    return shift > 0 ? std::max(usual, 2 * shift + 2e6) : usual;
+}
+
 inline void close_device(void* dev) {
     if (!dev) return;
     Api& A = api();
@@ -994,7 +1002,7 @@ private:
             if (!has(ant) && !ports.empty()) ant = ports[0];
         }
         if (A.setAntenna) A.setAntenna(dev_, RX, 0, ant.c_str());
-        if (A.setBandwidth) A.setBandwidth(dev_, RX, 0, 1.5e6);
+        if (A.setBandwidth) A.setBandwidth(dev_, RX, 0, lime_bandwidth(freq, 1.5e6));
         avm_logf("LimeSDR RX: antenna port %s\n", ant.c_str());
     }
     // duplex: TX on the same connection (pluto_soapy_sink.TddTxFeeder)
@@ -1171,7 +1179,7 @@ public:
             if (const char* e = std::getenv("AVM_LIME_TX_ANTENNA")) if (ant.empty()) ant = e;
             if (ant.empty()) ant = tune < 2.0e9 ? "BAND1" : "BAND2";
             if (A.setAntenna) A.setAntenna(dev_, TX, 0, ant.c_str());
-            if (A.setBandwidth) A.setBandwidth(dev_, TX, 0, 5e6);
+            if (A.setBandwidth) A.setBandwidth(dev_, TX, 0, lime_bandwidth(tune, 5e6));
         } else if (c.bandwidth_hz && c.driver != "hackrf" && A.setBandwidth) {
             set_bandwidth_if_changed(dev_, TX, c.bandwidth_hz);
         }

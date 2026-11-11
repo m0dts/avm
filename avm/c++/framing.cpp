@@ -49,9 +49,13 @@ const int VIDEO_CONFIG_REPEAT_EVERY = 25;
 const double VIDEO_CONFIG_REPEAT_S = 2.0;
 const int MESSAGE_PIECE_HEADER = 3;
 const int MESSAGE_MIN_PIECE = 4;
+// while a message is set, each fragment keeps room for its smallest piece (4 text bytes):
+// audio and video filled every byte, so at low rates (SH 10 kHz) it never got through.
+// The record is unchanged: any receiver reads it
+const int MESSAGE_RESERVE = RECORD_HEADER_LEN + MESSAGE_PIECE_HEADER + MESSAGE_MIN_PIECE;
 const int MIN_START_CHUNK = 16;
 // receiver (media_rx_player.py)
-const int STATION_ID_VOTE_CYCLES = 4;
+const int STATION_ID_VOTE_CYCLES = 8;   // each character's last 8 repeats voted (kept through signal gaps)
 const double STATION_ID_RESET_GAP_S = 3.0;
 const int KNOWN_AUDIO_PROFILES[] = {0x00, 0x01};   // AUDIO_PROFILES keys
 
@@ -140,7 +144,7 @@ struct Framer {
     }
 
     void fill_spare() {
-        long long room = budget - (long long)block.size();
+        long long room = fragment_size - 2 - (long long)block.size();   // (the message's reserve too)
         Bytes rec;
         if (message_piece(room, rec)) {
             block.insert(block.end(), rec.begin(), rec.end());
@@ -161,6 +165,8 @@ struct Framer {
         f.insert(f.end(), block.begin(), block.end());
         f.resize(fragment_size, 0);
         out.push_back(std::move(f));
+        // a message set or cleared: the reserve from the next fragment on (not mid-block)
+        budget = fragment_size - 2 - (msg_data.empty() ? 0 : MESSAGE_RESERVE);
         block = fresh_block();
     }
 
@@ -332,9 +338,9 @@ struct Deframer {
 
     void push(const uint8_t* block, size_t blen, double now) {
         if (have_last_t && now - last_block_t > STATION_ID_RESET_GAP_S) {
+            // the votes are kept: a weak or fading signal builds the callsign up over
+            // several re-locks (a new station's characters out-vote the old as they come)
             bool had_state = sid_shown_set;
-            for (auto& h : sid_hist) { if (!h.empty()) had_state = true; h.clear(); }
-            std::fill(sid_buf.begin(), sid_buf.end(), 0);
             sid_shown_set = false;
             tentative_set = false;
             if (had_state) emit(EV_STATION_ID_RESET, Bytes());

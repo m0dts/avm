@@ -129,7 +129,12 @@ bool Recorder::openAudio(QString* error) {
     aenc_ = avcodec_alloc_context3(c);
     aenc_->sample_rate = AUDIO_RATE;
     aenc_->sample_fmt = AV_SAMPLE_FMT_FLTP;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 24, 100)   // FFmpeg 5.1's channel layouts; 4.x: the old fields
     av_channel_layout_default(&aenc_->ch_layout, 1);
+#else
+    aenc_->channel_layout = AV_CH_LAYOUT_MONO;
+    aenc_->channels = 1;
+#endif
     aenc_->bit_rate = 48000;
     aenc_->time_base = {1, AUDIO_RATE};
     if (fmt_->oformat->flags & AVFMT_GLOBALHEADER) aenc_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -141,7 +146,12 @@ bool Recorder::openAudio(QString* error) {
     af_ = av_frame_alloc();
     af_->format = AV_SAMPLE_FMT_FLTP;
     af_->sample_rate = AUDIO_RATE;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 24, 100)
     av_channel_layout_default(&af_->ch_layout, 1);
+#else
+    af_->channel_layout = AV_CH_LAYOUT_MONO;
+    af_->channels = 1;
+#endif
     af_->nb_samples = aenc_->frame_size;
     av_frame_get_buffer(af_, 0);
     return true;

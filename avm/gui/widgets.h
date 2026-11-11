@@ -93,11 +93,20 @@ public:
     // the capture band (Hz from the tuned frequency): where a signal is found and
     // decoded, shaded green behind the trace; lo == hi: none
     void setBand(double lo_hz, double hi_hz) { bandLo_ = lo_hz; bandHi_ = hi_hz; update(); }
+    // the waterfall: one unaveraged line each ("[waterfall]", ~10 a second), the newest
+    // at the top, coloured over the spectrum's own scale; a tap switches the view
+    void addWaterfall(const QVector<float>& db);
+    void setWaterfall(bool on) { waterfall_ = on; update(); }
+    bool waterfall() const { return waterfall_; }
 signals:
     void autoTop(double top_db);
+    void viewChanged(bool waterfall);     // tapped: the other view
 protected:
     void paintEvent(QPaintEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
 private:
+    bool waterfall_ = false;
+    QImage wf_;               // one line per pixel row, the newest at the top
     QVector<float> db_;
     QVector<double> pow_;     // the averaged power
     int avg_ = 1;

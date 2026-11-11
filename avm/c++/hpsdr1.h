@@ -330,9 +330,11 @@ private:
                 std::complex<float> v = pts[k * POINTS + i];
                 int iv = (int)std::lround(std::max(-1.0f, std::min(1.0f, v.real())) * 32767.0f);
                 int qv = (int)std::lround(std::max(-1.0f, std::min(1.0f, v.imag())) * 32767.0f);
-                unsigned char* s = o + 8 + 8 * i;     // L R (audio: unused) I Q
-                s[4] = (unsigned char)(iv >> 8); s[5] = (unsigned char)iv;
-                s[6] = (unsigned char)(qv >> 8); s[7] = (unsigned char)qv;
+                // L R (audio: unused) then the pair -- sent Q, I: as I, Q the transmitted
+                // spectrum came out mirrored (the waterfall ID read backwards on air)
+                unsigned char* s = o + 8 + 8 * i;
+                s[4] = (unsigned char)(qv >> 8); s[5] = (unsigned char)qv;
+                s[6] = (unsigned char)(iv >> 8); s[7] = (unsigned char)iv;
             }
         }
         sendto(S(), (const char*)p, sizeof p, 0, (const sockaddr*)&to_, sizeof to_);

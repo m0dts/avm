@@ -186,6 +186,7 @@ private:
     QPointer<QDialog> constDlg_;   // open while the constellation shows
     Lamp *hdrLamp_, *frameLamp_;
     QLabel* station_;
+    QString heldId_;   // the last confirmed callsign: held through signal gaps until RX restarts or another is confirmed
     ElideLabel* status_;
     VideoView* video_;
     QWidget* right_;

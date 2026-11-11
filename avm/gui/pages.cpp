@@ -67,7 +67,7 @@ void setLogFile(const QString& path) {
 }
 
 void guiLog(const QString& who, const QString& line) {
-    if (!g_log || line.startsWith("[spectrum]") || line.startsWith("[constellation]")) return;
+    if (!g_log || line.startsWith("[spectrum]") || line.startsWith("[waterfall]") || line.startsWith("[constellation]")) return;
     g_log->write(QString("%1 %2: %3\n").arg(QTime::currentTime().toString("HH:mm:ss.zzz"), who, line).toUtf8());
     g_log->flush();
 }
@@ -407,6 +407,14 @@ static const QList<QPair<QString, QString>> MODULATIONS = {
 
 // the TX's radio rate (its LO on the signal: +-half the width must fit)
 int sdrRate(double khz) { return khz > 200 ? 800000 : 550000; }
+// a LimeSDR below LIME_FAST_BELOW_HZ: 2 MS/s. Its synthesizer stops at 30 MHz and a digital
+// shift reaches the rest, as far as half its converter's rate (32x the sample rate): at
+// 550 kS/s that stopped at ~21.5 MHz; 2 MS/s reaches down to ~0 (160 m included)
+static const double LIME_FAST_BELOW_HZ = 21e6;
+static int radioRate(const QString& dir, double khz, double hz) {
+    if (settings().value(dir + "/radio").toString() == "lime" && hz < LIME_FAST_BELOW_HZ) return 2000000;
+    return sdrRate(khz);
+}
 // the RX LO offset (touch_widgets.lo_offset_hz): its DC spike clear of the RX spectrum view
 double loOffsetHz(double khz) { return khz > 200 ? 190000.0 : khz > 100 ? 130000.0 : 100000.0; }
 
@@ -593,6 +601,8 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     left->addWidget(status_);
     spectrum_ = new SpectrumView;
     spectrum_->setAverages(s.value("rx/spec_avg", 1).toInt());
+    spectrum_->setWaterfall(s.value("rx/waterfall", false).toBool());   // a tap: spectrum <-> waterfall (kept)
+    connect(spectrum_, &SpectrumView::viewChanged, this, [](bool w) { settings().setValue("rx/waterfall", w); });
     left->addWidget(spectrum_, 2);
     leftW_ = new QWidget;       // (a widget: its width capped to the picture's 16:9, see resizeEvent)
     leftW_->setLayout(left);
@@ -694,10 +704,14 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     right->addLayout(grid);
     right->addStretch(1);
     // KiwiSDR only: whose receiver this is (its /status page's name)
-    kiwiInfo_ = new QLabel;
-    kiwiInfo_->setWordWrap(true);
+    // one line (cut short; the whole as a tooltip), its room kept while hidden: wrapped,
+    // it grew and squeezed the rows above when the Kiwi was picked
+    kiwiInfo_ = new ElideLabel;
     kiwiInfo_->setAlignment(Qt::AlignCenter);
     kiwiInfo_->setStyleSheet(QString("color: #f0c040; font-size: %1px;").arg(ui.px(13)));
+    QSizePolicy kp = kiwiInfo_->sizePolicy();
+    kp.setRetainSizeWhenHidden(true);
+    kiwiInfo_->setSizePolicy(kp);
     kiwiInfo_->hide();
     right->addWidget(kiwiInfo_);
     auto* runRow = new QHBoxLayout;
@@ -755,6 +769,10 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     connect(&link_, &Link::data, &media_, &MediaDecoder::feed);
     connect(&media_, &MediaDecoder::frame, video_, &VideoView::setFrame);
     connect(&media_, &MediaDecoder::station, this, [this](const QString& id, bool confirmed) {
+        // a confirmed callsign is held: a re-lock's reset and guesses don't clear it, only a
+        // different confirmed one (or the next RX start) replaces it
+        if (confirmed) heldId_ = id;
+        else if (!heldId_.isEmpty()) return;
         station_->setText(confirmed || id.isEmpty() || id.contains('-') ? id : id + "?");
     });
     connect(&media_, &MediaDecoder::videoConfig, this, [this](int w, int h, double fps, const QString& codec) {
@@ -763,6 +781,7 @@ RxPage::RxPage(QWidget* parent) : QWidget(parent) {
     });
     connect(&media_, &MediaDecoder::frame, this, [this] { frameTimes_.push_back(clock_.elapsed()); });
     connect(&link_, &Link::stateChanged, this, [this](bool on) {
+        if (on) { heldId_.clear(); station_->clear(); }   // a new RX run: the callsign found afresh
         if (!on) {
             media_.stop();
             video_->clearFrame("No signal");
@@ -938,7 +957,7 @@ void RxPage::doToggleRun() {
     QSettings& s = settings();
     const double khz = bw_->value().toDouble();
     const QString sdr = s.value("rx/radio", "virtual").toString();
-    const QString rate = QString::number(sdrRate(khz));
+    const QString rate = QString::number(radioRate("rx", khz, freq_->hz()));
     ok_ = bad_ = lost_ = 0;
     mer_.clear();
     cfo_.clear();
@@ -1089,6 +1108,7 @@ void RxPage::showKiwiInfo() {
     if (!kiwiInfo_) return;     // (not built yet)
     if (server.isEmpty()) { kiwiInfo_->hide(); return; }
     kiwiInfo_->setText(kiwiInfoCache_.value(server, "KiwiSDR " + server));
+    kiwiInfo_->setToolTip(kiwiInfo_->text());
     kiwiInfo_->show();
     if (kiwiInfoCache_.contains(server)) return;
     kiwiInfoCache_[server] = "KiwiSDR " + server;     // one fetch per server
@@ -1111,7 +1131,7 @@ void RxPage::showKiwiInfo() {
             if (!st.value("users").isEmpty() && !st.value("users_max").isEmpty())
                 extra << QString("users %1/%2").arg(st["users"], st["users_max"]);
             if (st.value("offline") == "yes") extra << "OFFLINE";
-            text = "KiwiSDR: " + name + (extra.isEmpty() ? QString() : "\n" + extra.join(QString::fromUtf8(" · ")));
+            text = "KiwiSDR: " + name + (extra.isEmpty() ? QString() : QString::fromUtf8(" · ") + extra.join(QString::fromUtf8(" · ")));
         }
         kiwiInfoCache_[server] = text;
         showKiwiInfo();
@@ -1180,6 +1200,15 @@ void RxPage::onLine(const QString& t) {
     } else if (auto lm = lostRe.match(t); lm.hasMatch()) {
         lost_ += lm.captured(1).toInt();
         for (int i = 0; i < std::min(lm.captured(1).toInt(), LAMP_MAX_LOST); ++i) events_.push_back({now, -1, 0});
+    } else if (t.startsWith("[waterfall] ")) {
+        QStringList f = t.split(' ');
+        if (f.size() == 5) {
+            QByteArray raw = QByteArray::fromBase64(f[4].toLatin1());
+            QVector<float> db(raw.size() / 4);
+            std::memcpy(db.data(), raw.constData(), (size_t)db.size() * 4);
+            spectrum_->addWaterfall(db);
+        }
+        return;
     } else if (t.startsWith("[spectrum] ")) {
         QStringList f = t.split(' ');
         if (f.size() == 5) {
@@ -1761,7 +1790,7 @@ void TxPage::doToggleRun() {
     status_->setText("Starting...");
     QStringList args = {"--mode", mode_->value(), "--occupancy", bw_->value(), "--modulation", mod_->value(),
                         "--fec", "ldpc", "--stream", "--fragment-size", frag, "--fragment-gap-ms", "0",
-                        "--sample-rate", QString::number(sdrRate(khz)), "--max-input-backlog", "8",
+                        "--sample-rate", QString::number(radioRate("tx", khz, freq_->hz())), "--max-input-backlog", "8",
                         "--output", "pluto", "--tx-gain", QString::number(gain_->value())};
     // as touch_tx_page: one fragment built ahead of the radio (each queued one is a
     // whole fragment-time of delay -- the default 8 was ~0.9 s at 250 kHz); the
@@ -1770,6 +1799,17 @@ void TxPage::doToggleRun() {
     // modes' amplitude
     const bool sc = mode_->value() == "S" || mode_->value() == "SH";
     args << "--tx-queue-depth" << "1" << "--amplitude" << (sc ? "0.3" : "0.2");
+    {   // the waterfall ID (Config, Station): "AVM M0DTS" over "SH 10 Q"
+        const QString wf = s.value("tx/waterfall_id", "off").toString();
+        if (wf != "off") {
+            const QString mod = mod_->value();
+            const QString ms = mod == "qpsk" ? "Q" : mod == "8psk" ? "8P" : mod == "16psk" ? "16P"
+                               : mod == "16qam" ? "16Q" : mod == "32qam" ? "32Q" : mod.toUpper();
+            const QString call = callsign().isEmpty() ? QString() : " " + callsign().toUpper();
+            args << "--waterfall-id" << "AVM" + call + "|" + mode_->value() + " " + bw_->value() + " " + ms;
+            if (wf != "start") args << "--waterfall-id-every-s" << wf;
+        }
+    }
     if (!duplexRole().isEmpty()) {
         // duplex: to the RX page's radio (the receiver transmits), in slots
         args[args.indexOf("--output") + 1] = "tdd";
@@ -1971,8 +2011,17 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     auto* sf = new QFormLayout(station);
     auto* call = new TextButton("Callsign", s.value("callsign").toString(), 16, "(callsign)");
     sf->addRow(rowLabel("Callsign"), call);
+    // the waterfall ID (the transmitter's --waterfall-id): "AVM <callsign>" over the mode, painted in tones
+    auto* wfid = new Segmented({{"off", "Off"}, {"start", "At start"}, {"600", "Every 10 min"}},
+                               s.value("tx/waterfall_id", "off").toString());
+    sf->addRow(rowLabel("Waterfall ID"), wfid);
+    connect(wfid, &Segmented::changed, this, [](const QString& v) { settings().setValue("tx/waterfall_id", v); });
     addInfo(sf, this, "Station", "<p><b>Callsign:</b> sent with each transmission; the receiving station shows it "
-                                 "above the picture.</p>");
+                                 "above the picture.</p>"
+                                 "<p><b>Waterfall ID:</b> text painted on anyone's waterfall, as wide as the signal: "
+                                 "\"AVM\" and the callsign, and under it the mode, width and modulation (e.g. SH 10 Q). "
+                                 "About 4.5 s with a short gap each side, first at each TX start (and every 10 "
+                                 "minutes); an AVM receiver loses the picture for that long. Not in duplex.</p>");
     connect(call, &TextButton::changed, this, [this](const QString& t) {
         settings().setValue("callsign", t);
         emit callsignChanged();

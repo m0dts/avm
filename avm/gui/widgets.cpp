@@ -5,6 +5,7 @@
 #include <QPainter>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 #include "style.h"
@@ -181,7 +182,40 @@ void SpectrumView::setScale(bool autoOn, double ref_db) {
     update();
 }
 
+void SpectrumView::addWaterfall(const QVector<float>& db) {
+    const int ROWS = 300;     // (~30 s at 10 lines a second)
+    if (db.size() < 2) return;
+    if (wf_.width() != db.size()) {
+        wf_ = QImage(db.size(), ROWS, QImage::Format_RGB32);
+        wf_.fill(QColor(PANEL));
+    }
+    // scrolled down one row, the new line at the top
+    const int bpl = wf_.bytesPerLine();
+    std::memmove(wf_.bits() + bpl, wf_.bits(), (size_t)bpl * (ROWS - 1));
+    QRgb* line = (QRgb*)wf_.scanLine(0);
+    const double lo = bottom_, span = std::max(1.0, top_ - bottom_);
+    for (int i = 0; i < db.size(); ++i) {
+        // dark blue (the noise floor) -> blue -> cyan -> yellow -> red (the top)
+        double t = std::clamp((db[i] - lo) / span, 0.0, 1.0);
+        static const double P[][4] = {{0.0, 0, 0, 30}, {0.25, 0, 40, 160}, {0.5, 0, 200, 220},
+                                      {0.75, 250, 230, 0}, {1.0, 255, 40, 0}};
+        int k = 0;
+        while (k < 3 && t > P[k + 1][0]) ++k;
+        double u = (t - P[k][0]) / (P[k + 1][0] - P[k][0]);
+        auto mix = [&](int c) { return (int)std::lround(P[k][c] + u * (P[k + 1][c] - P[k][c])); };
+        line[i] = qRgb(mix(1), mix(2), mix(3));
+    }
+    if (waterfall_) update();
+}
+
+void SpectrumView::mouseReleaseEvent(QMouseEvent*) {
+    waterfall_ = !waterfall_;
+    update();
+    emit viewChanged(waterfall_);
+}
+
 void SpectrumView::clear() {
+    wf_ = QImage();
     db_.clear();
     pow_.clear();
     heldDiv_ = 0;
@@ -192,6 +226,24 @@ void SpectrumView::clear() {
 void SpectrumView::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.fillRect(rect(), QColor(PANEL));
+    if (waterfall_) {
+        QRectF r = QRectF(rect()).adjusted(4, 4, -4, -4);
+        if (wf_.isNull()) {
+            p.setPen(QColor(TEXT_DIM));
+            p.drawText(rect(), Qt::AlignCenter, "Waterfall");
+            return;
+        }
+        // the newest rows fill the view (2 px a line, as many as fit: ~10 a second)
+        const int rows = std::min(wf_.height(), std::max(1, (int)(r.height() / 2)));
+        p.drawImage(r, wf_, QRectF(0, 0, wf_.width(), rows));
+        p.setPen(QColor(255, 255, 255, 60));
+        p.drawLine(QPointF(r.center().x(), r.top()), QPointF(r.center().x(), r.bottom()));   // the centre frequency
+        p.setPen(QColor(TEXT_DIM));
+        if (step_ > 0)
+            p.drawText(r.adjusted(0, 0, -2, 0), Qt::AlignRight | Qt::AlignTop,
+                       QString("span %1 kHz").arg(step_ * (wf_.width() - 1) / 1e3, 0, 'f', 1));
+        return;
+    }
     if (db_.size() < 2) {
         p.setPen(QColor(TEXT_DIM));
         p.drawText(rect(), Qt::AlignCenter, "Spectrum");
