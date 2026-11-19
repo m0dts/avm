@@ -1,7 +1,9 @@
 #include "pages.h"
+#include "media_tx.h"
 
 #include "capture.h"
 #include "updater.h"
+#include <QDate>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -10,6 +12,7 @@
 #include <QLibrary>
 #include <cstdio>
 #include <future>
+#include <mutex>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -66,7 +69,9 @@ void setLogFile(const QString& path) {
     if (!g_log->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) { delete g_log; g_log = nullptr; }
 }
 
+static std::mutex g_log_mu;     // (written from the engines' threads too: "[close]" lines)
 void guiLog(const QString& who, const QString& line) {
+    std::lock_guard<std::mutex> g(g_log_mu);
     if (!g_log || line.startsWith("[spectrum]") || line.startsWith("[waterfall]") || line.startsWith("[constellation]")) return;
     g_log->write(QString("%1 %2: %3\n").arg(QTime::currentTime().toString("HH:mm:ss.zzz"), who, line).toUtf8());
     g_log->flush();
@@ -173,6 +178,14 @@ static QString cppProgram(const QString& name) {
 }
 
 // ---------------------------------------------------------------- Link
+// an engine's callbacks' context: live until its stop()
+struct EngineCtx {
+    Link* link;
+    unsigned gen;                       // which start (a freed context's address can come back)
+    std::atomic<bool> live{true};
+    std::atomic<bool> muted{false};     // its log too: only once the GUI is closing (~Link)
+};
+
 Link::Link(QObject* parent) : QObject(parent) {
     connect(this, &Link::line, this, [this](const QString& l) {
         if (!source.isEmpty()) Notices::get().addIfError(source, l);
@@ -258,6 +271,8 @@ Link::~Link() {
     // no signals from here: at exit the window that listens (the TX/RX indicator)
     // may already be gone -- stateChanged into it crashed the GUI on closing
     blockSignals(true);
+    EngineCtx* ctx = ctx_;
+    if (ctx) ctx->muted = true;
     stop();
 }
 
@@ -304,22 +319,35 @@ bool Link::startEngine(bool tx, const QStringList& args) {
         store.push_back(args[i].toUtf8());
     }
     for (const QByteArray& b : store) argv.push_back(b.constData());
-    // the engine's threads -> this (the GUI thread), queued
+    // the engine's threads -> this (the GUI thread), queued; through a context of its
+    // own, cut off at stop(): a stopped engine still closing must not reach a newer one
+    // (its "done" stopped the next start)
+    EngineCtx* ctx = new EngineCtx{this, ++gen_};
     EngineCallbacks cb;
-    cb.user = this;
+    cb.user = ctx;
     cb.data = [](void* u, const unsigned char* p, size_t n) {
-        Link* l = (Link*)u;
+        EngineCtx* c = (EngineCtx*)u;
+        if (!c->live) return;
+        Link* l = c->link;
         QByteArray b((const char*)p, (int)n);
         QMetaObject::invokeMethod(l, [l, b] { emit l->data(b); }, Qt::QueuedConnection);
     };
     cb.log = [](void* u, const char* t) {
-        Link* l = (Link*)u;
+        EngineCtx* c = (EngineCtx*)u;
+        if (c->muted) return;           // (a stopped engine's close still logged: "[close] ...")
+        Link* l = c->link;
         QString s = QString::fromUtf8(t).trimmed();
+        // a radio's close, written straight away from its own thread: if its driver
+        // crashes, the step it died in is the log's last line (queued, it was lost)
+        if (s.startsWith("[close]")) { guiLog("RX", s); return; }
         if (!s.isEmpty()) QMetaObject::invokeMethod(l, [l, s] { emit l->line(s); }, Qt::QueuedConnection);
     };
     cb.done = [](void* u) {
-        Link* l = (Link*)u;
-        QMetaObject::invokeMethod(l, [l] { l->engineFinished(); }, Qt::QueuedConnection);
+        EngineCtx* c = (EngineCtx*)u;
+        if (!c->live) return;
+        Link* l = c->link;
+        unsigned g = c->gen;
+        QMetaObject::invokeMethod(l, [l, g] { if (l->ctx_ && l->ctx_->gen == g) l->engineFinished(); }, Qt::QueuedConnection);
     };
     emit line(QString("Starting the C++ %1 ").arg(tx ? "transmitter" : "receiver") + args.join(' '));
     // created on a worker thread: a radio takes a second or two to open
@@ -328,7 +356,12 @@ bool Link::startEngine(bool tx, const QStringList& args) {
     early_.clear();
     if (startTh_.joinable()) startTh_.join();
     EngineApi* apiP = &api;
-    startTh_ = std::thread([this, apiP, store, cb] {
+    ctx_ = ctx;
+    std::shared_future<void> closing = closing_;
+    if (closing.valid() && closing.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        emit line("Waiting for the radio to finish closing...");
+    startTh_ = std::thread([this, apiP, store, cb, closing] {
+        if (closing.valid()) closing.wait();    // the last engine's radio closed first
         std::vector<const char*> av;
         for (const QByteArray& b : store) av.push_back(b.constData());
         void* h = apiP->create((int)av.size(), av.data(), &cb);
@@ -340,9 +373,12 @@ bool Link::startEngine(bool tx, const QStringList& args) {
 // the worker's result, back on the GUI thread
 void Link::engineCreated(void* h, EngineApi* api) {
     starting_ = false;
-    if (!h) { early_.clear(); emit stateChanged(false); return; }
+    if (!h) { delete ctx_; ctx_ = nullptr; early_.clear(); emit stateChanged(false); return; }
     if (stopWanted_) {                  // stopped while it was starting
+        if (ctx_) ctx_->live = false;
         api->destroy(h);
+        delete ctx_;
+        ctx_ = nullptr;
         early_.clear();
         emit stateChanged(false);
         return;
@@ -379,8 +415,12 @@ void Link::stop() {
         // unplugged holds the close in its driver's network timeouts (a Pluto: ~30 s),
         // and the GUI froze for all of it -- now that finishes in the background
         auto done = std::make_shared<std::promise<void>>();
-        std::future<void> f = done->get_future();
-        std::thread([api = api_, e = eng_, done] { api->destroy(e); done->set_value(); }).detach();
+        std::shared_future<void> f = done->get_future().share();
+        closing_ = f;
+        EngineCtx* ctx = ctx_;
+        ctx_ = nullptr;
+        if (ctx) ctx->live = false;     // nothing more from it reaches the GUI
+        std::thread([api = api_, e = eng_, done, ctx] { api->destroy(e); delete ctx; done->set_value(); }).detach();
         if (f.wait_for(std::chrono::seconds(2)) != std::future_status::ready)
             emit line("Radio not responding: its connection is closing in the background");
         eng_ = nullptr;
@@ -1817,9 +1857,24 @@ void TxPage::doToggleRun() {
     } else {
         args += radioArgs("tx", khz, freq_->hz(), false);   // (no TX LO offset: between two radios it spread the signal)
     }
-    // TX peak reduction (Config, Experimental): clip and filter, receiver-transparent
-    if (s.value("experimental", false).toBool() && s.value("tx/papr_db", 0).toDouble() > 0)
-        args << "--papr-db" << s.value("tx/papr_db").toString();
+    // now and then (every 14 days, at a TX start): a reminder that an OFDM signal's peaks
+    // are far above what a power meter shows (measured: each mode's QPSK waveform, peak
+    // power over average)
+    {
+        QDate last = s.value("tx/papr_notice_date").toDate();
+        if (!last.isValid() || last.daysTo(QDate::currentDate()) >= 14) {
+            s.setValue("tx/papr_notice_date", QDate::currentDate());
+            Notices::get().add("Warning",
+                "Peak power (PAPR): in the OFDM modes (A, B, C, D, VU) the signal's peaks are about 12-13 dB "
+                "above its average power (S and SH: about 5 dB). Power meters show roughly the average, so the "
+                "peaks your amplifier must handle are far higher than the meter says: take care not to "
+                "overdrive it -- set the drive so the peaks, not the meter reading, stay within its linear "
+                "range. Peak over average: A 11.7 dB, B 13.0, C 11.6, D 11.9, VU 11.7, S 5.0, SH 5.0 -- with "
+                "TX peak reduce (Config: Modes, on by default) the OFDM modes about 8-10 dB.");
+        }
+    }
+    // TX peak reduction (Config, Modes; on unless switched off): clip and filter, receiver-transparent
+    if (s.value("tx/peak_reduce", true).toBool()) args << "--papr-db" << "7";
     {   // the transmitter and the sources + framer in front of it, in-process
         MediaTxConfig c;
         c.fragment_size = frag.toInt();
@@ -1834,6 +1889,8 @@ void TxPage::doToggleRun() {
         c.audio_codec = s.value("tx/audio_codec", "codec2").toString().toStdString();
         c.opus_kbps = s.value("tx/opus_kbps", 10).toDouble();
         c.video_device = s.value("tx/video_device").toString().toStdString();
+        c.hflip = s.value("tx/picam_hflip", false).toBool();
+        c.vflip = s.value("tx/picam_vflip", false).toBool();
         c.image_path = s.value("tx/image").toString().toStdString();
         if (c.video == "image" && c.image_path.empty()) {
             status_->setText("Config: choose a picture (TX media)");
@@ -2005,11 +2062,24 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         settings().setValue("mode_type", v);
         emit modeTypeChanged();
     });
+    // TX peak reduction (OFDM modes): on unless switched off -- receiver-transparent
+    auto* papr = new Segmented({{"off", "Off"}, {"on", "On"}}, s.value("tx/peak_reduce", true).toBool() ? "on" : "off");
+    mof->addRow(rowLabel("TX peak reduce"), papr);
+    addInfo(mof, this, "TX peak reduce",
+            "<p>The OFDM modes (A, B, C, D, VU) have high peaks: about 12 dB above the average power. "
+            "Peak reduction clips them to about 8-9 dB and filters the result, so the amplifier can run "
+            "nearer its average power with less distortion.</p>"
+            "<p>Any AVM receiver decodes it as before (tested: the same sensitivity, QPSK to 32QAM). "
+            "S and SH are single carrier, with low peaks already: unchanged.</p>");
+    connect(papr, &Segmented::changed, this, [this](const QString& v) {
+        settings().setValue("tx/peak_reduce", v == "on");
+        emit txSettingChanged();
+    });
 
     // Station: the callsign sent with the pictures (shown by the receivers)
     auto* station = new QWidget;
     auto* sf = new QFormLayout(station);
-    auto* call = new TextButton("Callsign", s.value("callsign").toString(), 16, "(callsign)");
+    auto* call = new TextButton("Callsign", s.value("callsign").toString(), 8, "(callsign)");
     sf->addRow(rowLabel("Callsign"), call);
     // the waterfall ID (the transmitter's --waterfall-id): "AVM <callsign>" over the mode, painted in tones
     auto* wfid = new Segmented({{"off", "Off"}, {"start", "At start"}, {"600", "Every 10 min"}},
@@ -2066,6 +2136,8 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
             QStringList l;
 #ifndef Q_OS_WIN
             if (!video) l << "default";       // the system's default microphone
+            // a Raspberry Pi camera (CSI ribbon): not a plain V4L2 device, run through rpicam-vid
+            if (video) for (const auto& c : piCameras()) l << QString::fromStdString(c);
 #endif
             for (const auto& d : Capture::devices(fmt, video)) {
                 QString n = QString::fromStdString(d);
@@ -2094,6 +2166,19 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     connect(mic, &Picker::changed, this, [](const QString& v) { settings().setValue("tx/audio_device", v); });
     mf->addRow(rowLabel("Camera"), cam);
     mf->addRow(rowLabel("Microphone"), mic);
+#ifndef Q_OS_WIN
+    // the Pi camera's picture flipped (rpicam-vid --hflip / --vflip): a camera mounted upside down
+    {
+        bool hf = s.value("tx/picam_hflip", false).toBool(), vf = s.value("tx/picam_vflip", false).toBool();
+        auto* flip = new Segmented({{"none", "None"}, {"h", "Horizontal"}, {"v", "Vertical"}, {"hv", "Both"}},
+                                   hf && vf ? "hv" : hf ? "h" : vf ? "v" : "none");
+        mf->addRow(rowLabel("Pi cam flip"), flip);
+        connect(flip, &Segmented::changed, this, [](const QString& v) {
+            settings().setValue("tx/picam_hflip", v.contains('h'));
+            settings().setValue("tx/picam_vflip", v.contains('v'));
+        });
+    }
+#endif
     auto* mono = new Segmented({{"colour", "Colour"}, {"bw", "Black and white"}},
                                s.value("tx/mono", false).toBool() ? "bw" : "colour");
     mf->addRow(rowLabel("Video"), mono);
@@ -2319,9 +2404,6 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
     const bool expOn = s.value("experimental", false).toBool();
     auto* expSw = new Segmented({{"off", "Off"}, {"on", "On"}}, expOn ? "on" : "off");
     ef->addRow(rowLabel("Experimental"), expSw);
-    auto* papr = new Segmented({{"0", "Off"}, {"7", "On"}}, expOn ? s.value("tx/papr_db", "0").toString() : QString("0"));
-    papr->setEnabled(expOn);
-    ef->addRow(rowLabel("TX peak reduce"), papr);
     auto* dup = new Segmented({{"off", "Off"}, {"master", "Master"}, {"slave", "Slave"}},
                               expOn ? s.value("duplex", "off").toString() : QString("off"));
     dup->setEnabled(expOn);
@@ -2352,7 +2434,7 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         }
         emit duplexChanged();
     });
-    connect(expSw, &Segmented::changed, this, [this, expSw, papr, dup, lowlat](const QString& v) {
+    connect(expSw, &Segmented::changed, this, [this, expSw, dup, lowlat](const QString& v) {
         if (v == "on" && !settings().value("experimental", false).toBool()) {
             QMessageBox box(QMessageBox::Warning, "Enable experimental features?",
                             "These settings can severely distort transmissions if used incorrectly.\n\n"
@@ -2366,16 +2448,10 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
         }
         const bool on = v == "on";
         settings().setValue("experimental", on);
-        papr->setEnabled(on);
         dup->setEnabled(on);
         lowlat->setEnabled(on);
         if (!on) { lowlat->setValue("off"); settings().setValue("low_latency", false); }
-        if (!on) { papr->setValue("0"); settings().setValue("tx/papr_db", 0); }   // switched on again by hand
         if (!on) { dup->setValue("off"); settings().setValue("duplex", "off"); emit duplexChanged(); }
-        emit txSettingChanged();
-    });
-    connect(papr, &Segmented::changed, this, [this](const QString& v) {
-        settings().setValue("tx/papr_db", v.toInt());
         emit txSettingChanged();
     });
 
@@ -2388,6 +2464,22 @@ ConfigPage::ConfigPage(QWidget* parent) : QWidget(parent) {
                                    ui.touch ? "Touch" : "Desktop"));
     at->setObjectName("value");
     al->addWidget(at);
+    {
+        auto* row = new QHBoxLayout;
+        updateBtn_ = new QPushButton("Check for update");
+        updateBtn_->setFocusPolicy(Qt::NoFocus);
+        updateStatus_ = new QLabel;
+        updateStatus_->setObjectName("dim");
+        updateStatus_->setWordWrap(true);
+        row->addWidget(updateBtn_);
+        row->addWidget(updateStatus_, 1);
+        al->addLayout(row);
+        connect(updateBtn_, &QPushButton::clicked, this, [this] {
+            updateBtn_->setEnabled(false);
+            updateStatus_->setText("Checking...");
+            emit checkUpdate();
+        });
+    }
     auto* ab = new QLabel(
         "<p><b>AVM -- Audio Video Modem</b> sends live pictures, sound and short text messages over a radio "
         "link: a camera and microphone at one end, the picture and sound at the other, through an SDR "
@@ -2416,6 +2508,11 @@ void ConfigPage::setKiwi(const QString& server) {
     if (kiwi_) kiwi_->setValue(server);
     settings().setValue("kiwi_server", server.trimmed());
     emit rxSettingChanged();
+}
+
+void ConfigPage::setUpdateStatus(const QString& text) {
+    if (updateStatus_) updateStatus_->setText(text);
+    if (updateBtn_) updateBtn_->setEnabled(true);
 }
 
 void ConfigPage::setImage(const QString& path) {

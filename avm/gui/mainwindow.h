@@ -36,6 +36,7 @@ private:
     void startWeb();           // the web page (web.h), but not for screenshots or trial runs
     void offerUpdate();        // the ⬆ button: what's new, then update (updater.h)
     Updater* updater_ = nullptr;
+    bool manualCheck_ = false;     // About's Check for update: the update dialog opened if newer
     QPushButton* update_ = nullptr;
     QString updateVersion_, updateNotes_;
     QElapsedTimer usbClock_;

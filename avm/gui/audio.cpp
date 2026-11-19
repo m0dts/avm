@@ -228,7 +228,15 @@ bool AudioOut::open(const std::string& device) {
     // the default output, or a card PipeWire knows (aimed at with --target)
     std::string target = device.empty() || !usePwCat() ? std::string() : pwSinkFor(device);
     namedPw_ = !target.empty();
-    if ((device.empty() || !target.empty()) && usePwCat()) {
+    const bool alsaDev = device.size() > ALSA_SUFFIX.size() &&
+                         device.compare(device.size() - ALSA_SUFFIX.size(), ALSA_SUFFIX.size(), ALSA_SUFFIX) == 0;
+    // a named output PipeWire doesn't have (unplugged, another adapter in): still pw-cat,
+    // to the default output -- miniaudio's PulseAudio path broke up on a busy Pi
+    // (TX and RX at once: breaks in the sound, nothing logged)
+    if (usePwCat() && !alsaDev && !device.empty() && target.empty())
+        std::fprintf(stderr, "audio: output \"%s\" not found -- playing to the default output (pw-cat)\n",
+                     device.c_str());
+    if (usePwCat() && !alsaDev) {
         // 20 ms blocks from pull(), written as s16; the pipe's blocking write
         // paces it at the playback rate. A small pipe (~16 KB, 0.17 s): Linux's
         // default 64 KB would add the better part of a second

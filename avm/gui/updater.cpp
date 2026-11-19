@@ -63,7 +63,7 @@ QString Updater::rawUrl(const QString& path) const {
 // GitHub's VERSION; if newer, CHANGES.md's sections for the newer versions ("## 1.0.x")
 void Updater::check() {
     QString here = localVersion();
-    if (versionKey(here) < 0) return;      // a development copy without a VERSION: nothing to compare
+    if (versionKey(here) < 0) { emit noUpdate("this copy has no version number to compare"); return; }
     auto* nam = new QNetworkAccessManager(this);
     QNetworkRequest rq(QUrl(rawUrl("VERSION")));
     rq.setRawHeader("User-Agent", "avm-update");
@@ -75,6 +75,8 @@ void Updater::check() {
         QString remote = QString::fromUtf8(r->readAll()).trimmed();
         if (r->error() != QNetworkReply::NoError || versionKey(remote) <= versionKey(here)) {   // (offline: nothing)
             nam->deleteLater();
+            if (r->error() != QNetworkReply::NoError) emit noUpdate("couldn't reach GitHub: " + r->errorString());
+            else emit noUpdate("up to date (GitHub has v" + remote + ")");
             return;
         }
         QNetworkRequest cq(QUrl(rawUrl("CHANGES.md")));

@@ -28,6 +28,10 @@ struct CaptureInput {
     bool with_audio = false;
     std::string audio_filter;
     bool reconnect = false;
+    bool wall_clock = false;                    // each picture timed as it's read (the Pi camera's raw MJPEG:
+                                                // its own timestamps unusable)
+    bool wait_key = true;                       // (reconnect) the picture from the first keyframe: false for
+                                                // MJPEG (the Pi camera's rpicam-vid), every frame whole
 };
 
 class Capture {

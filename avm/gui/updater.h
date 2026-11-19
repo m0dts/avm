@@ -30,6 +30,7 @@ public:
     bool apply(QWidget* window);
 signals:
     void found(const QString& version, const QString& notes);
+    void noUpdate(const QString& why);   // up to date, or the check failed (why says which)
 private:
     QString rawUrl(const QString& path) const;
 };

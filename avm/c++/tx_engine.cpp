@@ -59,7 +59,7 @@ double mono() { return std::chrono::duration<double>(std::chrono::steady_clock::
 
 struct Args {
     std::string mode = "B", modulation = "qpsk", fec = "viterbi", normalize = "per-fragment";
-    double occupancy = 20, sample_rate = 0, amplitude = 0.1, papr_db = 0, fragment_gap_ms = 300, warmup_s = 2.0;
+    double occupancy = 20, sample_rate = 0, amplitude = 0.1, papr_db = 0, papr_iters = 3, fragment_gap_ms = 300, warmup_s = 2.0;
     int fragment_size = 0, max_input_backlog = 0;
     // --waterfall-id "LINE1|LINE2": the text painted on waterfalls, in tones across the
     // signal's width, after the warmup and every --waterfall-id-every-s (0: at the start only)
@@ -332,7 +332,7 @@ struct Transmitter {
         std::vector<cd> w = build(payload);
         if (a.papr_db && !m().sc) {
             md.c->frame = w;
-            reduce_papr(*md.c, a.papr_db, 3);
+            reduce_papr(*md.c, a.papr_db, (int)a.papr_iters);
             w = md.c->frame;
         }
         double out_fs = m().fs;
@@ -569,7 +569,7 @@ struct Transmitter {
         return c == '-' ? dash : c == '/' ? slash : c == '.' ? dot : blank;
     }
     void send_waterfall_id() {
-        const double WF_ROW_S = 0.25, WF_RAMP_S = 0.004, WF_WIDTH = 0.85;   // (of the signal's width)
+        const double WF_ROW_S = 0.25, WF_RAMP_S = 0.004, WF_WIDTH = 0.96;   // (of the signal's own width)
         const int TONES = 3;                                                // per pixel column
         std::vector<std::string> lines;
         {
@@ -581,7 +581,7 @@ struct Transmitter {
         size_t chars = 0;
         for (const auto& l : lines) chars = std::max(chars, l.size());
         if (!chars) return;
-        const int cols = (int)chars * 6 - 1, rows = (int)lines.size() * 10 - 3;   // 7 rows a line, 3 between
+        const int cols = (int)chars * 6 - 1, rows = (int)lines.size() * 8 - 1;    // 7 rows a line, 1 between
         std::vector<std::vector<char>> px(rows, std::vector<char>(cols, 0));
         for (size_t li = 0; li < lines.size(); ++li) {
             int x0 = (int)(chars - lines[li].size()) * 3;     // each line centred
@@ -589,11 +589,19 @@ struct Transmitter {
                 const unsigned char* g = wf_glyph(lines[li][ci]);
                 for (int r = 0; r < 7; ++r)
                     for (int b = 0; b < 5; ++b)
-                        if (g[r] & (0x10 >> b)) px[li * 10 + r][x0 + ci * 6 + b] = 1;
+                        if (g[r] & (0x10 >> b)) px[li * 8 + r][x0 + ci * 6 + b] = 1;
             }
         }
         const double fs = a.sample_rate ? a.sample_rate : m().fs;
-        const double width = WF_WIDTH * a.occupancy * 1e3, cw = width / cols;
+        // the text across the signal's own width (its carriers' span; S / SH: the symbol
+        // rate's shaped band), whatever the line's length -- an 8-character callsign too
+        double sig_w;
+        if (m().sc) sig_w = m().symbol_rate * (1 + SC_ALPHA);
+        else {
+            auto mm = std::minmax_element(m().fft_bins.begin(), m().fft_bins.end());
+            sig_w = (double)(*mm.second - *mm.first + 1) * m().spacing;
+        }
+        const double width = WF_WIDTH * sig_w, cw = width / cols;
         const int nt = cols * TONES;
         std::vector<cd> step(nt), ph(nt);
         std::mt19937 rng(12345);
@@ -646,7 +654,7 @@ struct Transmitter {
         }
     }
     double wf_next = -1;     // when the waterfall ID is next due (mono()); <0: not
-    const double WF_GAP_S = 0.5;
+    const double WF_GAP_S = 0.15;   // (silence each side of it: just a visible break)
     void maybe_waterfall_id() {
         if (wf_next < 0 || mono() < wf_next || stopping) return;
         // silence each side: the ID apart from the data on the waterfall
@@ -733,6 +741,7 @@ bool parse_args(int argc, const char* const* argv, Args& a) {
         else if (k == "--fragment-gap-ms") a.fragment_gap_ms = std::atof(val().c_str());
         else if (k == "--amplitude") a.amplitude = std::atof(val().c_str());
         else if (k == "--papr-db") a.papr_db = std::atof(val().c_str());
+        else if (k == "--papr-iters") a.papr_iters = std::atof(val().c_str());
         else if (k == "--tx-warmup-s") a.warmup_s = std::atof(val().c_str());
         else if (k == "--waterfall-id") a.waterfall_id = val();
         else if (k == "--waterfall-id-every-s") a.waterfall_id_every_s = std::atof(val().c_str());

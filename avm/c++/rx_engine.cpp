@@ -1999,10 +1999,14 @@ struct Engine {
     }
 
     void stop() {
+        sdr::close_log("begin RX stop");
         reader.stop();                       // the receive loop and the input thread end
+        sdr::close_log("reader stopped");
         if (rx_th.joinable()) rx_th.join();
+        sdr::close_log("receive loop ended");
         stop_spectrum = true;
         if (spectrum_th.joinable()) spectrum_th.join();
+        sdr::close_log("spectrum ended");
         radio.reset();
     }
 

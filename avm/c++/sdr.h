@@ -224,6 +224,18 @@ inline double lime_bandwidth(double freq, double usual) {
     return shift > 0 ? std::max(usual, 2 * shift + 2e6) : usual;
 }
 
+// the radio's close, step by step, timed ("[close] ..."): where a slow or crashing
+// driver (the Airspy HF+ on Windows) stops shows as the last line in the session log
+inline void close_log(const char* step) {
+    using namespace std::chrono;
+    static thread_local steady_clock::time_point t0;
+    static thread_local bool first = true;
+    auto now = steady_clock::now();
+    if (first || std::string(step).rfind("begin", 0) == 0) { t0 = now; first = false; }
+    std::fprintf(stderr, "[close] %s (+%lld ms)\n", step, (long long)duration_cast<milliseconds>(now - t0).count());
+    std::fflush(stderr);
+}
+
 inline void close_device(void* dev) {
     if (!dev) return;
     Api& A = api();
@@ -233,14 +245,16 @@ inline void close_device(void* dev) {
         if (P.open[i].dev == dev) {
             if (--P.open[i].users == 0) {
 #ifdef _WIN32
-                // an Airspy (not the HF+): closing it crashes in its Windows driver
-                // (airspy_close -> libusb_free_transfer), stream or not -- left open for
-                // the next start instead, which reuses it (closed when AVM exits)
+                // an Airspy or Airspy HF+: closing it crashes in its Windows driver
+                // (airspy_close -> libusb_free_transfer; the HF+ likewise, on a retune's
+                // restart), stream or not -- left open for the next start instead, which
+                // reuses it (closed when AVM exits)
                 const std::string& k = P.open[i].args;
-                if (k.find("driver=airspy") != std::string::npos && k.find("driver=airspyhf") == std::string::npos)
-                    return;
+                if (k.find("driver=airspy") != std::string::npos) { close_log("radio kept open for reuse (Airspy)"); return; }
 #endif
+                close_log("unmake (radio close)...");
                 if (A.unmake) A.unmake(dev);
+                close_log("unmake done");
                 P.open.erase(P.open.begin() + (long)i);
             }
             return;
@@ -968,18 +982,24 @@ public:
         offset_watch_.reset();
         ppm_watch_.reset();
         Api& A = api();
+        close_log(("begin RX close: " + cfg_.driver).c_str());
         if (feeder_) {
             feeder_->stop();
             feeder_.reset();
             if (A.deactivateStream) A.deactivateStream(dev_, tx_stream_, 0, 0);
             if (A.closeStream) A.closeStream(dev_, tx_stream_);
+            close_log("TX feeder closed");
         }
         if (dev_ && stream_) {
+            close_log("deactivateStream...");
             if (A.deactivateStream) A.deactivateStream(dev_, stream_, 0, 0);
+            close_log("closeStream...");
             if (A.closeStream) A.closeStream(dev_, stream_);
+            close_log("stream closed");
         }
         if (!cfg_.lime_rfe.empty()) LimeRfe::detach(dev_, false, parse_rfe(cfg_.lime_rfe));
-        close_device(dev_);     // (the shared radio: closed once its last user is done)
+        close_device(dev_);
+        close_log("RX close finished");     // (the shared radio: closed once its last user is done)
     }
 
 private:
@@ -1288,10 +1308,16 @@ private:
                     space_.notify_all();
                 }
             }
+            // PTT before the first waveform, after 1.5 s of silence to the radio: its
+            // calibration and stream start-up (a LimeSDR's spikes and tones) over with
+            // the PTT still off, so none of it reaches a relay or amplifier
+            if (!w.empty() && !ptt_ && !failed_ && !abort_) {
+                auto t0 = std::chrono::steady_clock::now();
+                while (!abort_ && !failed_ && std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1500))
+                    write_all(silence);
+                if (!abort_ && !failed_) { ptt_ = true; key(true); }
+            }
             write_all(w.empty() ? silence : w);
-            // PTT once the first waveform has gone to the radio: after its calibration
-            // (a LimeSDR's tones) and the stream's start-up, with RF really coming out
-            if (!w.empty() && !ptt_ && !failed_ && !abort_) { ptt_ = true; key(true); }
             std::lock_guard<std::mutex> g(mu_);
             busy_ = false;
             done_.notify_all();

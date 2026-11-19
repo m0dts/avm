@@ -26,6 +26,7 @@ struct MediaTxConfig {
     // video: "off", "test" (the testsrc pattern), "camera", "image" (a still, repeated) or
     // "stream" (SRT / UDP, e.g. from OBS: stream_url)
     std::string video = "test", video_device, image_path;
+    bool hflip = false, vflip = false;   // the Pi camera's picture mirrored / upside down (rpicam-vid)
     int width = 256, height = 144;
     double fps = 6;
     bool mono = false;     // black and white: the colour planes flat grey (media_source_wavelet.py --mono)
@@ -37,6 +38,14 @@ struct MediaTxConfig {
     std::string audio_codec = "codec2";   // "codec2" (3200) or "opus" (48 kHz mono)
     double opus_kbps = 10;
 };
+
+// the Raspberry Pi camera's entry in the camera list ("Pi camera 0: imx708"), and its number
+inline bool isPiCamera(const std::string& dev) { return dev.rfind("Pi camera", 0) == 0; }
+inline int piCameraIndex(const std::string& dev) {
+    return dev.size() > 10 && dev[10] >= '0' && dev[10] <= '9' ? dev[10] - '0' : 0;
+}
+// the Pi cameras attached ("Pi camera 0: imx708", ...), from rpicam-vid --list-cameras: none elsewhere
+std::vector<std::string> piCameras();
 
 class MediaTx {
 public:
@@ -101,6 +110,12 @@ private:
     std::vector<uint8_t> y_, u_, v_, pkt_;
     std::vector<uint8_t> message_;
     Capture video_cap_, audio_cap_, stream_cap_;
+    // the Raspberry Pi camera's rpicam-vid (a helper process): -1 none
+    int picam_pid_ = -1, picam_fd_ = -1;       // and the pipe its pictures come through
+    bool cfg_hflip_ = false, cfg_vflip_ = false;
+    int startPiCamera(int index, int w, int h, double fps);   // the pipe's read end, or -1
+    std::atomic<bool> first_pic_{false}, size_warned_{false};
+    void stopPiCamera();
     // a stream's last frame; while it's away (a short break, the sender restarting) the
     // picture held and silence sent, the carrier and the receivers kept locked
     std::mutex enc_mu_;                              // the encoder and y_/u_/v_

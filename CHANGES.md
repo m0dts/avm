@@ -3,6 +3,17 @@
 Newest first. Each release adds a section; AVM's Update button shows the
 ones newer than the version you have.
 
+## 1.1.7
+- Raspberry Pi camera (CSI ribbon, e.g. the HQ camera or Camera Module 3) now works as a TX camera: pick "Pi camera 0" in Config, TX media; Pi cam flip there turns the picture over or mirrors it
+- TX peak reduce is now on by default (Config, Modes) and uses almost no CPU: the OFDM modes' peaks come down about 2-3 dB, and any AVM receiver decodes it just the same
+- A reminder now and then at TX start: the OFDM modes' peaks are far above what a power meter shows, so take care not to overdrive amplifiers
+- SH: no more tone at the start of each burst or spike in the middle of the spectrum; the signal is level across its width (works with older versions at either end)
+- PTT (Raspberry Pi pin 40, Pluto GPO0) now comes on 1.5 s after the radio starts, so start-up spikes (LimeSDR) never reach an amplifier
+- Waterfall ID: fills the signal's width (callsigns up to 8 characters), with smaller gaps before the data
+- Config, About: Check for update button
+- Audio: no more occasional breaks when the chosen output isn't plugged in (Linux: played through PipeWire properly)
+- Windows: Airspy HF+ no longer crashes when the frequency is changed; a crash now leaves a report in the logs folder
+
 ## 1.1.6
 - Waterfall: tap the RX spectrum to switch to a waterfall (and back); AVM remembers which
 - Waterfall ID (Config, Station): "AVM" and your callsign over the mode, painted on anyone's waterfall at TX start (and every 10 minutes if chosen)

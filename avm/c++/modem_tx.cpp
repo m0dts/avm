@@ -141,6 +141,8 @@ struct Cfg {
     std::vector<cd> pilots;             // pilot_sequence
     std::vector<cd> preamble;
     std::vector<cd> frame;              // last build_frame / reduce_papr result
+    std::vector<cd> sym_freq;           // build_frame's: each symbol's carriers (n_data each, at the
+                                        // body's scale) -- reduce_papr starts from them, no transform
     bool full_training() const { return freq_int <= 1; }
     int period() const { return full_training() ? time_int : freq_int; }
     int symbol_len() const { return n_fft + n_cp; }
@@ -280,6 +282,7 @@ void build_frame(Cfg& c, const uint8_t* payload, size_t len) {
     fft::Plan<double>& pl = fft::plan<double>(n);
     std::vector<cd> freq(n), t(n);
     double sc = std::sqrt((double)n) / n;
+    c.sym_freq.resize((size_t)nsym * c.n_data);
     for (int s = 0; s < nsym; ++s) {
         std::fill(freq.begin(), freq.end(), cd(0, 0));
         const uint8_t* b = sym_bits[s].data();
@@ -293,6 +296,7 @@ void build_frame(Cfg& c, const uint8_t* payload, size_t len) {
                 b += bpc;
             }
             freq[c.bin_idx[j]] = v;
+            c.sym_freq[(size_t)s * c.n_data + j] = v * sc;
         }
         pl.inverse(freq.data(), t.data());
         cd* o = c.frame.data() + c.preamble.size() + (size_t)s * L;
@@ -301,54 +305,75 @@ void build_frame(Cfg& c, const uint8_t* payload, size_t len) {
     }
 }
 
+// TX peak reduction: clip and filter, receiver-transparent. Each OFDM symbol's
+// body, 2x oversampled, clipped to target_db over the frame's mean power, then
+// only its data carriers taken back (pilots and the unused bins as they were:
+// the clipping's out-of-band products filtered off, the pilots exact) -- the
+// receiver sees a little noise on the data carriers, nothing else.
+// Cheap: float transforms; a symbol with no peak over the threshold, or with
+// no data carriers (a training symbol), left exactly as built; the last pass's
+// result used straight from the frequency domain (no transform back to check).
 void reduce_papr(Cfg& c, double target_db, int iterations) {
     int n = c.n_fft, L = c.symbol_len(), cp = c.n_cp, pre = c.preamble_len();
     int nsym = ((int)c.frame.size() - pre) / L;
-    if (nsym <= 0 || target_db == 0) return;
+    if (nsym <= 0 || target_db == 0 || iterations < 1) return;
+    // oversampled: at least PAPR_OVERSAMPLE x, a size of 2s, 3s and 5s (n itself is the
+    // carrier span's: 298 = 2 x 149, 438 = 2 x 3 x 73... slow transforms)
     int on = PAPR_OVERSAMPLE * n;
+    for (;; ++on) {
+        int r = on;
+        for (int p : {2, 3, 5}) while (r % p == 0) r /= p;
+        if (r == 1) break;
+    }
+    bool have_freq = c.sym_freq.size() == (size_t)nsym * c.n_data;
     std::vector<int> idx_os(c.n_data);
     for (int j = 0; j < c.n_data; ++j) idx_os[j] = pymod(c.fft_bins[j], on);
-    fft::Plan<double>& pn = fft::plan<double>(n);
-    fft::Plan<double>& po = fft::plan<double>(on);
-    std::vector<cd> X((size_t)nsym * on, cd(0, 0)), x((size_t)nsym * on), tmp(on), body(n), F(n);
-    double inv_sqrt_n = 1 / std::sqrt((double)n);
+    fft::Plan<float>& pn = fft::plan<float>(n);
+    fft::Plan<float>& po = fft::plan<float>(on);
+    std::vector<cf> X(on), x(on), Y(on), B(n), b(n);
+    // the threshold: target_db over the symbols' mean power (the bodies as sent)
     double sum = 0;
     for (int s = 0; s < nsym; ++s) {
-        pn.forward(c.frame.data() + pre + (size_t)s * L + cp, body.data());
-        cd* Xs = X.data() + (size_t)s * on;
-        for (int j = 0; j < c.n_data; ++j) Xs[idx_os[j]] = body[c.bin_idx[j]] * inv_sqrt_n;
-        cd* xs = x.data() + (size_t)s * on;
-        po.inverse(Xs, xs);
-        for (int i = 0; i < on; ++i) {
-            xs[i] /= (double)on;
-            sum += xs[i].real() * xs[i].real() + xs[i].imag() * xs[i].imag();
-        }
+        const cd* p = c.frame.data() + pre + (size_t)s * L + cp;
+        for (int i = 0; i < n; ++i) sum += std::norm(p[i]);
     }
-    double thr2 = sum / ((double)nsym * on) * std::pow(10.0, target_db / 10);
-    for (int it = 0; it < iterations; ++it) {
-        for (int s = 0; s < nsym; ++s) {
-            cd* xs = x.data() + (size_t)s * on;
-            for (int i = 0; i < on; ++i) {
-                double pw = xs[i].real() * xs[i].real() + xs[i].imag() * xs[i].imag();
-                if (pw > thr2) xs[i] *= std::sqrt(thr2 / pw);
-            }
-            po.forward(xs, tmp.data());
-            cd* Xs = X.data() + (size_t)s * on;
-            for (int j = 0; j < c.n_data; ++j)
-                if (!c.is_pilot(s, j)) Xs[idx_os[j]] = tmp[idx_os[j]];
-            po.inverse(Xs, xs);
-            for (int i = 0; i < on; ++i) xs[i] /= (double)on;
-        }
-    }
-    double sq = std::sqrt((double)n) / n;
+    float thr2 = (float)(sum / ((double)nsym * n) * std::pow(10.0, target_db / 10));
+    // (transforms unnormalised: X = the body's bins / n, so inverse(X) on either
+    // size gives samples at the body's own scale, the oversampled ones between)
+    const float kn = 1.0f / (float)n, ko = 1.0f / (float)on;
     for (int s = 0; s < nsym; ++s) {
-        std::fill(F.begin(), F.end(), cd(0, 0));
-        cd* Xs = X.data() + (size_t)s * on;
-        for (int j = 0; j < c.n_data; ++j) F[c.bin_idx[j]] = Xs[idx_os[j]];
-        pn.inverse(F.data(), body.data());
+        if (c.n_data_carriers(s) == 0) continue;          // all pilots: nothing may change
         cd* o = c.frame.data() + pre + (size_t)s * L;
-        for (int i = 0; i < cp; ++i) o[i] = body[n - cp + i] * sq;
-        for (int i = 0; i < n; ++i) o[cp + i] = body[i] * sq;
+        std::fill(X.begin(), X.end(), cf(0, 0));
+        if (have_freq) {      // the modulator's own carriers
+            const cd* f = c.sym_freq.data() + (size_t)s * c.n_data;
+            for (int j = 0; j < c.n_data; ++j) X[idx_os[j]] = cf(f[j]);
+        } else {
+            for (int i = 0; i < n; ++i) b[i] = cf(o[cp + i]);
+            pn.forward(b.data(), B.data());
+            for (int j = 0; j < c.n_data; ++j) X[idx_os[j]] = B[c.bin_idx[j]] * kn;
+        }
+        po.inverse(X.data(), x.data());
+        bool changed = false;
+        for (int it = 0; it < iterations; ++it) {
+            bool clipped = false;
+            for (int i = 0; i < on; ++i) {
+                float pw = std::norm(x[i]);
+                if (pw > thr2) { x[i] *= std::sqrt(thr2 / pw); clipped = true; }
+            }
+            if (!clipped) break;                          // (no peak left: as it is)
+            changed = true;
+            po.forward(x.data(), Y.data());
+            for (int j = 0; j < c.n_data; ++j)            // the data carriers only: pilots exact, out-of-band gone
+                if (!c.is_pilot(s, j)) X[idx_os[j]] = Y[idx_os[j]] * ko;
+            if (it + 1 < iterations) po.inverse(X.data(), x.data());
+        }
+        if (!changed) continue;                           // no peak over: left exactly as built
+        std::fill(B.begin(), B.end(), cf(0, 0));
+        for (int j = 0; j < c.n_data; ++j) B[c.bin_idx[j]] = X[idx_os[j]];
+        pn.inverse(B.data(), b.data());
+        for (int i = 0; i < cp; ++i) o[i] = cd(b[n - cp + i]);
+        for (int i = 0; i < n; ++i) o[cp + i] = cd(b[i]);
     }
 }
 
@@ -593,9 +618,17 @@ struct SC {
             uws.push_back(uw);
         }
         std::vector<cf> q4 = gray_psk(4);
+        // the repeated short block: a Frank sequence (16 = 4 x 4, phases 2pi.m.n/4 -- QPSK),
+        // its 16 spectral lines all equal: the start ~5 dB over the data level, not the
+        // 8.5-13 dB of the random blocks this replaced (one line standing out). Each variant
+        // cyclically shifted (the lines' powers unchanged). The receiver only uses its
+        // periodicity, so receivers before and after this agree.
         for (int vnt = 0; vnt < SH_VARIANTS; ++vnt) {
             std::vector<cf> s;
-            for (int64_t v : g.integers(0, 4, SH_PERIOD)) s.push_back(q4[v]);
+            for (int i = 0; i < SH_PERIOD; ++i) {
+                int j = (i + 2 * vnt) % SH_PERIOD, m = j / 4, n = j % 4;
+                s.push_back(q4[(m * n) % 4 ^ (((m * n) % 4) >> 1)]);   // q4 is Gray-indexed: k ^ (k >> 1) holds angle k
+            }
             shorts.push_back(s);
         }
     }
@@ -606,7 +639,11 @@ struct SC {
             int v = 0;
             for (int b = 0; b < bps; ++b) {
                 size_t j = i * bps + b;
-                v = (v << 1) | (j < coded.size() ? coded[j] : 0);
+                // SH's last block filled past the code with the whitening PRBS, not zeros:
+                // a run of one symbol was a tone at the centre, ~17 dB over the data
+                // (hf_sch._data_blocks the same; S pads only a symbol's last bits)
+                int pad = sh ? prbs_table()[j % prbs_table().size()] : 0;
+                v = (v << 1) | (j < coded.size() ? coded[j] : pad);
             }
             out[i] = cst[v];
         }

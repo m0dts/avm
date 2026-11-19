@@ -141,17 +141,28 @@ MainWindow::MainWindow(bool demo, QWidget* parent) : QWidget(parent) {
     cpuTimer_.start(2000);
     connect(&usbTimer_, &QTimer::timeout, this, &MainWindow::usbTick);
     usbTimer_.start(1000);
+    // a newer AVM? checked at start-up (below) and from About's Check for update
+    updater_ = new Updater(this);
+    connect(updater_, &Updater::found, this, [this](const QString& v, const QString& notes) {
+        updateVersion_ = v;
+        updateNotes_ = notes;
+        update_->setText(QString::fromUtf8("⬆ v%1").arg(v));
+        update_->show();
+        guiLog("GUI", "update available: v" + v);
+        config_->setUpdateStatus("v" + v + " is available");
+        if (manualCheck_) { manualCheck_ = false; offerUpdate(); }
+    });
+    connect(updater_, &Updater::noUpdate, this, [this](const QString& why) {
+        manualCheck_ = false;
+        config_->setUpdateStatus(why);
+    });
+    connect(config_, &ConfigPage::checkUpdate, this, [this] {
+        manualCheck_ = true;
+        updater_->check();
+    });
     if (!qApp->arguments().contains("--screenshots") && !qApp->arguments().contains("--auto")) {
         startWeb();
         // is there a newer AVM? (a few seconds in: start-up first)
-        updater_ = new Updater(this);
-        connect(updater_, &Updater::found, this, [this](const QString& v, const QString& notes) {
-            updateVersion_ = v;
-            updateNotes_ = notes;
-            update_->setText(QString::fromUtf8("⬆ v%1").arg(v));
-            update_->show();
-            guiLog("GUI", "update available: v" + v);
-        });
         QTimer::singleShot(5000, updater_, &Updater::check);
     }
 }

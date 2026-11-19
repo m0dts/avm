@@ -35,6 +35,7 @@ struct Plan {
     std::vector<C> buf, scratch;
     // Bluestein
     bool blue = false;
+    std::vector<C> inv_tmp;     // inverse()'s conjugated input (Bluestein)
     std::vector<C> chirp, bfft, work, work2;
     std::shared_ptr<Plan<T>> sub;
 
@@ -204,9 +205,9 @@ struct Plan {
     // unscaled inverse
     void inverse(const C* in, C* out) {
         if (blue) {
-            std::vector<C> tmp(n);
-            for (int k = 0; k < n; ++k) tmp[k] = std::conj(in[k]);
-            forward(tmp.data(), out);
+            inv_tmp.resize(n);       // (a member: no allocation per call)
+            for (int k = 0; k < n; ++k) inv_tmp[k] = std::conj(in[k]);
+            forward(inv_tmp.data(), out);
         } else {
             for (int k = 0; k < n; ++k) out[k] = std::conj(in[k]);
             forward(out, out);

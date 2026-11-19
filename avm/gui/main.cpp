@@ -179,6 +179,8 @@ static int media_test(const QString& path, double seconds, bool camera) {
         c.video = "camera";
         c.audio = "mic";
         c.video_device = s.value("tx/video_device").toString().toStdString();
+        c.hflip = s.value("tx/picam_hflip", false).toBool();
+        c.vflip = s.value("tx/picam_vflip", false).toBool();
         c.audio_device = s.value("tx/audio_device").toString().toStdString();
 #ifdef _WIN32
         const char* fmt = "dshow";
@@ -233,6 +235,54 @@ static int media_test(const QString& path, double seconds, bool camera) {
     return 0;
 }
 
+#ifdef _WIN32
+// A crash on Windows: the fault (code, address, the DLL it was in) appended to the
+// session log, and a minidump (gui_logs/avm_crash.dmp) of every thread's stack
+#include <windows.h>
+#include <dbghelp.h>
+static wchar_t g_crash_log[MAX_PATH], g_crash_dmp[MAX_PATH];
+static LONG WINAPI avmCrashHandler(EXCEPTION_POINTERS* ep) {
+    static volatile LONG once = 0;
+    if (InterlockedExchange(&once, 1)) return EXCEPTION_CONTINUE_SEARCH;
+    void* addr = ep->ExceptionRecord->ExceptionAddress;
+    char mod[MAX_PATH] = "?";
+    HMODULE hm = nullptr;
+    uintptr_t off = (uintptr_t)addr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)addr, &hm)) {
+        GetModuleFileNameA(hm, mod, MAX_PATH);
+        off -= (uintptr_t)hm;
+    }
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char line[1024];
+    int n = _snprintf(line, sizeof line,
+                      "%02d:%02d:%02d.%03d CRASH: exception 0x%08lX at %p (%s +0x%llx), thread %lu -- minidump: gui_logs\avm_crash.dmp\n",
+                      st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, ep->ExceptionRecord->ExceptionCode, addr, mod,
+                      (unsigned long long)off, GetCurrentThreadId());
+    HANDLE f = CreateFileW(g_crash_log, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, 0, nullptr);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD w;
+        if (n > 0) WriteFile(f, line, (DWORD)n, &w, nullptr);
+        CloseHandle(f);
+    }
+    HANDLE d = CreateFileW(g_crash_dmp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (d != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei{GetCurrentThreadId(), ep, FALSE};
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), d,
+                          (MINIDUMP_TYPE)(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory), &mei, nullptr, nullptr);
+        CloseHandle(d);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void installCrashHandler(const QString& logDir) {
+    QString l = QDir::toNativeSeparators(logDir + "/cpp_session.log"), dm = QDir::toNativeSeparators(logDir + "/avm_crash.dmp");
+    l.toWCharArray(g_crash_log); g_crash_log[l.size()] = 0;
+    dm.toWCharArray(g_crash_dmp); g_crash_dmp[dm.size()] = 0;
+    SetUnhandledExceptionFilter(avmCrashHandler);
+}
+#endif
+
 int main(int argc, char** argv) {
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
@@ -257,6 +307,9 @@ int main(int argc, char** argv) {
             // always a session log (the modems' lines, the audio buffer each second), as the Python GUI's
             QDir().mkpath(avm::avmDir() + "/gui_logs");
             avm::setLogFile(avm::avmDir() + "/gui_logs/cpp_session.log");
+#ifdef _WIN32
+            installCrashHandler(avm::avmDir() + "/gui_logs");
+#endif
         }
     }
     bool touch =

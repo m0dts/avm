@@ -12,6 +12,7 @@ extern "C" {
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 #include <libavutil/time.h>
@@ -209,6 +210,8 @@ bool Capture::session(const CaptureInput& in, const FrameFn& frame, const LogFn&
     int ageN = 0;
 
     bool got = false;
+    int64_t lastPts = AV_NOPTS_VALUE;
+    bool firstPkt = false, firstDec = false, firstOut = false, sendErr = false, filtErr = false;   // (once each, in the log)
     double t0_wall = -1, t0_pts = 0;
     while (!stop_) {
         r = av_read_frame(P.fmt, P.pkt);
@@ -238,16 +241,45 @@ bool Capture::session(const CaptureInput& in, const FrameFn& frame, const LogFn&
         const FrameFn& out = D == &P.main ? frame : audio;
         // a stream's picture from its first keyframe (joined mid-stream: before it, only smears;
         // a test pattern's or camera's raw frames aren't flagged as keyframes)
-        if (in.reconnect && D->video && !D->keyed) {
+        if (in.reconnect && in.wait_key && D->video && !D->keyed) {
             if (!(P.pkt->flags & AV_PKT_FLAG_KEY)) { av_packet_unref(P.pkt); continue; }
             D->keyed = true;
         }
+        if (D == &P.main && !firstPkt) {
+            firstPkt = true;
+            log("[capture] first packet: " + std::to_string(P.pkt->size) + " bytes, pts " +
+                (P.pkt->pts == AV_NOPTS_VALUE ? std::string("none") : std::to_string(P.pkt->pts)));
+        }
         r = avcodec_send_packet(D->dec, P.pkt);
         av_packet_unref(P.pkt);
-        if (r < 0 && r != AVERROR(EAGAIN)) continue;
+        if (r < 0 && r != AVERROR(EAGAIN)) {
+            if (D == &P.main && !sendErr) { sendErr = true; log("[capture] decoder refused a packet: " + av_err(r)); }
+            continue;
+        }
         while (!stop_ && avcodec_receive_frame(D->dec, D->raw) == 0) {
+            if (D == &P.main && !firstDec) {
+                firstDec = true;
+                log("[capture] first decoded picture: " + std::to_string(D->raw->width) + "x" + std::to_string(D->raw->height) +
+                    " " + (av_get_pix_fmt_name((AVPixelFormat)D->raw->format) ? av_get_pix_fmt_name((AVPixelFormat)D->raw->format) : "?") +
+                    ", pts " + (D->raw->pts == AV_NOPTS_VALUE ? std::string("none") : std::to_string(D->raw->pts)));
+            }
             if (!D->graph) {
                 if (!build_graph(*D, D->raw, err)) { log("ERROR: " + err); return got; }
+            }
+            // a picture without a timestamp (raw MJPEG: the Pi camera's rpicam-vid) given one --
+            // FFmpeg's best guess, else when it was read: the fps filter drops untimed frames
+            if (D->raw->pts == AV_NOPTS_VALUE) {
+                D->raw->pts = D->raw->best_effort_timestamp;
+                if (D->raw->pts == AV_NOPTS_VALUE)
+                    D->raw->pts = av_rescale_q(av_gettime_relative(), AVRational{1, 1000000}, D->st->time_base);
+            }
+            // a live source whose own timestamps are no use (raw MJPEG counts 1 per picture
+            // in a 1/1200000 time base: the fps filter saw them all at once and passed none):
+            // each picture timed as it arrives, always moving on
+            if (in.wall_clock && D == &P.main) {
+                int64_t t = av_rescale_q(av_gettime_relative(), AVRational{1, 1000000}, D->st->time_base);
+                if (lastPts != AV_NOPTS_VALUE && t <= lastPts) t = lastPts + 1;
+                D->raw->pts = lastPts = t;
             }
             // -re: no faster than its own timestamps
             if (in.realtime && D == &P.main && D->raw->pts != AV_NOPTS_VALUE) {
@@ -257,9 +289,18 @@ bool Capture::session(const CaptureInput& in, const FrameFn& frame, const LogFn&
                 double wait = (t - t0_pts) - (now - t0_wall);
                 if (wait > 0) av_usleep((unsigned)(wait * 1e6));
             }
-            if (av_buffersrc_add_frame_flags(D->src, D->raw, AV_BUFFERSRC_FLAG_KEEP_REF) < 0) { av_frame_unref(D->raw); continue; }
+            int fr = av_buffersrc_add_frame_flags(D->src, D->raw, AV_BUFFERSRC_FLAG_KEEP_REF);
+            if (fr < 0) {
+                if (D == &P.main && !filtErr) { filtErr = true; log("[capture] filter refused a picture: " + av_err(fr)); }
+                av_frame_unref(D->raw);
+                continue;
+            }
             av_frame_unref(D->raw);
             while (av_buffersink_get_frame(D->sink, D->out) >= 0) {
+                if (D == &P.main && !firstOut) {
+                    firstOut = true;
+                    log("[capture] first picture out of the filters: " + std::to_string(D->out->width) + "x" + std::to_string(D->out->height));
+                }
                 got = true;
                 out(D->out);
                 av_frame_unref(D->out);

@@ -1,5 +1,10 @@
 #include "media_tx.h"
 
+#include <QProcess>
+#include <QRegularExpression>
+#include <QStandardPaths>
+
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -12,6 +17,10 @@
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char** environ;
 #endif
 
 #include "codec2.h"
@@ -99,6 +108,7 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
     fr_ = frCreate_(c.fragment_size, c.station_id.empty() ? nullptr : c.station_id.c_str(), (int)(time(nullptr) & 0xFF));
     if (!message_.empty()) frSetMessage_(fr_, message_.data(), (int)message_.size());
     frames_ = 0;
+    first_pic_ = size_warned_ = false;
     enc_s_ = 0;
     audio_pkts_ = 0;
     audio_watch_ = c.audio == "mic";
@@ -165,6 +175,17 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
             in.format = "dshow";
             in.url = "video=" + (c.video_device.empty() ? std::string("Integrated Camera") : c.video_device);
 #else
+          if (isPiCamera(c.video_device)) {
+            // a Raspberry Pi camera (CSI ribbon): libcamera's, not a plain V4L2 device -- the
+            // Pi's own rpicam-vid runs it, its MJPEG read here through a pipe (no network port)
+            cfg_hflip_ = c.hflip;
+            cfg_vflip_ = c.vflip;
+            int fd = startPiCamera(piCameraIndex(c.video_device), W, H, c.fps);
+            if (fd < 0) { stop(); return false; }
+            in.format = "mjpeg";
+            in.url = "pipe:" + std::to_string(fd);
+            in.wall_clock = true;               // (raw MJPEG's own timestamps unusable: timed on arrival)
+          } else {
             in.format = "v4l2";
             in.url = c.video_device.empty() ? std::string("/dev/video0") : c.video_device;
             std::string size = v4l2_capture_size(in.url, W, H);
@@ -173,6 +194,7 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
                 in.options["video_size"] = size;
                 log_("[video] camera at " + size);
             }
+          }
 #endif
             in.filter = fit;
         }
@@ -258,9 +280,103 @@ bool MediaTx::start(const MediaTxConfig& c, OutFn out, LogFn log) {
     return true;
 }
 
+#ifndef _WIN32
+// ---- the Raspberry Pi camera: rpicam-vid (libcamera-vid on older Pi OS) as a helper
+// process, its own log in /tmp/avm_rpicam.log
+static std::string rpicamProgram() {
+    for (const char* p : {"rpicam-vid", "libcamera-vid"}) {
+        QString f = QStandardPaths::findExecutable(p);
+        if (!f.isEmpty()) return f.toStdString();
+    }
+    return {};
+}
+
+std::vector<std::string> piCameras() {
+    std::vector<std::string> out;
+    std::string prog = rpicamProgram();
+    if (prog.empty()) return out;
+    QProcess p;
+    p.setProcessChannelMode(QProcess::MergedChannels);
+    p.start(QString::fromStdString(prog), {"--list-cameras"});
+    if (!p.waitForFinished(5000)) { p.kill(); p.waitForFinished(500); return out; }
+    // "0 : imx708 [4608x2592 10-bit RGGB] (/base/axi/pcie@120000/rp1/i2c@88000/imx708@1a)"
+    static const QRegularExpression re(R"(^\s*(\d)\s*:\s*(\S+))");
+    for (const QString& l : QString::fromUtf8(p.readAll()).split('\n')) {
+        auto mt = re.match(l);
+        if (mt.hasMatch()) out.push_back(("Pi camera " + mt.captured(1) + ": " + mt.captured(2)).toStdString());
+    }
+    return out;
+}
+
+int MediaTx::startPiCamera(int index, int w, int h, double fps) {
+    stopPiCamera();
+    std::string prog = rpicamProgram();
+    if (prog.empty()) { log_("ERROR: Pi camera: rpicam-vid not found (sudo apt install rpicam-apps)"); return -1; }
+    char f[32];
+    snprintf(f, sizeof f, "%g", fps);
+    std::vector<std::string> args = {prog, "-t", "0", "-n", "--camera", std::to_string(index), "--codec", "mjpeg",
+                                     "-q", "85", "--width", std::to_string(w), "--height", std::to_string(h),
+                                     "--framerate", f, "--flush", "-o", "-"};
+    if (cfg_hflip_) args.push_back("--hflip");
+    if (cfg_vflip_) args.push_back("--vflip");
+    std::vector<char*> argv;
+    for (auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    int p[2];
+    if (pipe(p) != 0) { log_(std::string("ERROR: Pi camera: pipe: ") + std::strerror(errno)); return -1; }
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);               // (the read end stays here)
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, p[1], 1);  // its pictures: stdout, into the pipe
+    posix_spawn_file_actions_addopen(&fa, 2, "/tmp/avm_rpicam.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_addclose(&fa, p[0]);
+    pid_t pid = -1;
+    int r = posix_spawn(&pid, prog.c_str(), &fa, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(p[1]);
+    if (r != 0) {
+        close(p[0]);
+        log_("ERROR: Pi camera: could not start " + prog + ": " + std::strerror(r));
+        return -1;
+    }
+    picam_pid_ = pid;
+    picam_fd_ = p[0];
+    std::string cmd;
+    for (auto& a : args) cmd += (cmd.empty() ? "" : " ") + a;
+    log_("[video] Pi camera " + std::to_string(index) + ": " + cmd + " (its log: /tmp/avm_rpicam.log)");
+    return p[0];
+}
+
+void MediaTx::stopPiCamera() {
+    if (picam_pid_ <= 0) {
+        if (picam_fd_ >= 0) { close(picam_fd_); picam_fd_ = -1; }
+        return;
+    }
+    kill(picam_pid_, SIGTERM);
+    for (int i = 0; i < 30; ++i) {                  // (up to 1.5 s, then killed)
+        if (waitpid(picam_pid_, nullptr, WNOHANG) == picam_pid_) { picam_pid_ = -1; break; }
+        usleep(50000);
+    }
+    if (picam_pid_ > 0) {
+        kill(picam_pid_, SIGKILL);
+        waitpid(picam_pid_, nullptr, 0);
+        picam_pid_ = -1;
+    }
+    // (the capture has seen the pipe end by now; its read end closed once it's stopped: stop())
+}
+#else
+std::vector<std::string> piCameras() { return {}; }
+int MediaTx::startPiCamera(int, int, int, double) { return -1; }
+void MediaTx::stopPiCamera() {}
+#endif
+
 void MediaTx::stop() {
     stop_ = true;
+    stopPiCamera();         // (first: the pipe's end wakes the capture's read)
     video_cap_.stop();
+#ifndef _WIN32
+    if (picam_fd_ >= 0) { close(picam_fd_); picam_fd_ = -1; }
+#endif
     audio_cap_.stop();
     stream_cap_.stop();
     if (asm_th_.joinable()) asm_th_.join();
@@ -301,7 +417,11 @@ void MediaTx::setMessage(const QString& text) {
 // a picture: encoded to exactly frame_bytes, queued for the framer
 void MediaTx::videoFrame(AVFrame* f) {
     const int W = cfg_.width, H = cfg_.height;
-    if (f->width != W || f->height != H) return;
+    if (f->width != W || f->height != H) {
+        if (!size_warned_) { size_warned_ = true; log_("[video] picture " + std::to_string(f->width) + "x" + std::to_string(f->height) + " not " + std::to_string(W) + "x" + std::to_string(H) + ": dropped"); }
+        return;
+    }
+    if (!first_pic_) { first_pic_ = true; log_("[video] first picture in"); }
     stream_vlast_ = mono();
     std::lock_guard<std::mutex> e(enc_mu_);
     for (int r = 0; r < H; ++r) std::memcpy(&y_[(size_t)r * W], f->data[0] + (size_t)r * f->linesize[0], W);

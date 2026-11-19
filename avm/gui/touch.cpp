@@ -456,7 +456,7 @@ Notices& Notices::get() {
 }
 
 void Notices::add(const QString& source, const QString& text) {
-    QString t = text.simplified().left(300);
+    QString t = text.simplified().left(700);
     if (t.isEmpty()) return;
     QString now = QTime::currentTime().toString("HH:mm:ss");
     if (!items_.isEmpty() && items_.last().source == source && items_.last().text == t) {

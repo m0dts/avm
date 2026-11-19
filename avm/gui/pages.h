@@ -1,6 +1,7 @@
 // pages.h -- the three pages (touch_rx_page.py, touch_tx_page.py, the
 // config page) and the process wrapper that runs the modem behind them.
 #pragma once
+#include <future>
 #include <QDialog>
 #include <QPointer>
 #include <atomic>
@@ -58,6 +59,11 @@ private:
     QByteArray partial_;
     bool stopping_ = false;
     void* eng_ = nullptr;               // the in-process engine
+    struct EngineCtx* ctx_ = nullptr;   // its callbacks' context (cut off once it's stopped)
+    unsigned gen_ = 0;
+    // the last engine's close, still under way in the background (a radio slow to
+    // close): the next start waits for it -- opening the radio twice crashed in its driver
+    std::shared_future<void> closing_;
     struct EngineApi* api_ = nullptr;
     // the engine is created on a worker thread (opening a radio takes a second or
     // two, and the GUI stays live meanwhile); input written before it's up waits
@@ -282,7 +288,9 @@ public:
     // from the web page (web.h): as the KiwiSDR row / the Image row's Choose
     void setKiwi(const QString& server);
     void setImage(const QString& path);
+    void setUpdateStatus(const QString& text);   // About's line under Check for update
 signals:
+    void checkUpdate();           // About: Check for update pressed
     void modeTypeChanged();
     void callsignChanged();
     void rxSettingChanged();
@@ -291,6 +299,8 @@ signals:
     void duplexChanged();
     void spectrumAveragesChanged(int n);
 private:
+    QLabel* updateStatus_ = nullptr;
+    QPushButton* updateBtn_ = nullptr;
     QListWidget* list_;
     QStackedWidget* stack_;
     TextButton* kiwi_ = nullptr;
